@@ -114,10 +114,10 @@ class WebsiteTools:
 
         # Scope validation is automatically performed by RequestExecutor
         start_time = time.time()
-        resp = self.executor.request(
+        resp = self.executor.send_request(
             method=norm_method,
             url=target_url,
-            headers=payload.headers
+            custom_headers=payload.headers
         )
         duration_ms = (time.time() - start_time) * 1000.0
 

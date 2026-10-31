@@ -63,7 +63,9 @@ from backend.tools.report_tools import ReportTools
 from backend.utils.helpers import (
     AuthScopeException,
     InvalidDataError,
+    InvalidTargetURLError,
     ScopeViolationError,
+    UnsupportedMethodError,
 )
 from backend.utils.logger import get_logger
 
@@ -311,7 +313,7 @@ class ToolRegistry:
                 data=output_dict
             )
 
-        except ScopeViolationError as scope_err:
+        except (ScopeViolationError, InvalidTargetURLError, UnsupportedMethodError) as scope_err:
             duration_ms = (time.time() - start_time) * 1000.0
             error_msg = f"Scope violation: {str(scope_err)}"
             self._emit_event(
