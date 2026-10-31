@@ -188,3 +188,4 @@ def test_bfla_via_authorization_tools():
     assert output.is_confirmed is True
     assert output.verdict == AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS.value
     assert output.vulnerability_title == "Broken Function Level Authorization (BFLA)"
+
