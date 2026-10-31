@@ -1,15 +1,20 @@
-"""FastAPI Application for AuthScope — Minimal Agent Interface Backend.
+"""FastAPI Application for AuthScope — AI Agent & Assessment API Backend.
 
-Provides HTTP REST and Server-Sent Events (SSE) endpoints for launching security assessments,
-streaming real-time operational events and markdown text chunks, and retrieving persisted
-assessment reports.
+Connects:
+1. Member 1: Gemini AI Agent Connector.
+2. Member 2: Tool Registry.
+3. Member 3: Assessment Memory & RAG Knowledge Base.
+4. Security Assessment Engine (7-stage deterministic execution).
+
+Provides HTTP REST and Server-Sent Events (SSE) endpoints streaming structured
+agent operational telemetry, thoughts, plans, tool actions, and findings.
 """
 
 from datetime import datetime, timezone
 import json
 import uuid
 import asyncio
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 from pathlib import Path
 import sys
 
@@ -26,6 +31,7 @@ from backend.core.assessment_engine import (
 )
 from backend.core.scope_guard import ScopeGuard
 from backend.core.session_manager import Role, SessionManager
+from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict
 from backend.storage.finding_repository import FindingRepository
 from backend.storage.models import (
@@ -36,6 +42,9 @@ from backend.storage.models import (
     ScanSessionRecord,
     StageStatus,
 )
+from backend.agent.gemini_agent import GeminiAgent
+from backend.agent.memory import AssessmentMemory
+from backend.agent.tools import ToolRegistry
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -64,6 +73,14 @@ class CreateAssessmentRequest(BaseModel):
     target_url: str = Field(
         default="http://localhost:3000",
         description="Target base URL to test (must be an explicitly allowlisted scope target).",
+    )
+    github_repo: Optional[str] = Field(
+        default=None,
+        description="Optional repository URL for source code mapping.",
+    )
+    source_archive_path: Optional[str] = Field(
+        default=None,
+        description="Optional archive file path for static analysis.",
     )
 
 
@@ -181,6 +198,112 @@ def _format_event_message_chunk(event: AssessmentEvent, finding: Optional[Findin
     return None
 
 
+def _map_event_to_agent_sse(
+    event: AssessmentEvent,
+    assessment_id: str,
+    agent: GeminiAgent,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """Maps internal assessment events to structured AI agent events."""
+    etype = event.event_type
+    results: List[Tuple[str, Dict[str, Any]]] = []
+
+    if etype == EventType.SCOPE_VALIDATION_STARTED.value:
+        results.append(("tool_started", {
+            "type": "tool_started",
+            "tool": "check_scope",
+            "message": "Validating target against ScopeGuard allowlist",
+            "assessment_id": assessment_id,
+        }))
+    elif etype == EventType.SCOPE_VALIDATION_COMPLETED.value:
+        results.append(("tool_completed", {
+            "type": "tool_completed",
+            "tool": "check_scope",
+            "message": "Target verified within authorized scope (localhost:3000)",
+            "assessment_id": assessment_id,
+        }))
+    elif etype == EventType.CONNECTION_COMPLETED.value:
+        results.append(("agent_thinking", {
+            "type": "agent_thinking",
+            "message": "Target application connection verified; mapping attack surface routes",
+            "assessment_id": assessment_id,
+        }))
+    elif etype == EventType.ENDPOINT_DISCOVERY_COMPLETED.value:
+        count = event.metadata.get("endpoints_discovered", 0)
+        results.append(("tool_completed", {
+            "type": "tool_completed",
+            "tool": "discover_routes",
+            "message": f"Discovered {count} attack surface routes",
+            "assessment_id": assessment_id,
+        }))
+    elif etype == EventType.AUTHORIZATION_TEST_STARTED.value:
+        results.append(("tool_started", {
+            "type": "tool_started",
+            "tool": "compare_access",
+            "message": "Executing authorization differential testing across discovered endpoints",
+            "assessment_id": assessment_id,
+        }))
+    elif etype == EventType.AUTHORIZATION_TEST_COMPLETED.value:
+        tested = event.metadata.get("tested_count", 0)
+        results.append(("tool_completed", {
+            "type": "tool_completed",
+            "tool": "compare_access",
+            "message": f"Completed authorization differential analysis across {tested} endpoints",
+            "assessment_id": assessment_id,
+        }))
+    elif etype in (EventType.SUSPICIOUS_BEHAVIOR_DETECTED.value, EventType.FINDING_CONFIRMED.value):
+        ep = event.metadata.get("endpoint", "")
+        sev = event.metadata.get("severity", "HIGH" if etype == EventType.FINDING_CONFIRMED.value else "MEDIUM")
+        cat = event.metadata.get("vulnerability_candidate", "BOLA_IDOR" if etype == EventType.FINDING_CONFIRMED.value else "BFLA")
+        results.append(("finding_discovered", {
+            "type": "finding_discovered",
+            "endpoint": ep,
+            "category": cat,
+            "severity": sev,
+            "message": f"Authorization discrepancy identified on {ep}",
+            "assessment_id": assessment_id,
+        }))
+
+        # Generate cognitive plain-English explanation via Agent / RAG Memory
+        expl_data = agent.generate_explanation(
+            endpoint=ep,
+            vulnerability_category=cat,
+            validation_status="CONFIRMED" if etype == EventType.FINDING_CONFIRMED.value else "SUSPICIOUS",
+            evidence_summary=event.message,
+        )
+        results.append(("explanation_generated", {
+            "type": "explanation_generated",
+            "endpoint": ep,
+            "category": cat,
+            "explanation": expl_data["explanation"],
+            "remediation_code": expl_data.get("remediation_code"),
+            "assessment_id": assessment_id,
+        }))
+    elif etype == EventType.EVIDENCE_VALIDATION_COMPLETED.value:
+        results.append(("evidence_validated", {
+            "type": "evidence_validated",
+            "message": "Cryptographic evidence artifacts signed and verified (SHA-256)",
+            "assessment_id": assessment_id,
+            "confirmed_count": event.metadata.get("confirmed_count", 0),
+            "suspicious_count": event.metadata.get("suspicious_count", 0),
+        }))
+    elif etype == EventType.ASSESSMENT_COMPLETED.value:
+        results.append(("assessment_completed", {
+            "type": "assessment_completed",
+            "message": "Assessment concluded successfully",
+            "assessment_id": assessment_id,
+            "confirmed_findings": event.metadata.get("confirmed_findings", 0),
+            "suspicious_results": event.metadata.get("suspicious_results", 0),
+        }))
+    elif etype == EventType.ASSESSMENT_FAILED.value:
+        results.append(("assessment_failed", {
+            "type": "assessment_failed",
+            "message": event.message,
+            "assessment_id": assessment_id,
+        }))
+
+    return results
+
+
 @app.get("/api/health")
 def health_check() -> Dict[str, Any]:
     """Health check endpoint."""
@@ -194,7 +317,7 @@ def health_check() -> Dict[str, Any]:
 
 @app.post("/api/assessments", response_model=CreateAssessmentResponse, status_code=status.HTTP_201_CREATED)
 def create_assessment(req: CreateAssessmentRequest) -> CreateAssessmentResponse:
-    """Validates the target URL with ScopeGuard and initializes an assessment session."""
+    """Validates target URL with ScopeGuard and initializes an assessment session."""
     target_clean = (req.target_url or "").strip().rstrip("/")
     if not target_clean:
         raise HTTPException(
@@ -240,7 +363,7 @@ def create_assessment(req: CreateAssessmentRequest) -> CreateAssessmentResponse:
 
 @app.get("/api/assessments/{assessment_id}/stream")
 async def stream_assessment(assessment_id: str) -> StreamingResponse:
-    """Server-Sent Events (SSE) endpoint streaming real operational events and markdown text."""
+    """Server-Sent Events (SSE) endpoint streaming real operational events, thoughts, plans, and markdown."""
     repo = FindingRepository()
     session = repo.get_scan_session(assessment_id)
     if not session:
@@ -254,6 +377,13 @@ async def stream_assessment(assessment_id: str) -> StreamingResponse:
         token = CancellationToken()
         active_tokens[assessment_id] = token
 
+    # Initialize Memory, Tool Registry, and Gemini Agent
+    memory = AssessmentMemory(assessment_id=session.id, target_url=session.target_url, repository=repo)
+    scope_guard = ScopeGuard()
+    executor = RequestExecutor(scope_guard=scope_guard)
+    tools = ToolRegistry(scope_guard=scope_guard, executor=executor, memory=memory)
+    agent = GeminiAgent(tool_registry=tools, memory=memory, scope_guard=scope_guard)
+
     async def sse_generator() -> AsyncGenerator[str, None]:
         # If the assessment is already completed or cancelled, replay stored events & markdown
         if session.status in ("COMPLETED", "FAILED", "CANCELLED"):
@@ -266,7 +396,15 @@ async def stream_assessment(assessment_id: str) -> StreamingResponse:
             yield f"event: done\ndata: {json.dumps({'status': session.status, 'summary': session.summary_text})}\n\n"
             return
 
-        # Otherwise, run live assessment engine stream
+        # 1. Emit assessment_started
+        yield f"event: assessment_started\ndata: {json.dumps({'type': 'assessment_started', 'message': f'Assessment initialized for {session.target_url}', 'assessment_id': assessment_id, 'target_url': session.target_url})}\n\n"
+
+        # 2. Agent Strategic Plan
+        plan_res = agent.plan_assessment(session.target_url)
+        yield f"event: agent_thinking\ndata: {json.dumps({'type': 'agent_thinking', 'message': f'Formulating authorization testing strategy for {session.target_url}.', 'assessment_id': assessment_id})}\n\n"
+        yield f"event: agent_plan\ndata: {json.dumps({'type': 'agent_plan', 'message': plan_res['plan_summary'], 'steps': plan_res['steps'], 'assessment_id': assessment_id})}\n\n"
+
+        # Run live assessment engine stream
         engine = AssessmentEngine(repository=repo)
         gen = engine.stream_assessment(target_url=session.target_url, cancel_token=token)
 
@@ -277,21 +415,27 @@ async def stream_assessment(assessment_id: str) -> StreamingResponse:
                 if event is None:
                     break
 
-                # 1. Stream structured operational activity event
+                # A. Stream structured agent events (tool_started, agent_thinking, finding_discovered, etc.)
+                agent_events = _map_event_to_agent_sse(event, assessment_id, agent)
+                for event_type, payload in agent_events:
+                    yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+                # B. Stream structured operational activity event (backward compatibility)
                 event_json = event.model_dump_json()
                 yield f"event: activity\ndata: {event_json}\n\n"
 
-                # 2. Stream conversational markdown chunk
+                # C. Stream conversational markdown chunk
                 msg_chunk = _format_event_message_chunk(event)
                 if msg_chunk:
                     yield f"event: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
 
                 # Brief async pause to yield to event loop and simulate natural reading cadence
-                await asyncio.sleep(0.08)
+                await asyncio.sleep(0.06)
 
         except Exception as exc:
             logger.error(f"Error during SSE assessment stream: {exc}")
-            err_data = json.dumps({"error": str(exc)})
+            err_data = json.dumps({"type": "assessment_failed", "error": str(exc), "assessment_id": assessment_id})
+            yield f"event: assessment_failed\ndata: {err_data}\n\n"
             yield f"event: error\ndata: {err_data}\n\n"
         finally:
             active_tokens.pop(assessment_id, None)
@@ -372,7 +516,6 @@ def list_assessments(limit: int = Query(default=10, ge=1, le=50)) -> List[Dict[s
     repo = FindingRepository()
     sessions = repo.list_scan_sessions(limit=limit)
     return [s.model_dump(mode="json") for s in sessions]
-
 
 
 @app.get("/", include_in_schema=False)

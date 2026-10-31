@@ -322,6 +322,51 @@ export default function Home() {
         }
       });
 
+      // Listen for structured AI agent operational events
+      const agentEventNames = [
+        "assessment_started",
+        "agent_thinking",
+        "agent_plan",
+        "tool_started",
+        "tool_completed",
+        "tool_failed",
+        "finding_discovered",
+        "evidence_validated",
+        "source_location_found",
+        "explanation_generated",
+        "assessment_completed",
+        "assessment_failed",
+      ];
+
+      agentEventNames.forEach((ename) => {
+        es.addEventListener(ename, (e: MessageEvent) => {
+          try {
+            const payload = JSON.parse(e.data);
+            const evItem: AssessmentActivityEvent = {
+              assessment_id: payload.assessment_id || scanId,
+              event_type: ename,
+              stage: payload.tool ? `tool_${payload.tool}` : "agent_reasoning",
+              message: payload.message || `${ename}: ${payload.tool || payload.category || ""}`,
+              timestamp: payload.timestamp || new Date().toISOString(),
+              metadata: payload,
+            };
+            setActivityEvents((prev) => {
+              const duplicate = prev.some(
+                (p) => p.event_type === ename && p.message === evItem.message
+              );
+              return duplicate ? prev : [...prev, evItem];
+            });
+
+            if (ename === "finding_discovered") {
+              setStatus("findings_discovered");
+              fetchAssessmentDetails(scanId);
+            }
+          } catch (err) {
+            console.warn(`Failed to parse ${ename} event:`, err);
+          }
+        });
+      });
+
       es.addEventListener("done", (e: MessageEvent) => {
         try {
           const doneData = JSON.parse(e.data);
@@ -559,7 +604,7 @@ export default function Home() {
                   type="text"
                   value={targetUrl}
                   onChange={(e) => setTargetUrl(e.target.value)}
-                  placeholder="http://localhost:3000"
+                  placeholder="Enter website URL to assess..."
                   className="flex-1 bg-transparent px-4 py-3 text-sm sm:text-base text-white placeholder-gray-500 focus:outline-none font-mono"
                 />
                 <button

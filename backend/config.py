@@ -37,7 +37,9 @@ class Settings(BaseSettings):
     admin_password: str = Field(default="admin_password_placeholder", alias="ADMIN_PASSWORD")
     admin_token: str = Field(default="", alias="ADMIN_TOKEN")
 
-    # AI Configuration (Claude)
+    # AI Configuration (Gemini & Claude)
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_MODEL")
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-3-5-sonnet-20241022", alias="ANTHROPIC_MODEL")
     anthropic_max_tokens: int = Field(default=2048, alias="ANTHROPIC_MAX_TOKENS")
