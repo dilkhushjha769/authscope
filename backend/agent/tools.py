@@ -161,6 +161,7 @@ class ToolRegistry:
         self.register_tool("check_scope", self._handle_check_scope)
         self.register_tool("compare_access", self._handle_compare_access)
         self.register_tool("discover_routes", self._handle_discover_routes)
+        self.register_tool("discover_endpoints", self._handle_discover_routes)
         self.register_tool("retrieve_security_knowledge", self._handle_retrieve_knowledge)
         self.register_tool("validate_evidence_artifact", self._handle_validate_evidence)
 
@@ -255,14 +256,16 @@ class ToolRegistry:
         }
 
     def _handle_discover_routes(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        base_url = args.get("base_url", "")
+        base_url = args.get("base_url") or args.get("target_url") or "http://localhost:3000"
         from backend.scanner.endpoint_discovery import EndpointDiscovery
-        discovery = EndpointDiscovery(executor=self.executor, scope_guard=self.scope_guard)
-        routes = discovery.discover_routes(base_url)
+        discovery = EndpointDiscovery(base_url=base_url, scope_guard=self.scope_guard)
+        routes = discovery.discover_known_routes()
         return {
             "base_url": base_url,
             "discovered_count": len(routes),
-            "routes": [r.model_dump() for r in routes],
+            "endpoint_count": len(routes),
+            "discovered_endpoints": [getattr(r, "path", str(r)) for r in routes],
+            "routes": [r.model_dump(mode="json") if hasattr(r, "model_dump") else str(r) for r in routes],
             "summary": f"Discovered {len(routes)} routes on target application",
         }
 

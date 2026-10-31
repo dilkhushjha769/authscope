@@ -759,16 +759,17 @@ async def stream_assessment(
 @app.post("/api/assessments/{assessment_id}/stop")
 def stop_assessment(assessment_id: str) -> Dict[str, Any]:
     """Signals an in-progress assessment to safely cancel execution."""
-    token = task_manager.get_token(assessment_id)
-    if not token or not task_manager.is_running(assessment_id):
-        repo = FindingRepository()
-        session = repo.get_scan_session(assessment_id)
-        if not session:
-            raise HTTPException(status_code=404, detail=f"Assessment {assessment_id} not found.")
-        return {"status": session.status, "message": "Assessment was not actively running."}
+    token = active_tokens.get(assessment_id) or task_manager.get_token(assessment_id)
+    if token:
+        token.cancel()
+        task_manager.cancel(assessment_id)
+        return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
 
-    token.cancel()
-    return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
+    repo = FindingRepository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Assessment {assessment_id} not found.")
+    return {"status": session.status, "message": "Assessment was not actively running."}
 
 @app.post("/api/assessments/{assessment_id}/retry", response_model=CreateAssessmentResponse)
 async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
