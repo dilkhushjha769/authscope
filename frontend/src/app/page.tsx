@@ -34,7 +34,11 @@ import {
   FindingItem,
   TargetCheckResponse,
 } from "@/types/assessment";
-import { GitHubCodeScanPanel } from "@/components/GitHubCodeScanPanel";
+import {
+  GitHubCodeScanPanel,
+  GitHubFinding,
+  GitHubScan,
+} from "@/components/GitHubCodeScanPanel";
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
@@ -290,6 +294,14 @@ const DEMO_FINDINGS: FindingItem[] = [
       evidence_summary: [],
       what_is_not_yet_proven: [],
     },
+    source_code_available: true,
+    source_repository: "juice-shop/juice-shop",
+    source_file: "routes/login.ts",
+    source_start_line: 34,
+    source_end_line: 49,
+    source_function: "login()",
+    line_numbers: "34-49",
+    vulnerable_snippet: `models.sequelize.query(\`SELECT * FROM Users WHERE email = '\${req.body.email || ''}' AND password = '\${security.hash(req.body.password || '')}' AND deletedAt IS NULL\`, { model: UserModel, plain: true })`,
     evidence: {
       id: "ev-demo-1",
       finding_id: "demo-1",
@@ -354,6 +366,14 @@ const DEMO_FINDINGS: FindingItem[] = [
       evidence_summary: [],
       what_is_not_yet_proven: [],
     },
+    source_code_available: true,
+    source_repository: "juice-shop/juice-shop",
+    source_file: "routes/basket.ts",
+    source_start_line: 18,
+    source_end_line: 31,
+    source_function: "retrieveBasket()",
+    line_numbers: "18-31",
+    vulnerable_snippet: `BasketModel.findOne({ where: { id: req.params.id }, include: [{ model: ProductModel, paranoid: false, as: 'Products' }] })`,
     evidence: {
       id: "ev-demo-2",
       finding_id: "demo-2",
@@ -418,6 +438,14 @@ const DEMO_FINDINGS: FindingItem[] = [
       evidence_summary: [],
       what_is_not_yet_proven: [],
     },
+    source_code_available: true,
+    source_repository: "juice-shop/juice-shop",
+    source_file: "server.ts",
+    source_start_line: 214,
+    source_end_line: 221,
+    source_function: "servePublicFtp()",
+    line_numbers: "214-221",
+    vulnerable_snippet: `app.use('/ftp', serveIndexMiddleware, serveIndex('ftp', { icons: true }))`,
     evidence: {
       id: "ev-demo-3",
       finding_id: "demo-3",
@@ -482,6 +510,14 @@ const DEMO_FINDINGS: FindingItem[] = [
       evidence_summary: [],
       what_is_not_yet_proven: [],
     },
+    source_code_available: true,
+    source_repository: "juice-shop/juice-shop",
+    source_file: "routes/redirect.ts",
+    source_start_line: 19,
+    source_end_line: 33,
+    source_function: "performRedirect()",
+    line_numbers: "19-33",
+    vulnerable_snippet: `const toUrl: string = req.query.to as string;\nres.redirect(toUrl);`,
     evidence: {
       id: "ev-demo-4",
       finding_id: "demo-4",
@@ -567,6 +603,285 @@ export default function Home() {
   // Refs
   const eventSourceRef = useRef<EventSource | null>(null);
   const connectSSERef = useRef<((scanId: string) => void) | null>(null);
+  const githubEventSourceRef = useRef<EventSource | null>(null);
+
+  /**
+   * Maps a GitHubFinding (from AST + Gemini source code scanner) into the unified FindingItem
+   * so GitHub branch scans render directly on the main dashboard report with full file/line location,
+   * proof, Gemini API #2 code fixes, Gemini API #1 Q&A, and PDF export.
+   */
+  const mapGitHubFindingToDashboard = useCallback(
+    (gf: GitHubFinding, scanId: string): FindingItem => {
+      const review = gf.ai_review;
+      const categoryClean = (gf.vulnerability_category || "SECURITY_ISSUE").replaceAll("_", " ");
+      const fileLoc = `${gf.file_path}:${gf.start_line}-${gf.end_line}`;
+      const ghUrl =
+        gf.github_url ||
+        `https://github.com/${gf.repository}/blob/${gf.commit_sha}/${gf.file_path}#L${gf.start_line}-L${gf.end_line}`;
+      const simpleTitle =
+        review?.simple_title ||
+        `${categoryClean} in ${gf.file_path} (lines ${gf.start_line}-${gf.end_line})`;
+      const whatProblem =
+        review?.what_is_the_problem || gf.detection_explanation;
+      const whatAttackerCanDo =
+        review?.what_attacker_can_do ||
+        `An attacker or untrusted caller could exploit this ${categoryClean.toLowerCase()} vulnerability in ${fileLoc}.`;
+      const howToFixArr =
+        review?.how_to_fix && review.how_to_fix.length > 0
+          ? review.how_to_fix
+          : [gf.remediation_hint || "Enforce strict input validation and server-side security checks."];
+
+      return {
+        id: gf.finding_id,
+        scan_id: scanId,
+        title: simpleTitle,
+        vulnerability_name: categoryClean,
+        endpoint: fileLoc,
+        target_endpoint: fileLoc,
+        affected_endpoint: fileLoc,
+        full_url: ghUrl,
+        http_method: "SOURCE",
+        vulnerability_category: categoryClean,
+        vulnerability_type: gf.vulnerability_category,
+        affected_role: "source_code",
+        affected_roles: ["repository_branch"],
+        expected_behavior: `Safe implementation in ${gf.file_path} (lines ${gf.start_line}-${gf.end_line}).`,
+        actual_behavior: gf.code_snippet,
+        confirmation_status: "SUSPICIOUS",
+        status: "suspected",
+        validation_status: "SUSPICIOUS",
+        access_verdict: gf.classification || "POTENTIAL_VULNERABILITY",
+        severity: String(gf.severity || "HIGH").toUpperCase(),
+        impact_explanation: whatAttackerCanDo,
+        description: whatProblem,
+        remediation_recommendation: howToFixArr.join("\n"),
+        remediation_guidance: gf.remediation_hint || "",
+        proposed_code_fix: review?.recommended_code_change || "",
+        source_code_available: true,
+        source_repository: `${gf.repository} (${gf.branch})`,
+        source_file: gf.file_path,
+        source_line: `${gf.start_line}-${gf.end_line}`,
+        source_start_line: gf.start_line,
+        source_end_line: gf.end_line,
+        source_function: gf.function_name || undefined,
+        function_name: gf.function_name || undefined,
+        line_numbers: `${gf.start_line}-${gf.end_line}`,
+        vulnerable_snippet: gf.code_snippet,
+        vulnerable_code: gf.code_snippet,
+        beginner_explanation: {
+          simple_title: simpleTitle,
+          technical_name: `${categoryClean} (${gf.language})`,
+          risk_level: String(gf.severity || "HIGH").toUpperCase(),
+          risk_description: whatProblem,
+          confirmation_status: "SUSPICIOUS",
+          what_is_the_problem: whatProblem,
+          what_attacker_can_do: whatAttackerCanDo,
+          real_world_impact:
+            review?.affected_data_or_users ||
+            `Impacts ${gf.repository} branch '${gf.branch}' at ${fileLoc}.`,
+          why_it_matters: review?.why_it_happens || gf.detection_explanation,
+          how_to_fix: howToFixArr,
+          secure_code_example: review?.recommended_code_change || null,
+          how_to_verify_fix: review?.tests_to_add || [],
+          additional_recommendations: review?.additional_recommendations || [],
+          evidence_summary: [],
+          what_is_not_yet_proven: review?.limitations || [],
+        },
+        evidence: {
+          id: `ev-${gf.finding_id}`,
+          finding_id: gf.finding_id,
+          endpoint: fileLoc,
+          http_method: "SOURCE",
+          testing_role: gf.branch,
+          expected_behavior: gf.remediation_hint,
+          actual_behavior: gf.detection_explanation,
+          validation_status: "SUSPICIOUS",
+          request_method: "SOURCE",
+          request_url: ghUrl,
+          request_headers: {
+            Repository: gf.repository,
+            Branch: gf.branch,
+            File: `${gf.file_path}:${gf.start_line}-${gf.end_line}`,
+          },
+          response_status: 200,
+          relevant_response_headers: { Language: gf.language },
+          sanitized_response_body: gf.code_snippet,
+          evidence_sha256: gf.commit_sha || "",
+          redacted_fields: [],
+        },
+      };
+    },
+    []
+  );
+
+  const loadCompletedGitHubScanIntoDashboard = useCallback(
+    (scan: GitHubScan) => {
+      const repoLabel = `https://github.com/${scan.owner}/${scan.repository}/tree/${scan.branch}`;
+      const mapped = (scan.findings || []).map((gf) =>
+        mapGitHubFindingToDashboard(gf, scan.id)
+      );
+      setAssessmentId(scan.id);
+      setTargetUrl(repoLabel);
+      setFindings(mapped);
+      setSummaryData({
+        id: scan.id,
+        target_url: repoLabel,
+        status: scan.status,
+        started_at: scan.created_at,
+        completed_at: scan.completed_at || new Date().toISOString(),
+        endpoints_discovered_count: Object.values(scan.languages || {}).reduce(
+          (a, b) => a + Number(b || 0),
+          0
+        ),
+        endpoints_tested_count: Object.values(scan.languages || {}).reduce(
+          (a, b) => a + Number(b || 0),
+          0
+        ),
+        confirmed_findings_count: mapped.length,
+        suspicious_results_count: 0,
+        summary_text: `Found ${mapped.length} security issues in ${scan.owner}/${scan.repository} (${scan.branch}).`,
+        markdown_content: "",
+        findings: mapped,
+        stages: {},
+        events: [],
+      });
+      setVisibleStepCount(12);
+      setStatus(scan.status === "FAILED" ? "failed" : "completed");
+      setShowGitHubModal(false);
+
+      setPastScans((prev) => {
+        const label = `${scan.repository} (${scan.branch})`;
+        const filtered = prev.filter(
+          (p) => p.id !== scan.id && p.label.toLowerCase() !== label.toLowerCase()
+        );
+        return [
+          {
+            id: scan.id,
+            label,
+            target_url: repoLabel,
+            status: scan.status,
+            started_at: scan.created_at,
+          },
+          ...filtered,
+        ].slice(0, 5);
+      });
+      setActivePastScanId(scan.id);
+    },
+    [mapGitHubFindingToDashboard]
+  );
+
+  const startGitHubDashboardScan = useCallback(
+    (info: {
+      scanId: string;
+      owner: string;
+      repository: string;
+      branch: string;
+      commitSha?: string;
+    }) => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+      if (githubEventSourceRef.current) {
+        githubEventSourceRef.current.close();
+      }
+
+      const repoUrl = `https://github.com/${info.owner}/${info.repository}/tree/${info.branch}`;
+      setShowGitHubModal(false);
+      setAssessmentId(info.scanId);
+      setActivePastScanId(info.scanId);
+      setTargetUrl(repoUrl);
+      setError(null);
+      setElapsedSeconds(1);
+      setVisibleStepCount(1);
+      setStatus("running");
+      setStages({});
+      setFindings([]);
+      setSummaryData(null);
+      setSeverityFilter("ALL");
+      setActivityEvents([
+        {
+          id: 1,
+          assessment_id: info.scanId,
+          event_type: "agent_thinking",
+          stage: "github_branch_checkout",
+          message: `Connecting to GitHub repository ${info.owner}/${info.repository} (branch: ${info.branch})...`,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+
+      const stream = new EventSource(
+        `${API_BASE_URL}/api/github/scans/${info.scanId}/stream`,
+        { withCredentials: true }
+      );
+      githubEventSourceRef.current = stream;
+
+      stream.addEventListener("activity", (msg) => {
+        try {
+          const ev = JSON.parse((msg as MessageEvent).data) as {
+            id: number;
+            stage: string;
+            message: string;
+            timestamp: string;
+          };
+          setActivityEvents((prev) => {
+            if (prev.some((p) => p.message === ev.message)) return prev;
+            return [
+              ...prev,
+              {
+                id: ev.id,
+                assessment_id: info.scanId,
+                event_type:
+                  ev.stage === "ai_review"
+                    ? "agent_thinking"
+                    : ev.stage === "language_detection"
+                    ? "endpoint_discovered"
+                    : "tool_started",
+                stage: ev.stage || "branch_file_analysis",
+                message: ev.message,
+                timestamp: ev.timestamp || new Date().toISOString(),
+              },
+            ];
+          });
+        } catch {
+          // ignore
+        }
+      });
+
+      stream.addEventListener("done", () => {
+        stream.close();
+        void (async () => {
+          try {
+            const res = await fetch(
+              `${API_BASE_URL}/api/github/scans/${info.scanId}`,
+              { credentials: "include", cache: "no-store" }
+            );
+            if (res.ok) {
+              const scanData = (await res.json()) as GitHubScan;
+              loadCompletedGitHubScanIntoDashboard(scanData);
+            } else {
+              setStatus("completed");
+            }
+          } catch {
+            setStatus("completed");
+          }
+        })();
+      });
+
+      stream.addEventListener("error", (msg) => {
+        if (msg instanceof MessageEvent && msg.data) {
+          try {
+            const errData = JSON.parse(msg.data) as { message?: string };
+            setError(errData.message || "GitHub repository scan failed.");
+          } catch {
+            setError("GitHub repository scan failed.");
+          }
+          stream.close();
+          setStatus("failed");
+        }
+      });
+    },
+    [loadCompletedGitHubScanIntoDashboard]
+  );
 
   const isRunningState =
     status === "connecting" ||
@@ -1114,7 +1429,10 @@ export default function Home() {
   };
 
   const stopAssessment = async () => {
-    if (!assessmentId) {
+    if (githubEventSourceRef.current) {
+      githubEventSourceRef.current.close();
+    }
+    if (!assessmentId || assessmentId.startsWith("gscan_")) {
       setStatus("cancelled");
       return;
     }
@@ -1169,6 +1487,9 @@ export default function Home() {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
+    if (githubEventSourceRef.current) {
+      githubEventSourceRef.current.close();
+    }
     localStorage.removeItem("authscope_last_assessment_id");
     setAssessmentId(null);
     setStatus("ready");
@@ -1188,6 +1509,22 @@ export default function Home() {
     setActivePastScanId(item.id);
     setError(null);
     setSeverityFilter("ALL");
+
+    if (item.id.startsWith("gscan_")) {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/github/scans/${item.id}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const scanData = (await res.json()) as GitHubScan;
+          loadCompletedGitHubScanIntoDashboard(scanData);
+        }
+      } catch {
+        // ignore
+      }
+      return;
+    }
 
     if (item.isPreset) {
       const matchingReal = pastScans.find(
@@ -1440,6 +1777,14 @@ export default function Home() {
   const formatRequestProof = (f: FindingItem): string => {
     const ev = f.evidence;
     const method = ev?.request_method || f.http_method || "GET";
+    if (method === "SOURCE") {
+      const repoLine = f.source_repository ? `Repository: ${f.source_repository}` : "";
+      const fileLine = `File: ${f.source_file || f.target_endpoint || "/"}`;
+      const linesLine = f.line_numbers || f.source_line ? `Lines: ${f.line_numbers || f.source_line}` : "";
+      const fnLine = f.source_function || f.function_name ? `Function: ${f.source_function || f.function_name}` : "";
+      const ghLine = f.full_url ? `GitHub: ${f.full_url}` : "";
+      return [repoLine, fileLine, linesLine, fnLine, ghLine].filter(Boolean).join("\n");
+    }
     const path = f.target_endpoint || f.endpoint || ev?.endpoint || "/";
     if (path === "/rest/user/login" && method === "POST") {
       return `POST /rest/user/login\nContent-Type: application/json\n\n{"email":"' OR 1=1--","password":"[hidden]"}`;
@@ -1455,6 +1800,16 @@ export default function Home() {
 
   const formatResponseProof = (f: FindingItem): string => {
     const ev = f.evidence;
+    const method = ev?.request_method || f.http_method || "GET";
+    if (method === "SOURCE") {
+      return (
+        f.vulnerable_snippet ||
+        f.vulnerable_code ||
+        ev?.sanitized_response_body ||
+        f.actual_behavior ||
+        "// Vulnerable source code excerpt"
+      );
+    }
     const statusNum = ev?.response_status || 200;
     const statusLabel =
       statusNum === 200
@@ -1500,6 +1855,253 @@ export default function Home() {
     const base = (summaryData?.target_url || targetUrl || "http://localhost:3000").replace(/\/$/, "");
     const path = f.target_endpoint || f.endpoint || "/";
     return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+  };
+
+  const resolveBugSourceLocationLabel = (f: FindingItem): string => {
+    const file = f.source_file || f.source_location?.file_path || "";
+    const lines =
+      f.line_numbers ||
+      f.source_line ||
+      f.source_location?.line_range ||
+      (f.source_start_line
+        ? `${f.source_start_line}${f.source_end_line && f.source_end_line !== f.source_start_line ? `-${f.source_end_line}` : ""}`
+        : f.source_location?.start_line
+        ? String(f.source_location.start_line)
+        : "");
+    if (!file) return "";
+    return lines ? `${file}:${lines}` : file;
+  };
+
+  /**
+   * Builds and downloads a multi-page PDF 1.4 security report directly in the browser.
+   * Every bug's title, severity, exact URL/route & source code file/line location,
+   * impact, proof, remediation steps, and secure code fix are included.
+   */
+  const downloadReportPdf = () => {
+    const cleanPdfText = (input: string): string =>
+      input
+        .replace(/[^\x20-\x7E]/g, " ")
+        .replace(/\\/g, "\\\\")
+        .replace(/\(/g, "\\(")
+        .replace(/\)/g, "\\)");
+
+    const wrapLine = (text: string, maxChars = 90): string[] => {
+      const normalized = text.replace(/\r\n/g, "\n");
+      const rawLines = normalized.split("\n");
+      const out: string[] = [];
+      for (const raw of rawLines) {
+        const trimmed = raw.trimEnd();
+        if (!trimmed) {
+          out.push("");
+          continue;
+        }
+        const words = trimmed.split(/\s+/);
+        let cur = "";
+        for (const w of words) {
+          if (!cur) {
+            cur = w.length > maxChars ? w.slice(0, maxChars) : w;
+          } else if (cur.length + 1 + w.length <= maxChars) {
+            cur += ` ${w}`;
+          } else {
+            out.push(cur);
+            cur = w.length > maxChars ? w.slice(0, maxChars) : w;
+          }
+        }
+        if (cur) out.push(cur);
+      }
+      return out;
+    };
+
+    type PdfLine = { text: string; bold?: boolean; size?: number; indent?: number };
+    const reportLines: PdfLine[] = [];
+    const targetDisplay = summaryData?.target_url || targetUrl || "http://localhost:3000";
+
+    reportLines.push({ text: "AUTHSCOPE SECURITY ASSESSMENT REPORT", bold: true, size: 15 });
+    reportLines.push({ text: `Target / Repository: ${targetDisplay}`, bold: true, size: 10 });
+    reportLines.push({
+      text: `Report ID: ${assessmentId || "authscope-scan"}   |   Generated: ${new Date().toISOString()}`,
+      size: 9,
+    });
+    reportLines.push({
+      text: `Risk Score: ${riskScore}/100   |   Total Findings: ${displayFindings.length} (Critical: ${severityCounts.CRITICAL}, High: ${severityCounts.HIGH}, Medium: ${severityCounts.MEDIUM}, Low: ${severityCounts.LOW})`,
+      bold: true,
+      size: 10,
+    });
+    reportLines.push({
+      text: "==========================================================================================",
+      size: 9,
+    });
+    reportLines.push({ text: "" });
+
+    displayFindings.forEach((f, idx) => {
+      const fid = f.id || `finding-${idx}`;
+      const enriched = bugAiEnrichment[fid];
+      const sev = String(f.severity || "MEDIUM").toUpperCase();
+      const title = f.beginner_explanation?.simple_title || f.title || "Security Issue";
+      const category =
+        f.beginner_explanation?.technical_name ||
+        f.vulnerability_name ||
+        f.vulnerability_category ||
+        "Authorization / Security Issue";
+      const fullUrl = resolveFullUrlFound(f);
+      const routePath = f.target_endpoint || f.endpoint || f.affected_endpoint || "/";
+      const sourceLoc = resolveBugSourceLocationLabel(f);
+      const fnName = f.source_function || f.function_name || f.source_location?.function_name || "";
+      const repoLabel = f.source_repository || githubRepo || "";
+      const whatCanDo =
+        enriched?.what_bug_can_do ||
+        f.beginner_explanation?.what_attacker_can_do ||
+        f.impact_explanation ||
+        f.description ||
+        "";
+      const fixes = extractFixBullets(f, enriched);
+      const codeFix =
+        enriched?.secure_code_fix ||
+        f.beginner_explanation?.secure_code_example ||
+        f.proposed_code_fix ||
+        "";
+
+      reportLines.push({
+        text: `${idx + 1}. [${sev}] ${title}`,
+        bold: true,
+        size: 12,
+      });
+      reportLines.push({ text: `Category: ${category}`, bold: true, size: 9 });
+      reportLines.push({ text: "BUG LOCATION:", bold: true, size: 9 });
+      for (const l of wrapLine(`- URL / Endpoint: ${f.http_method || "GET"} ${fullUrl} (route: ${routePath})`, 88)) {
+        reportLines.push({ text: l, size: 9, indent: 10 });
+      }
+      if (sourceLoc) {
+        reportLines.push({
+          text: `- Source File & Lines: ${sourceLoc}${fnName ? `  (Function: ${fnName})` : ""}`,
+          bold: true,
+          size: 9,
+          indent: 10,
+        });
+      }
+      if (repoLabel) {
+        reportLines.push({
+          text: `- Repository / Branch: ${repoLabel}`,
+          size: 9,
+          indent: 10,
+        });
+      }
+
+      reportLines.push({ text: "WHAT THIS BUG CAN DO:", bold: true, size: 9 });
+      for (const l of wrapLine(whatCanDo, 88)) {
+        reportLines.push({ text: l, size: 9, indent: 10 });
+      }
+
+      reportLines.push({ text: "PROOF / EVIDENCE:", bold: true, size: 9 });
+      for (const l of wrapLine(formatRequestProof(f), 86).slice(0, 6)) {
+        reportLines.push({ text: `  ${l}`, size: 8, indent: 10 });
+      }
+      for (const l of wrapLine(formatResponseProof(f), 86).slice(0, 8)) {
+        reportLines.push({ text: `  ${l}`, size: 8, indent: 10 });
+      }
+
+      reportLines.push({ text: "HOW TO RESOLVE IT:", bold: true, size: 9 });
+      fixes.forEach((step) => {
+        for (const l of wrapLine(`* ${step}`, 88)) {
+          reportLines.push({ text: l, size: 9, indent: 10 });
+        }
+      });
+
+      if (codeFix) {
+        reportLines.push({ text: "RECOMMENDED CODE FIX:", bold: true, size: 9 });
+        for (const l of wrapLine(codeFix, 86).slice(0, 10)) {
+          reportLines.push({ text: `  ${l}`, size: 8, indent: 10 });
+        }
+      }
+
+      reportLines.push({
+        text: "------------------------------------------------------------------------------------------",
+        size: 9,
+      });
+      reportLines.push({ text: "" });
+    });
+
+    const linesPerPage = 48;
+    const pages: PdfLine[][] = [];
+    for (let i = 0; i < reportLines.length; i += linesPerPage) {
+      pages.push(reportLines.slice(i, i + linesPerPage));
+    }
+    if (pages.length === 0) {
+      pages.push([{ text: "No findings recorded.", size: 11 }]);
+    }
+
+    // Assemble PDF 1.4 objects
+    const objects: string[] = [];
+    // 1: Catalog, 2: Pages, 3: Font Regular, 4: Font Bold
+    objects.push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    const pageObjIds: number[] = [];
+    let nextId = 5;
+    for (let p = 0; p < pages.length; p++) {
+      pageObjIds.push(nextId);
+      nextId += 2; // page + content stream
+    }
+    objects.push(
+      `2 0 obj\n<< /Type /Pages /Kids [${pageObjIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${
+        pages.length
+      } >>\nendobj\n`
+    );
+    objects.push(
+      "3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+    );
+    objects.push(
+      "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n"
+    );
+
+    pages.forEach((pageLines, pIdx) => {
+      const pageId = pageObjIds[pIdx];
+      const contentId = pageId + 1;
+      let y = 755;
+      const cmds: string[] = ["BT"];
+      for (const line of pageLines) {
+        const fontRef = line.bold ? "/F2" : "/F1";
+        const sz = line.size || 9;
+        const x = 42 + (line.indent || 0);
+        const safe = cleanPdfText(line.text || "");
+        cmds.push(`${fontRef} ${sz} Tf`);
+        cmds.push(`1 0 0 1 ${x} ${y} Tm (${safe}) Tj`);
+        y -= sz + 5;
+      }
+      cmds.push(
+        `/F1 8 Tf 1 0 0 1 42 28 Tm (AuthScope Security Report - Page ${pIdx + 1} of ${
+          pages.length
+        }) Tj`
+      );
+      cmds.push("ET");
+      const streamBody = cmds.join("\n");
+
+      objects.push(
+        `${pageId} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>\nendobj\n`
+      );
+      objects.push(
+        `${contentId} 0 obj\n<< /Length ${streamBody.length} >>\nstream\n${streamBody}\nendstream\nendobj\n`
+      );
+    });
+
+    let pdf = "%PDF-1.4\n";
+    const offsets: number[] = [0];
+    for (const obj of objects) {
+      offsets.push(pdf.length);
+      pdf += obj;
+    }
+    const xrefStart = pdf.length;
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (let i = 1; i < offsets.length; i++) {
+      pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+    }
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+
+    const blob = new Blob([pdf], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `authscope-security-report-${assessmentId || "scan"}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   /**
@@ -1872,7 +2474,18 @@ export default function Home() {
         {/* ================================================================= */}
         {status !== "ready" && !isRunningState && (
           <div className="scan-workspace" data-testid="final-assessment-summary">
-            <div className="target-url-pill-row">
+            <div className="target-url-pill-row" style={{ gap: "8px" }}>
+              {status !== "failed" && (
+                <button
+                  type="button"
+                  onClick={downloadReportPdf}
+                  className="download-report-btn"
+                  style={{ padding: "6px 12px", fontSize: "12px" }}
+                >
+                  <Download size={13} />
+                  <span>Download PDF report</span>
+                </button>
+              )}
               <div className="target-url-pill">
                 {summaryData?.target_url || targetUrl || "http://localhost:3000"}
               </div>
@@ -2058,17 +2671,63 @@ export default function Home() {
                             <strong>{categoryLabel}:</strong> {plainProblem}
                           </p>
 
-                          {/* Which URL it found */}
-                          <div className="found-url-row">
-                            <span className="found-method-badge">
-                              {httpMethod}
-                            </span>
-                            <span className="found-url-text">
-                              {fullUrlFound}
-                            </span>
-                            <span className="text-[#85837c] text-[11px]">
-                              (route: {routePath})
-                            </span>
+                          {/* Explicit Bug Location (Website URL/Route + Source File & Line Numbers) */}
+                          <div className="bug-location-box">
+                            <div className="bug-location-header">
+                              <span>Bug Location</span>
+                              {fullUrlFound.includes("github.com/") && (
+                                <a
+                                  href={fullUrlFound}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-[#5fa37f] hover:underline lowercase font-normal"
+                                >
+                                  View exact lines on GitHub ↗
+                                </a>
+                              )}
+                            </div>
+                            <div className="bug-location-grid">
+                              <div className="bug-location-item">
+                                <span className="bug-location-label">
+                                  {httpMethod === "SOURCE"
+                                    ? "GitHub Location:"
+                                    : "URL / Route:"}
+                                </span>
+                                <span className="bug-location-value">
+                                  [{httpMethod}] {fullUrlFound}{" "}
+                                  {routePath && routePath !== fullUrlFound
+                                    ? `(route: ${routePath})`
+                                    : ""}
+                                </span>
+                              </div>
+                              {resolveBugSourceLocationLabel(finding) && (
+                                <div className="bug-location-item">
+                                  <span className="bug-location-label">
+                                    File &amp; Lines:
+                                  </span>
+                                  <span className="bug-location-value">
+                                    {resolveBugSourceLocationLabel(finding)}
+                                    {finding.source_function ||
+                                    finding.function_name
+                                      ? ` · fn: ${
+                                          finding.source_function ||
+                                          finding.function_name
+                                        }`
+                                      : ""}
+                                  </span>
+                                </div>
+                              )}
+                              {finding.source_repository && (
+                                <div className="bug-location-item">
+                                  <span className="bug-location-label">
+                                    Repo / Branch:
+                                  </span>
+                                  <span className="bug-location-value">
+                                    {finding.source_repository}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
                           </div>
 
                           {/* Proof */}
@@ -2079,14 +2738,20 @@ export default function Home() {
 
                           <div className="proof-box">
                             <div className="proof-col">
-                              <div className="proof-col-header">REQUEST SENT</div>
+                              <div className="proof-col-header">
+                                {httpMethod === "SOURCE"
+                                  ? "SOURCE FILE LOCATION"
+                                  : "REQUEST SENT"}
+                              </div>
                               <pre className="proof-col-pre">
                                 {formatRequestProof(finding)}
                               </pre>
                             </div>
                             <div className="proof-col">
                               <div className="proof-col-header">
-                                RESPONSE RECEIVED
+                                {httpMethod === "SOURCE"
+                                  ? "VULNERABLE CODE EXCERPT"
+                                  : "RESPONSE RECEIVED"}
                               </div>
                               <pre className="proof-col-pre">
                                 {formatResponseProof(finding)}
@@ -2387,11 +3052,19 @@ export default function Home() {
                 <div className="report-bottom-actions">
                   <button
                     type="button"
-                    onClick={downloadReportJson}
+                    onClick={downloadReportPdf}
                     className="download-report-btn"
                   >
                     <Download size={14} />
-                    <span>Download report</span>
+                    <span>Download PDF report</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={downloadReportJson}
+                    className="scan-another-btn"
+                  >
+                    <Download size={14} />
+                    <span>Download JSON</span>
                   </button>
                   <button
                     type="button"
@@ -2456,7 +3129,11 @@ export default function Home() {
               />
             </div>
 
-            <GitHubCodeScanPanel apiBaseUrl={API_BASE_URL} />
+            <GitHubCodeScanPanel
+              apiBaseUrl={API_BASE_URL}
+              onScanStarted={startGitHubDashboardScan}
+              onScanSelected={loadCompletedGitHubScanIntoDashboard}
+            />
           </div>
         </div>
       )}

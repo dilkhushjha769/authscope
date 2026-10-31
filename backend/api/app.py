@@ -1390,6 +1390,18 @@ async def startup_recovery() -> None:
     if recovered > 0:
         logger.info(f"Startup recovery: marked {recovered} orphaned session(s) as FAILED with SERVER_RESTART")
 
+    try:
+        active_gh_ids = {
+            str(getattr(t, "_authscope_scan_id", ""))
+            for t in _github_background_tasks
+            if not t.done()
+        }
+        gh_recovered = _github_repository().recover_orphaned_running_scans(active_gh_ids)
+        if gh_recovered > 0:
+            logger.info(f"Startup recovery: marked {gh_recovered} orphaned GitHub scan(s) as FAILED")
+    except Exception as exc:
+        logger.warning(f"Failed to recover orphaned GitHub scans: {exc}")
+
     # Seed default target profiles (e.g. localhost Juice Shop)
     try:
         TargetRepository().seed_default_targets()
@@ -2499,6 +2511,12 @@ async def github_start_scan(payload: GitHubScanRequest, request: Request) -> Dic
     _require_frontend_origin(request)
     user_id = _github_user_id(request)
     github_repository = _github_repository()
+    active_gh_ids = {
+        str(getattr(t, "_authscope_scan_id", ""))
+        for t in _github_background_tasks
+        if not t.done()
+    }
+    github_repository.recover_orphaned_running_scans(active_gh_ids)
     if github_repository.has_running_scan(user_id):
         raise HTTPException(status_code=429, detail={"code": "SCAN_ALREADY_RUNNING", "message": "Wait for the current source scan to finish before starting another."})
     service = _github_service()
@@ -2526,8 +2544,9 @@ async def github_start_scan(payload: GitHubScanRequest, request: Request) -> Dic
         if "idx_github_one_active_scan_per_user" in str(exc):
             raise HTTPException(status_code=429, detail={"code": "SCAN_ALREADY_RUNNING", "message": "Wait for the current source scan to finish before starting another."}) from exc
         raise
-    github_repository.save_scan_event(scan_id, "activity", "queued", "Scan queued.", {"commit_sha": branch["commit_sha"]})
+    github_repository.save_scan_event(scan_id, "activity", "queued", f"Queued branch '{payload.branch}' of {repo_info['full_name']} for full file security scan.", {"commit_sha": branch["commit_sha"]})
     task = asyncio.create_task(_run_github_scan(scan))
+    setattr(task, "_authscope_scan_id", scan_id)
     _github_background_tasks.add(task)
     task.add_done_callback(_github_background_tasks.discard)
     return {"scan_id": scan_id, "status": "RUNNING", "repository": repo_info["full_name"], "branch": payload.branch, "commit_sha": branch["commit_sha"]}

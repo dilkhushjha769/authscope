@@ -11,9 +11,8 @@ import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote, urlparse
-from uuid import uuid4
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -402,12 +401,14 @@ class GitHubAppService:
             eligible.append(item)
         if not eligible:
             raise GitHubIntegrationError("EMPTY_OR_UNSUPPORTED_REPOSITORY", "No supported Python, JavaScript, or TypeScript source files were found.", 422)
-        event("activity", "language_detection", "Detecting programming languages...", {"candidate_files": len(eligible)})
+        event("activity", "language_detection", f"Detected {len(eligible)} source files in branch '{branch}'...", {"candidate_files": len(eligible)})
         temporary_dir = Path(tempfile.mkdtemp(prefix="authscope-github-"))
         try:
-            semaphore = asyncio.Semaphore(8)
+            semaphore = asyncio.Semaphore(16)
+            fetched_count = 0
 
             async def fetch_blob(item: Dict[str, Any]) -> Optional[Path]:
+                nonlocal fetched_count
                 path_text = str(item["path"])
                 async with semaphore:
                     blob_url = f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/blobs/{quote(str(item['sha']), safe='')}"
@@ -428,6 +429,14 @@ class GitHubAppService:
                     raise GitHubIntegrationError("UNSAFE_REPOSITORY_PATHS", "A repository path escaped the safe scan directory.", 422) from exc
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(content)
+                fetched_count += 1
+                if fetched_count == 1 or fetched_count % 15 == 0 or fetched_count == len(eligible):
+                    event(
+                        "activity",
+                        "file_inspection",
+                        f"Inspecting branch '{branch}' files ({fetched_count}/{len(eligible)}): {path_text}",
+                        {"file_path": path_text, "fetched": fetched_count, "total": len(eligible)},
+                    )
                 return destination
 
             fetched = await asyncio.gather(*(fetch_blob(item) for item in eligible), return_exceptions=True)
@@ -436,11 +445,21 @@ class GitHubAppService:
                 if isinstance(failure, GitHubIntegrationError):
                     raise failure
                 raise GitHubIntegrationError("GITHUB_API_ERROR", "One or more source files could not be read safely.", 502) from failure
-            event("activity", "source_analysis", "Analyzing source code...", {"files": len(eligible)})
+            event("activity", "source_analysis", f"Running AST & security analyzer across {len(eligible)} files in '{branch}'...", {"files": len(eligible)})
             report = await asyncio.to_thread(analyzer.analyze_repository, temporary_dir, True, scan_id)
-            event("activity", "ai_review", "Asking AI to explain detected issues...", {"findings": len(report.findings)})
-            findings: List[Dict[str, Any]] = []
-            for finding in report.findings:
+
+            sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+            sorted_findings = sorted(
+                report.findings,
+                key=lambda f: sev_rank.get(str(getattr(f.severity, "value", f.severity)).upper(), 0),
+                reverse=True,
+            )
+
+            event("activity", "ai_review", f"Found {len(sorted_findings)} security issues across {len(report.discovery.discovered_files)} files. Generating Gemini AI security reviews...", {"findings": len(sorted_findings)})
+
+            review_semaphore = asyncio.Semaphore(4)
+
+            async def build_serialized_finding(idx: int, finding: SourceFinding) -> Dict[str, Any]:
                 serialized = finding.model_dump(mode="json")
                 serialized["source_type"] = "SOURCE_CODE_FINDING"
                 serialized["classification"] = finding.classification.value
@@ -452,12 +471,34 @@ class GitHubAppService:
                     f"https://github.com/{quote(owner, safe='')}/{quote(repo, safe='')}/blob/{commit_sha}/"
                     f"{quote(finding.file_path, safe='/')}#L{finding.start_line}-L{finding.end_line}"
                 )
-                serialized["ai_review"] = await self._review_source_finding(finding)
-                findings.append(serialized)
+                if idx < 8:
+                    async with review_semaphore:
+                        serialized["ai_review"] = await self._review_source_finding(finding)
+                else:
+                    serialized["ai_review"] = {
+                        "status": "available",
+                        "simple_title": f"{finding.vulnerability_category.replace('_', ' ').title()} in {Path(finding.file_path).name}",
+                        "what_is_the_problem": finding.detection_explanation,
+                        "what_attacker_can_do": f"An attacker or untrusted caller could exploit this {finding.vulnerability_category.replace('_', ' ').lower()} pattern at {finding.file_path}:{finding.start_line}-{finding.end_line}.",
+                        "affected_data_or_users": f"Application module {finding.file_path} (lines {finding.start_line}-{finding.end_line}).",
+                        "why_it_happens": finding.detection_explanation,
+                        "how_to_fix": [finding.remediation_hint] if finding.remediation_hint else ["Enforce strict input validation, parameterized queries, and server-side authorization checks."],
+                        "recommended_code_change": "",
+                        "tests_to_add": [f"Add unit and security regression tests for {finding.file_path}:{finding.start_line}."],
+                        "additional_recommendations": [],
+                        "limitations": ["Static source code finding; click 'Generate AI Fix & Code (Gemini API #2)' for tailored code remediation."],
+                    }
+                return serialized
+
+            findings = list(
+                await asyncio.gather(*(build_serialized_finding(i, f) for i, f in enumerate(sorted_findings)))
+            )
+            scanned_files_list = [f.file_path for f in report.discovery.discovered_files]
             return {
                 "findings": findings,
                 "languages": report.discovery.languages_summary,
                 "candidate_files": len(report.discovery.discovered_files),
+                "scanned_files": scanned_files_list,
                 "commit_sha": commit_sha,
                 "repository_id": int(repo_info["id"]),
             }

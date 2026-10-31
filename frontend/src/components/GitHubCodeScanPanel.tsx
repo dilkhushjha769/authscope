@@ -17,17 +17,17 @@ import {
   Unplug,
 } from "lucide-react";
 
-interface GitHubAccount {
+export interface GitHubAccount {
   id: string;
   login: string;
   avatar_url: string;
 }
-interface GitHubInstallation {
+export interface GitHubInstallation {
   id: number;
   account_login: string;
   account_type: string;
 }
-interface GitHubRepositoryItem {
+export interface GitHubRepositoryItem {
   id: number;
   name: string;
   full_name: string;
@@ -37,11 +37,11 @@ interface GitHubRepositoryItem {
   default_branch: string;
   html_url: string;
 }
-interface GitHubBranch {
+export interface GitHubBranch {
   name: string;
   commit_sha: string;
 }
-interface GitHubFinding {
+export interface GitHubFinding {
   finding_id: string;
   vulnerability_category: string;
   severity: string;
@@ -76,7 +76,7 @@ interface GitHubFinding {
     message?: string;
   };
 }
-interface GitHubScan {
+export interface GitHubScan {
   id: string;
   installation_id: number;
   repository_id: number;
@@ -91,13 +91,13 @@ interface GitHubScan {
   languages: Record<string, number>;
   findings: GitHubFinding[];
 }
-interface GitHubStatus {
+export interface GitHubStatus {
   connected: boolean;
   expired?: boolean;
   account: GitHubAccount | null;
   installations: GitHubInstallation[];
 }
-interface GitHubEvent {
+export interface GitHubEvent {
   id: number;
   event_type: string;
   stage: string;
@@ -138,7 +138,21 @@ async function readJson<T>(response: Response, fallback: string): Promise<T> {
   return payload as T;
 }
 
-export function GitHubCodeScanPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
+export function GitHubCodeScanPanel({
+  apiBaseUrl,
+  onScanStarted,
+  onScanSelected,
+}: {
+  apiBaseUrl: string;
+  onScanStarted?: (info: {
+    scanId: string;
+    owner: string;
+    repository: string;
+    branch: string;
+    commitSha?: string;
+  }) => void;
+  onScanSelected?: (scan: GitHubScan) => void;
+}) {
   const [status, setStatus] = useState<GitHubStatus>({
     connected: false,
     account: null,
@@ -290,7 +304,17 @@ export function GitHubCodeScanPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
         );
         if (!cancelled) {
           setRepositories(payload.repositories);
-          setSelectedRepository("");
+          setSelectedRepository((prev) => {
+            if (prev && payload.repositories.some((r) => r.full_name === prev)) {
+              return prev;
+            }
+            const authscopeRepo = payload.repositories.find(
+              (r) => r.name.toLowerCase() === "authscope"
+            );
+            return authscopeRepo
+              ? authscopeRepo.full_name
+              : payload.repositories[0]?.full_name || "";
+          });
         }
       } catch (loadError: unknown) {
         if (!cancelled)
@@ -480,11 +504,20 @@ export function GitHubCodeScanPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
           branch: selectedBranch,
         }),
       });
-      const result = await readJson<{ scan_id: string }>(
+      const result = await readJson<{ scan_id: string; commit_sha?: string }>(
         response,
         "Could not start the source scan."
       );
       setActiveScanId(result.scan_id);
+      if (onScanStarted) {
+        onScanStarted({
+          scanId: result.scan_id,
+          owner: chosenRepository.owner,
+          repository: chosenRepository.name,
+          branch: selectedBranch,
+          commitSha: result.commit_sha,
+        });
+      }
       const scans = await loadHistory();
       const created = scans.find((scan) => scan.id === result.scan_id);
       if (created) setSelectedScan(created);
@@ -507,9 +540,14 @@ export function GitHubCodeScanPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
         credentials: "include",
         cache: "no-store",
       });
-      setSelectedScan(
-        await readJson<GitHubScan>(response, "Could not open this source scan.")
+      const loaded = await readJson<GitHubScan>(
+        response,
+        "Could not open this source scan."
       );
+      setSelectedScan(loaded);
+      if (onScanSelected && loaded.status === "COMPLETED") {
+        onScanSelected(loaded);
+      }
     } catch (historyError) {
       setError(
         historyError instanceof Error
@@ -625,7 +663,7 @@ export function GitHubCodeScanPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
             Connect &amp; AI-Scan GitHub Repository
           </h2>
           <p className="mt-1 text-xs text-[#aaa8a1]">
-            Inspect repository source code with static AST analysis + Gemini AI code review &amp; Q&amp;A.
+            Inspect all files in the selected branch with AST analysis + Gemini AI security review &amp; PDF export.
           </p>
         </div>
         {status.connected ? (
@@ -801,7 +839,7 @@ export function GitHubCodeScanPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
                 ) : (
                   <Shield className="h-4 w-4" />
                 )}
-                Scan Repository with AI
+                Start Code Scan on Dashboard
               </button>
             )}
           </div>
@@ -850,7 +888,7 @@ export function GitHubCodeScanPanel({ apiBaseUrl }: { apiBaseUrl: string }) {
         <section className="border-t border-[#333330] pt-3">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-xs font-semibold text-[#d0cec8]">
-              Source scan history
+              Source scan history (click a completed scan to open on main dashboard)
             </h3>
             <button
               type="button"
