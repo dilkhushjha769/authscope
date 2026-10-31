@@ -15,12 +15,19 @@ import {
   Info,
   HelpCircle,
   MinusCircle,
+  Copy,
+  Check,
+  Send,
+  Loader2,
 } from "lucide-react";
-import { FindingItem, FindingValidationStatus } from "@/types/assessment";
+import { BeginnerExplanation, FindingItem, FindingValidationStatus, FixVerificationRecord } from "@/types/assessment";
 
 interface FindingCardProps {
   finding: FindingItem;
   index?: number;
+  onVerifyFix?: (findingId: string) => void;
+  verificationPending?: boolean;
+  verificationError?: string | null;
 }
 
 export function resolveFindingStatus(finding: FindingItem): FindingValidationStatus {
@@ -126,8 +133,13 @@ function getStatusMeta(status: FindingValidationStatus): {
   }
 }
 
-export function FindingCard({ finding }: FindingCardProps) {
+export function FindingCard({ finding, onVerifyFix, verificationPending = false, verificationError }: FindingCardProps) {
   const [showRawEvidence, setShowRawEvidence] = useState(false);
+  const [fixCopied, setFixCopied] = useState(false);
+  const [chatQuestion, setChatQuestion] = useState("");
+  const [chatMessages, setChatMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [chatPending, setChatPending] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
 
   // Never display a suspicious finding as confirmed
   const rawStatus = (finding.validation_status || "SUSPICIOUS").toUpperCase();
@@ -190,6 +202,11 @@ export function FindingCard({ finding }: FindingCardProps) {
   // C. Source-code location (strictly verified; never invent files or line numbers)
   const techDetails = (finding.technical_details || {}) as Record<string, unknown>;
   const rawTechLoc = techDetails.source_location as Record<string, unknown> | undefined;
+  const aiReview = techDetails.ai_review as Record<string, unknown> | undefined;
+  const aiSeverityReview = aiReview?.severity_review as Record<string, unknown> | undefined;
+  const aiSuggestedSeverity = typeof aiSeverityReview?.suggested_severity === "string"
+    ? aiSeverityReview.suggested_severity
+    : "";
 
   const hasVerifiedSource = Boolean(
     (finding.source_code_available === true && finding.source_file) ||
@@ -279,31 +296,90 @@ export function FindingCard({ finding }: FindingCardProps) {
 
   // F. Sanitized Evidence Summary
   const baselineBehavior =
-    finding.evidence_summary?.baseline_behavior ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.baseline_behavior
+      : undefined) ||
     finding.baseline_behavior ||
     finding.expected_behavior ||
     finding.evidence?.expected_behavior ||
     "Unauthorized requests must be denied with HTTP 401/403.";
   const unauthorizedBehavior =
-    finding.evidence_summary?.unauthorized_behavior ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.unauthorized_behavior
+      : undefined) ||
     finding.unauthorized_behavior ||
     finding.actual_behavior ||
     finding.evidence?.actual_behavior ||
     "Observed discrepant response from target endpoint.";
   const responseDifference =
-    finding.evidence_summary?.response_difference ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.response_difference
+      : undefined) ||
     finding.response_difference ||
     `Expected access denial (${baselineBehavior}), but observed HTTP ${
       finding.evidence?.response_status ?? 200
     } (${unauthorizedBehavior}).`;
   const evidenceStatus =
-    finding.evidence_summary?.validation_status ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.validation_status
+      : undefined) ||
     finding.evidence_validation_status ||
     normalizedStatus;
   const evidenceSha =
-    finding.evidence_summary?.evidence_sha256 ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.evidence_sha256
+      : undefined) ||
     finding.evidence?.evidence_sha256 ||
     "";
+  const beginner: BeginnerExplanation | undefined = finding.beginner_explanation;
+  const verification: FixVerificationRecord | undefined = finding.verification_history?.[0];
+  const riskDescriptions: Record<string, string> = {
+    CRITICAL: "Could cause very serious damage.",
+    HIGH: "Could expose important information or allow serious unauthorized actions.",
+    MEDIUM: "Could cause limited unauthorized access or other meaningful harm.",
+    LOW: "A smaller weakness that should still be fixed.",
+    INFO: "Useful security advice; not necessarily a vulnerability.",
+    INFORMATIONAL: "Useful security advice; not necessarily a vulnerability.",
+  };
+  const severityLabel = severity === "INFO" || severity === "INFORMATIONAL" ? "Informational" : severity;
+  const beginnerFix = beginner?.how_to_fix?.length ? beginner.how_to_fix : [recommendedFix];
+  const beginnerVerify = beginner?.how_to_verify_fix?.length ? beginner.how_to_verify_fix : [verificationProcedure];
+  const copyFix = async () => {
+    try {
+      await navigator.clipboard.writeText(beginnerFix.map((step, i) => `${i + 1}. ${step}`).join("\n"));
+      setFixCopied(true);
+      window.setTimeout(() => setFixCopied(false), 1800);
+    } catch {
+      setFixCopied(false);
+    }
+  };
+
+  const askAboutFinding = async () => {
+    const question = chatQuestion.trim();
+    if (!question || chatPending) return;
+    setChatPending(true);
+    setChatError(null);
+    try {
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/assessments/${finding.scan_id}/findings/${finding.id}/chat`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question, history: chatMessages.slice(-8) }),
+        },
+      );
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "The finding assistant could not answer.");
+      const userMessage: { role: "user"; content: string } = { role: "user", content: question };
+      const assistantMessage: { role: "assistant"; content: string } = { role: "assistant", content: String(payload.answer || "") };
+      setChatMessages((current) => [...current, userMessage, assistantMessage].slice(-10));
+      setChatQuestion("");
+    } catch (error: unknown) {
+      setChatError(error instanceof Error ? error.message : "The finding assistant could not answer.");
+    } finally {
+      setChatPending(false);
+    }
+  };
 
   return (
     <div
@@ -328,26 +404,41 @@ export function FindingCard({ finding }: FindingCardProps) {
                   severityBadgeColor[severity] || severityBadgeColor.MEDIUM
                 }`}
               >
-                {severity}
-              </span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-200 border border-zinc-700">
-                {categoryDisplay}
-              </span>
-              <span className="text-[10px] font-mono text-zinc-500">
-                ({rawCategory})
+                {severityLabel}
               </span>
             </div>
             <h4 className="text-sm font-semibold text-zinc-100 mt-1.5">
-              {bugName}
+              {beginner?.simple_title || bugName}
             </h4>
-            <p className="text-[11px] text-zinc-400 mt-0.5">
-              Status note: {statusMeta.description}
+            <p className="text-[11px] text-zinc-300 mt-1">
+              {normalizedStatus === "CONFIRMED"
+                ? "Confirmed by the security engine using captured evidence."
+                : "Still being investigated. The current evidence does not confirm an attack."}
             </p>
           </div>
         </div>
       </div>
 
+      <div className="mt-4 space-y-3 text-sm leading-relaxed">
+        <p className="text-xs text-zinc-300"><strong className="text-zinc-100">Risk level: {severityLabel}</strong> — {beginner?.risk_description || riskDescriptions[severity] || "Risk level set by the security engine."}</p>
+        <section><h5 className="font-semibold text-white">What happened?</h5><p className="text-zinc-300">{beginner?.what_is_the_problem || "A plain-language explanation is unavailable for this finding."}</p></section>
+        <p className="text-[11px] text-zinc-500">{aiReview ? "Gemini explanation grounded in the captured finding evidence." : "Plain-language explanation from the available finding facts."} The security engine remains responsible for the finding status.</p>
+        <section><h5 className="font-semibold text-white">What could an attacker do?</h5><p className="text-zinc-300">{beginner?.what_attacker_can_do || "The available information does not establish what an attacker could do."}</p></section>
+        <section><h5 className="font-semibold text-white">Why is it dangerous?</h5><p className="text-zinc-300">{beginner?.real_world_impact || beginner?.why_it_matters || "The impact is not established by the available information."}</p></section>
+        <section>
+          <div className="flex flex-wrap items-center justify-between gap-2"><h5 className="font-semibold text-white">How to fix it</h5><button type="button" onClick={copyFix} className="inline-flex items-center gap-1 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800">{fixCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}{fixCopied ? "Copied" : "Copy recommended fix"}</button></div>
+          <ol className="list-decimal space-y-1 pl-5 text-zinc-300">{beginnerFix.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}</ol>
+        </section>
+        <section><h5 className="font-semibold text-white">How to check the fix</h5><ol className="list-decimal space-y-1 pl-5 text-zinc-300">{beginnerVerify.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}</ol></section>
+        {(beginner?.additional_recommendations || []).length > 0 && <section><h5 className="font-semibold text-white">Additional recommendations</h5><ul className="list-disc space-y-1 pl-5 text-zinc-300">{beginner?.additional_recommendations.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul></section>}
+        {(beginner?.what_is_not_yet_proven || []).length > 0 && <p className="rounded border border-amber-500/30 bg-amber-950/20 p-2 text-xs text-amber-100">{beginner?.what_is_not_yet_proven.join(" ")}</p>}
+      </div>
+
+      <details className="mt-4 border-t border-zinc-800 pt-3">
+        <summary className="cursor-pointer text-sm font-semibold text-zinc-300">Technical details</summary>
       <div className="mt-3 pt-3 border-t border-zinc-800/80 space-y-3 text-xs">
+        <div className="text-zinc-400">{beginner?.technical_name || categoryDisplay} ({rawCategory}) · {httpMethod} {endpointPath}</div>
+        {aiSuggestedSeverity && <p className="rounded border border-purple-500/30 bg-purple-950/20 p-2 text-zinc-300">AI severity suggestion: <strong>{aiSuggestedSeverity}</strong>. Engine severity remains {severity}. {String(aiSeverityReview?.justification || "")}</p>}
         {/* ==================================================================
             B. WEBSITE LOCATION
         ================================================================== */}
@@ -662,6 +753,36 @@ export function FindingCard({ finding }: FindingCardProps) {
           )}
         </div>
       </div>
+      </details>
+      {normalizedStatus === "CONFIRMED" && (
+        <section className="mt-4 border-t border-zinc-800 pt-3">
+          <button type="button" disabled={!onVerifyFix || verificationPending} onClick={() => onVerifyFix?.(finding.id)} className="rounded-md bg-blue-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+            {verificationPending ? "Verifying…" : "Verify Fix"}
+          </button>
+          {verificationError && <p className="mt-2 text-xs text-red-300">{verificationError}</p>}
+          {verification && (
+            <div className="mt-3 rounded-lg border border-zinc-700 bg-zinc-950/70 p-3 text-xs">
+              <div className="font-semibold text-zinc-100">Verification: {verification.new_status}</div>
+              <div className="mt-1 text-zinc-400">Previous finding status: {verification.previous_status}</div>
+              <p className="mt-1 text-zinc-300">{verification.summary || verification.notes}</p>
+              <p className="mt-2 text-zinc-300"><strong>Next step:</strong> {verification.new_status === "FIXED" ? "Review the recorded comparison, then rerun the broader assessment after your change." : verification.new_status === "STILL VULNERABLE" || verification.new_status === "PARTIALLY FIXED" ? "Continue fixing the server-side authorization check and verify the remaining affected route." : "Check the recorded scope, evidence, and test-account state, then retry when the required controls are available."}</p>
+              {verification.differential_result?.before && verification.differential_result?.after && (
+                <details className="mt-2"><summary className="cursor-pointer text-zinc-400">Before and after evidence</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-[10px] text-zinc-300">{JSON.stringify({ before: verification.differential_result.before, after: verification.differential_result.after, remaining_concerns: verification.differential_result.regression_checks }, null, 2)}</pre></details>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+      <section className="mt-4 border-t border-zinc-800 pt-3">
+        <h5 className="text-sm font-semibold text-zinc-100">Ask Gemini about this finding</h5>
+        <p className="mt-1 text-xs text-zinc-400">Answers use this finding’s sanitized evidence. Gemini cannot change the security engine’s result.</p>
+        {chatMessages.length > 0 && <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">{chatMessages.map((message, index) => <div key={`${index}-${message.role}`} className={`rounded-md p-2 text-xs ${message.role === "assistant" ? "bg-zinc-800 text-zinc-200" : "bg-blue-950/50 text-blue-100"}`}><strong>{message.role === "assistant" ? "Gemini" : "You"}: </strong>{message.content}</div>)}</div>}
+        {chatError && <p role="alert" className="mt-2 text-xs text-red-300">{chatError}</p>}
+        <form className="mt-3 flex gap-2" onSubmit={(event) => { event.preventDefault(); void askAboutFinding(); }}>
+          <input value={chatQuestion} onChange={(event) => setChatQuestion(event.target.value)} maxLength={2000} placeholder="Ask what this means or how to fix it…" className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-white" aria-label="Ask a question about this finding" />
+          <button type="submit" disabled={!chatQuestion.trim() || chatPending} className="inline-flex items-center gap-1 rounded-md bg-violet-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{chatPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}{chatPending ? "Asking" : "Ask"}</button>
+        </form>
+      </section>
     </div>
   );
 }

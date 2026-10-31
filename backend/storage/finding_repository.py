@@ -477,13 +477,13 @@ class FindingRepository:
             ).fetchone()
 
         evidence = None
-        if evidence_row:
-            evidence = self._row_to_evidence(evidence_row)
-        elif "evidence_json" in row.keys() and row["evidence_json"]:
+        if "evidence_json" in row.keys() and row["evidence_json"]:
             try:
                 evidence = EvidenceArtifact.model_validate(json.loads(row["evidence_json"]))
             except Exception:
                 pass
+        if evidence is None and evidence_row:
+            evidence = self._row_to_evidence(evidence_row)
 
         return self._row_to_finding(row, evidence=evidence)
 
@@ -530,12 +530,14 @@ class FindingRepository:
 
         results = []
         for row in rows:
-            evi = evidence_map.get(row["id"])
-            if not evi and "evidence_json" in row.keys() and row["evidence_json"]:
+            evi = None
+            if "evidence_json" in row.keys() and row["evidence_json"]:
                 try:
                     evi = EvidenceArtifact.model_validate(json.loads(row["evidence_json"]))
                 except Exception:
                     pass
+            if evi is None:
+                evi = evidence_map.get(row["id"])
             results.append(self._row_to_finding(row, evidence=evi))
 
         return results
@@ -765,21 +767,17 @@ class FindingRepository:
                 ),
             )
 
-            # Update finding's last_retested_timestamp and retest status
+            # Keep verification history separate from the original finding classification.
             conn.execute(
                 """
                 UPDATE findings SET
                     last_retested_timestamp = ?,
                     retest_status = ?,
-                    status = ?,
-                    confirmation_status = ?,
                     updated_at = ?
                 WHERE id = ?
                 """,
                 (
                     _dt_to_iso(retest.retested_at),
-                    "vulnerable" if retest.is_vulnerable else "remediated",
-                    retest.new_status,
                     retest.new_status,
                     _dt_to_iso(datetime.now(timezone.utc)),
                     retest.finding_id,

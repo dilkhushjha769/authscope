@@ -134,6 +134,42 @@ class TestEndpointDiscovery:
         assert by_path["/api/Users"].category == EndpointCategory.ADMIN_FUNCTION
         assert by_path["/rest/admin/application-version"].category == EndpointCategory.PUBLIC
 
+    def test_openapi_discovery_uses_scoped_executor_and_only_get_routes(self):
+        """Reads routes from the target's OpenAPI document without issuing route requests."""
+        guard = ScopeGuard()
+        manager = SessionManager(load_from_env=False)
+        requested_paths = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requested_paths.append(request.url.path)
+            return httpx.Response(
+                200,
+                json={
+                    "openapi": "3.0.0",
+                    "paths": {
+                        "/api/orders/{orderId}": {
+                            "get": {"summary": "Read an order"},
+                            "delete": {"summary": "Delete an order"},
+                        },
+                        "/api/users": {"post": {"summary": "Create a user"}},
+                    },
+                },
+            )
+
+        executor = RequestExecutor(
+            scope_guard=guard,
+            session_manager=manager,
+            client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False),
+        )
+        discovery = EndpointDiscovery(base_url="http://localhost:3000", scope_guard=guard)
+        endpoints = discovery.discover_from_openapi(executor=executor)
+
+        assert requested_paths == ["/openapi.json"]
+        assert [(endpoint.path, endpoint.method) for endpoint in endpoints] == [
+            ("/api/orders/{orderId}", "GET")
+        ]
+        assert endpoints[0].requires_owner_match is True
+
     def test_reject_invalid_or_external_endpoint(self):
         """Ensures invalid paths or unreplaced templates without IDs are rejected."""
         disc = EndpointDiscovery(base_url="http://localhost:3000")
@@ -245,6 +281,7 @@ class TestAuthorizationDifferentialEngine:
         """Verifies that when User B receives User A's protected basket (with UserId=1), BOLA_IDOR is CONFIRMED."""
         session_manager.set_token(Role.USER_A, "jwt_user_a", user_id="1")
         session_manager.set_token(Role.USER_B, "jwt_user_b", user_id="2")
+        session_manager.register_resource_ownership(Role.USER_A, "basket", "1")
 
         basket_1_payload = {
             "status": "success",
@@ -304,6 +341,7 @@ class TestAuthorizationDifferentialEngine:
         """Verifies that if User B gets 200 OK with a substantially different non-empty body and no owner match, it is marked SUSPICIOUS, not CONFIRMED."""
         session_manager.set_token(Role.USER_A, "jwt_user_a", user_id="1")
         session_manager.set_token(Role.USER_B, "jwt_user_b", user_id="2")
+        session_manager.register_resource_ownership(Role.USER_A, "basket", "99")
 
         def handler(request: httpx.Request) -> httpx.Response:
             auth = request.headers.get("Authorization", "")
@@ -417,6 +455,7 @@ class TestAuthorizationDifferentialEngine:
     ):
         """Verifies that tester refuses to invent resource IDs and enforces human approval on non-GET endpoints."""
         tester = AuthorizationTester(session_manager=session_manager, scope_guard=scope_guard)
+        session_manager.get_session(Role.USER_A).owned_resources.clear()
 
         # Missing resource_id on parameterized route when User A has no registered basket ID
         with pytest.raises(InvalidTargetURLError):
@@ -537,6 +576,7 @@ class TestRuntimeVerificationAndPromotion:
         """Verifies that server access denial classifies the finding as NOT_REPRODUCIBLE."""
         session_manager.set_token(Role.USER_A, "jwt_user_a", user_id="1")
         session_manager.set_token(Role.USER_B, "jwt_user_b", user_id="2")
+        session_manager.register_resource_ownership(Role.USER_A, "basket", "1")
 
         def handler(request: httpx.Request) -> httpx.Response:
             auth = request.headers.get("Authorization", "")
@@ -569,6 +609,7 @@ class TestRuntimeVerificationAndPromotion:
         """Verifies that behavioral divergence without confirmed sensitive leakage is classified as SUSPICIOUS_ACCESS."""
         session_manager.set_token(Role.USER_A, "jwt_user_a", user_id="1")
         session_manager.set_token(Role.USER_B, "jwt_user_b", user_id="2")
+        session_manager.register_resource_ownership(Role.USER_A, "basket", "1")
 
         def handler(request: httpx.Request) -> httpx.Response:
             auth = request.headers.get("Authorization", "")

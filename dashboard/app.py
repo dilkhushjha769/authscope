@@ -267,6 +267,9 @@ def main() -> None:
             findings=active_findings,
             query_adapter=query_adapter,
             scan_id=active_scan_id,
+            repository=repo,
+            scope_guard=scope_guard,
+            session_manager=session_manager,
         )
         return
 
@@ -361,6 +364,9 @@ def main() -> None:
                 findings=active_findings,
                 query_adapter=query_adapter,
                 scan_id=active_scan_id,
+                repository=repo,
+                scope_guard=scope_guard,
+                session_manager=session_manager,
             )
         with tab_ep:
             render_endpoint_explorer(endpoints=active_endpoints, findings=active_findings)

@@ -27,8 +27,9 @@ logger = get_logger(__name__)
 JWT_REGEX = re.compile(r"eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-\.+/=]*")
 BEARER_REGEX = re.compile(r"(?i)\bbearer\s+[a-zA-Z0-9_\-\.=~+/]+")
 JSON_SECRET_FIELD_REGEX = re.compile(
-    r'("(?i:password|totpSecret|deluxeToken|token|jwt|apiKey|secret)"\s*:\s*)"([^"]+)"'
+    r'("[^"\r\n]*(?i:password|secret|token|apikey|credential)[^"\r\n]*"\s*:\s*)"([^"]+)"'
 )
+EMAIL_REGEX = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 
 
 class EvidenceValidator:
@@ -92,6 +93,10 @@ class EvidenceValidator:
             sanitized = BEARER_REGEX.sub("Bearer [REDACTED_BEARER_TOKEN]", sanitized)
             redacted_items.append("body_bearer_token")
 
+        if EMAIL_REGEX.search(sanitized):
+            sanitized = EMAIL_REGEX.sub("[REDACTED_EMAIL]", sanitized)
+            redacted_items.append("body_email")
+
         if JSON_SECRET_FIELD_REGEX.search(sanitized):
             sanitized = JSON_SECRET_FIELD_REGEX.sub(r'\1"[REDACTED_SECRET]"', sanitized)
             redacted_items.append("body_secret_field")
@@ -119,10 +124,12 @@ class EvidenceValidator:
 
         sanitized_headers, redacted_header_keys = self.sanitize_headers(headers)
         sanitized_body, redacted_body_keys = self.sanitize_body(response.body)
-        redacted_list = redacted_header_keys + redacted_body_keys
+        sanitized_url, redacted_url_keys = self.sanitize_url(url)
+        redacted_list = redacted_header_keys + redacted_body_keys + redacted_url_keys
 
-        # Canonical string uses response.body as originally structured for deterministic hashing
-        canonical_string = f"{method}|{url}|{response.status_code}|{response.body}"
+        # Sign the sanitized evidence that is persisted, so integrity can be
+        # independently rechecked without retaining secrets or private data.
+        canonical_string = f"{method.upper()}|{sanitized_url}|{response.status_code}|{sanitized_body}"
         sha256_hash = compute_sha256(canonical_string)
 
         resolved_endpoint = endpoint or url
@@ -155,7 +162,7 @@ class EvidenceValidator:
             actual_behavior=resolved_actual,
             validation_status=validation_status,
             request_method=method.upper(),
-            request_url=url,
+            request_url=sanitized_url,
             request_headers=sanitized_headers,
             response_status=response.status_code,
             response_body=sanitized_body,
@@ -174,6 +181,13 @@ class EvidenceValidator:
         if not artifact.expected_behavior or not artifact.actual_behavior:
             return False
         if not artifact.evidence_sha256 or len(artifact.evidence_sha256) != 64:
+            return False
+
+        canonical_string = (
+            f"{artifact.request_method.upper()}|{artifact.request_url}|"
+            f"{artifact.response_status}|{artifact.response_body}"
+        )
+        if compute_sha256(canonical_string) != artifact.evidence_sha256:
             return False
 
         # Ensure no raw Bearer JWTs remain in headers or sanitized evidence

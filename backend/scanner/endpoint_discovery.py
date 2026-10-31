@@ -19,7 +19,8 @@ from pydantic import BaseModel, Field
 from backend.config import settings
 from backend.core.scope_guard import ScopeGuard
 from backend.core.session_manager import Role
-from backend.utils.helpers import InvalidTargetURLError
+from backend.scanner.request_executor import RequestExecutor
+from backend.utils.helpers import AuthScopeException, InvalidTargetURLError
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -361,9 +362,95 @@ class EndpointDiscovery:
             routes = [r for r in routes if r.category == category_filter]
         return routes
 
-    def discover_from_openapi(self, spec_url: Optional[str] = None) -> List[DiscoveredEndpoint]:
-        """Discovers routes from known specification or fallback curated GET routes."""
-        logger.info("Discovering safe GET endpoints", extra={"spec_url": spec_url})
+    def discover_from_openapi(
+        self,
+        spec_url: Optional[str] = None,
+        executor: Optional[RequestExecutor] = None,
+        max_endpoints: int = 100,
+    ) -> List[DiscoveredEndpoint]:
+        """Reads an in-scope OpenAPI document and returns bounded GET route definitions.
+
+        The document is fetched only through RequestExecutor, so scope checks, redirect
+        suppression, response bounds, and request logging remain centralized. If no
+        usable OpenAPI document is exposed, the local Juice Shop curated GET list is
+        retained as a clearly configured fallback.
+        """
+        if max_endpoints < 1:
+            return []
+
+        candidates = [spec_url] if spec_url else [
+            f"{self.base_url}/openapi.json",
+            f"{self.base_url}/swagger.json",
+            f"{self.base_url}/api-docs",
+            f"{self.base_url}/api/swagger.json",
+        ]
+        if executor is not None:
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                check = self.scope_guard.validate_request(candidate, method="GET")
+                if not check.is_allowed:
+                    logger.warning(
+                        "Skipping out-of-scope API description URL",
+                        extra={"reason": check.reason},
+                    )
+                    continue
+                try:
+                    response = executor.send_request(
+                        role=Role.ANONYMOUS,
+                        method="GET",
+                        url=candidate,
+                    )
+                except AuthScopeException as exc:
+                    logger.info("OpenAPI discovery request failed", extra={"error": str(exc)})
+                    continue
+
+                document = response.json_data
+                paths = document.get("paths") if isinstance(document, dict) else None
+                if not isinstance(paths, dict) or not paths:
+                    continue
+
+                discovered: List[DiscoveredEndpoint] = []
+                seen: set[tuple[str, str]] = set()
+                for raw_path, operations in paths.items():
+                    if not isinstance(raw_path, str) or not raw_path.startswith("/"):
+                        continue
+                    if not isinstance(operations, dict):
+                        continue
+                    for raw_method, operation in operations.items():
+                        method = str(raw_method).upper()
+                        if method != "GET" or not isinstance(operation, dict):
+                            continue
+                        key = (raw_path, method)
+                        if key in seen:
+                            continue
+                        try:
+                            route = self.register_endpoint(
+                                path=raw_path,
+                                method=method,
+                                description=str(operation.get("summary") or operation.get("operationId") or ""),
+                            )
+                        except (AuthScopeException, ValueError, TypeError) as exc:
+                            logger.info(
+                                "Skipping invalid OpenAPI route",
+                                extra={"path": raw_path, "error": str(exc)},
+                            )
+                            continue
+                        discovered.append(route)
+                        seen.add(key)
+                        if len(discovered) >= max_endpoints:
+                            break
+                    if len(discovered) >= max_endpoints:
+                        break
+
+                if discovered:
+                    logger.info(
+                        "Discovered GET routes from in-scope OpenAPI document",
+                        extra={"count": len(discovered), "spec_url": candidate},
+                    )
+                    return discovered
+
+        logger.info("Using configured Juice Shop GET routes as discovery fallback")
         return self.discover_known_routes()
 
     def build_concrete_url(

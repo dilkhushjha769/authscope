@@ -1,14 +1,7 @@
-"""Scanner module: Network request execution, endpoint discovery, differential testing, and security inspection."""
+"""Scanner package exports, loaded lazily to avoid analysis/scanner import cycles."""
 
-from backend.scanner.security_inspector import (
-    CategoryInspectionResult,
-    DetectionCategory,
-    FindingSeverity,
-    FindingValidationStatus,
-    ParsedCookie,
-    SecurityFindingRecord,
-    SecurityInspector,
-)
+from importlib import import_module
+from typing import Any
 
 __all__ = [
     "SecurityInspector",
@@ -19,3 +12,11 @@ __all__ = [
     "SecurityFindingRecord",
     "CategoryInspectionResult",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve public inspection symbols only when callers request them."""
+    if name not in __all__:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = import_module("backend.scanner.security_inspector")
+    return getattr(module, name)

@@ -240,13 +240,16 @@ class TestCredentialRedactionAndCancellation:
             "token": "super_secret_token_123",
             "password": "my_password",
             "headers": {"Authorization": f"Bearer {raw_jwt}", "Accept": "application/json"},
-            "nested": {"jwt": raw_jwt},
+            "nested": {"jwt": raw_jwt, "email": "private@example.test"},
+            "items": [{"api_key": "nested_secret_value"}],
         }
         clean_meta = sanitize_event_metadata(raw_meta)
         serialized = json.dumps(clean_meta)
         assert "super_secret_token_123" not in serialized
         assert "my_password" not in serialized
         assert raw_jwt not in serialized
+        assert "private@example.test" not in serialized
+        assert "nested_secret_value" not in serialized
 
     def test_safe_cancellation_stops_assessment_and_skips_remaining_stages(self) -> None:
         repo = _create_memory_repo()

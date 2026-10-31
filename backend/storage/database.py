@@ -145,6 +145,63 @@ CREATE TABLE IF NOT EXISTS target_profiles (
     is_local_test BOOLEAN DEFAULT 0,
     notes TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS github_connections (
+    github_user_id TEXT PRIMARY KEY,
+    login TEXT NOT NULL,
+    avatar_url TEXT DEFAULT '',
+    encrypted_credentials TEXT NOT NULL,
+    expires_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS github_sessions (
+    session_hash TEXT PRIMARY KEY,
+    github_user_id TEXT NOT NULL REFERENCES github_connections(github_user_id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS github_oauth_states (
+    state_hash TEXT PRIMARY KEY,
+    flow TEXT NOT NULL CHECK(flow IN ('oauth', 'install')),
+    github_user_id TEXT,
+    expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS github_installations (
+    github_user_id TEXT NOT NULL REFERENCES github_connections(github_user_id) ON DELETE CASCADE,
+    installation_id INTEGER NOT NULL,
+    account_login TEXT NOT NULL,
+    account_type TEXT NOT NULL DEFAULT 'User',
+    PRIMARY KEY (github_user_id, installation_id)
+);
+
+CREATE TABLE IF NOT EXISTS github_scans (
+    id TEXT PRIMARY KEY,
+    github_user_id TEXT NOT NULL REFERENCES github_connections(github_user_id) ON DELETE CASCADE,
+    installation_id INTEGER NOT NULL,
+    repository_id INTEGER NOT NULL,
+    owner TEXT NOT NULL,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    commit_sha TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    error_code TEXT DEFAULT '',
+    languages_json TEXT NOT NULL DEFAULT '{}',
+    findings_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE IF NOT EXISTS github_scan_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id TEXT NOT NULL REFERENCES github_scans(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    message TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
 """
 
 INDEXES_SQL = """
@@ -156,6 +213,10 @@ CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence_artifacts(finding
 CREATE INDEX IF NOT EXISTS idx_retest_finding_id ON retest_logs(finding_id);
 CREATE INDEX IF NOT EXISTS idx_target_profiles_hostname ON target_profiles(hostname);
 CREATE INDEX IF NOT EXISTS idx_target_profiles_status ON target_profiles(approval_status);
+CREATE INDEX IF NOT EXISTS idx_github_sessions_user ON github_sessions(github_user_id);
+CREATE INDEX IF NOT EXISTS idx_github_scans_user ON github_scans(github_user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_github_scan_events_scan ON github_scan_events(scan_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_github_one_active_scan_per_user ON github_scans(github_user_id) WHERE status = 'RUNNING';
 """
 
 SCHEMA_SQL = TABLES_SQL + "\n" + INDEXES_SQL

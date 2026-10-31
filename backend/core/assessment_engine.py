@@ -53,6 +53,7 @@ from backend.storage.models import (
 from backend.utils.helpers import (
     AuthScopeException,
     TargetUnreachableError,
+    redact_sensitive_text,
     sanitize_headers_for_logging,
 )
 from backend.utils.logger import get_logger
@@ -79,7 +80,8 @@ def sanitize_event_text(text: str) -> str:
     """Scrubs JWTs, Bearer tokens, and secret fields from event messages."""
     if not text:
         return ""
-    cleaned = JWT_REGEX.sub("[REDACTED_JWT]", text)
+    cleaned = redact_sensitive_text(text)
+    cleaned = JWT_REGEX.sub("[REDACTED_JWT]", cleaned)
     cleaned = BEARER_REGEX.sub("Bearer [REDACTED_TOKEN]", cleaned)
     cleaned = JSON_SECRET_FIELD_REGEX.sub(r'\1"[REDACTED_SECRET]"', cleaned)
     return cleaned
@@ -106,13 +108,21 @@ def sanitize_event_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
         elif isinstance(v, str):
             cleaned[k_str] = sanitize_event_text(v)
         elif isinstance(v, list):
-            cleaned[k_str] = [
-                sanitize_event_text(item) if isinstance(item, str) else item
-                for item in v
-            ]
+            cleaned[k_str] = [_sanitize_event_value(item) for item in v]
         else:
             cleaned[k_str] = v
     return cleaned
+
+
+def _sanitize_event_value(value: Any) -> Any:
+    """Recursively scrubs nested event lists and mappings before persistence."""
+    if isinstance(value, dict):
+        return sanitize_event_metadata(value)
+    if isinstance(value, list):
+        return [_sanitize_event_value(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_event_text(value)
+    return value
 
 
 class AssessmentEngine:
@@ -429,10 +439,12 @@ class AssessmentEngine:
             t_stage3 = self._start_stage(
                 session,
                 AssessmentStage.ENDPOINT_DISCOVERY,
-                "Mapping configured non-destructive GET application routes.",
+                "Reading an in-scope OpenAPI document for safe GET routes, with the configured Juice Shop route list as fallback.",
             )
             discovery = EndpointDiscovery(base_url=normalized_target, scope_guard=self.scope_guard)
-            discovered_routes: List[DiscoveredEndpoint] = discovery.discover_known_routes()
+            discovered_routes: List[DiscoveredEndpoint] = discovery.discover_from_openapi(
+                executor=active_executor,
+            )
             endpoint_records: Dict[str, DiscoveredEndpointRecord] = {}
 
             for idx, route in enumerate(discovered_routes, start=1):
@@ -475,13 +487,13 @@ class AssessmentEngine:
                 session,
                 AssessmentStage.ENDPOINT_DISCOVERY,
                 t_stage3,
-                f"{len(discovered_routes)} configured routes discovered.",
+                f"{len(discovered_routes)} GET routes discovered.",
             )
             yield self._emit_event(
                 session,
                 EventType.ENDPOINT_DISCOVERY_COMPLETED,
                 AssessmentStage.ENDPOINT_DISCOVERY,
-                f"{len(discovered_routes)} configured routes discovered.",
+                f"{len(discovered_routes)} GET routes discovered.",
                 {"count": len(discovered_routes)},
             )
 
@@ -696,9 +708,31 @@ class AssessmentEngine:
                             },
                         )
                         for evi in diff_res.evidence_artifacts:
+                            outcome = diff_res.probe_outcomes.get(evi.test_role)
+                            exposed_fields = (
+                                set(outcome.comparison.test_inspection.sensitive_fields_found)
+                                if outcome and outcome.comparison
+                                else set()
+                            )
+                            exposed_fields_lower = {field.lower() for field in exposed_fields}
+                            exposes_pii = bool(
+                                exposed_fields_lower.intersection(
+                                    {"email", "address", "streetaddress", "mobile", "phone", "ssn", "cardnum", "cardnumber", "cvv"}
+                                )
+                                or (
+                                    outcome
+                                    and outcome.comparison
+                                    and outcome.comparison.test_inspection.extracted_emails
+                                )
+                            )
+                            exposes_credentials = any(
+                                any(marker in field for marker in ("password", "secret", "token", "apikey", "credential"))
+                                for field in exposed_fields_lower
+                            )
                             sev = self.severity_engine.calculate_severity(
                                 vulnerability_type=diff_res.vulnerability_candidate or "BOLA_IDOR",
-                                exposes_pii=True,
+                                exposes_pii=exposes_pii,
+                                exposes_credentials=exposes_credentials,
                                 allows_privilege_escalation=(route.category == EndpointCategory.ADMIN_FUNCTION),
                             )
                             rem = self.remediation_engine.generate_patch(
@@ -783,38 +817,19 @@ class AssessmentEngine:
                             and not insp.is_spa_html_fallback
                         ):
                             # Inspect response content: does it disclose privileged administrative controls/secrets or public UI configuration?
-                            resp_text = (anon_resp.body if hasattr(anon_resp, 'body') else getattr(anon_resp, 'text', '')) or ''
-                            has_priv_secrets = any(
-                                k in resp_text.lower()
-                                for k in ["private_key", "admin_password", "jwt_secret", "api_secret", "root_password", "database_url"]
+                            # A single anonymous response cannot establish a role boundary.
+                            # Keyword matching is not proof that the response is protected
+                            # data or that the caller crossed an authorization boundary.
+                            fnd_val_status = EvidenceValidationStatus.SUSPICIOUS
+                            fnd_access_verdict = AccessVerdict.SUSPICIOUS_ACCESS
+                            fnd_status_str = "suspected"
+                            fnd_sev = SeverityLevel.LOW
+                            fnd_title_str = f"Suspicious Unauthenticated Access to Admin Route {route.path}"
+                            fnd_summary = (
+                                f"Unauthenticated GET request to administrative route {route.path} returned HTTP {anon_resp.status_code} "
+                                f"({anon_resp.content_length} bytes). This single-role response has no authenticated admin baseline, "
+                                "so the access-control behavior remains suspicious and unconfirmed."
                             )
-                            has_admin_actions = any(
-                                k in resp_text.lower()
-                                for k in ["deleteuser", "updaterole", "grantadmin", "systemshutdown", "exec_cmd"]
-                            )
-
-                            if has_priv_secrets or has_admin_actions:
-                                fnd_val_status = EvidenceValidationStatus.CONFIRMED
-                                fnd_access_verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
-                                fnd_status_str = "confirmed"
-                                fnd_sev = SeverityLevel.HIGH
-                                fnd_title_str = f"Confirmed Broken Function Level Authorization on {route.path}"
-                                fnd_summary = (
-                                    f"Administrative route {route.path} returned HTTP {anon_resp.status_code} and exposes "
-                                    f"privileged controls or administrative secrets to unauthenticated callers."
-                                )
-                            else:
-                                fnd_val_status = EvidenceValidationStatus.SUSPICIOUS
-                                fnd_access_verdict = AccessVerdict.SUSPICIOUS_ACCESS
-                                fnd_status_str = "suspected"
-                                fnd_sev = SeverityLevel.LOW
-                                fnd_title_str = f"Suspicious Unauthenticated Access to Admin Route {route.path} (Public UI Config)"
-                                fnd_summary = (
-                                    f"Unauthenticated GET request to administrative route {route.path} returned HTTP {anon_resp.status_code} "
-                                    f"({anon_resp.content_length} bytes). Content inspection indicates public client/application configuration "
-                                    f"(e.g. application branding, theme, challenge display settings) rather than privileged administrative controls or credentials. "
-                                    f"Classified as SUSPICIOUS / Informational rather than a confirmed BFLA vulnerability pending baseline review."
-                                )
 
                             ep_rec.test_status = "PARTIAL_UNAUTH_ONLY"
                             ep_rec.verdict = fnd_access_verdict.value
@@ -923,6 +938,13 @@ class AssessmentEngine:
                 session,
                 AssessmentStage.EVIDENCE_VALIDATION,
                 "Validating cryptographic SHA-256 signatures and completeness of candidate findings.",
+            )
+            yield self._emit_event(
+                session,
+                EventType.EVIDENCE_VALIDATION_STARTED,
+                AssessmentStage.EVIDENCE_VALIDATION,
+                "Checking finding evidence integrity and validation status.",
+                {"candidate_count": len(candidate_findings)},
             )
 
             confirmed_count = 0
@@ -1047,19 +1069,20 @@ class AssessmentEngine:
             return session
 
         except Exception as exc:
-            logger.error(f"Assessment halted due to error: {exc}", exc_info=True)
+            safe_error = sanitize_event_text(str(exc))
+            logger.error("Assessment halted due to error", extra={"error": safe_error})
             session.status = "FAILED"
             session.completed_at = datetime.now(timezone.utc)
             is_persist = "database" in str(exc).lower() or "no column" in str(exc).lower() or "sqlite" in str(type(exc)).lower() or "persistence" in str(exc).lower()
             session.failure_reason = "PERSISTENCE_ERROR" if is_persist else "EXECUTION_ERROR"
-            session.summary_text = f"Assessment halted due to error: {exc}"
-            self._skip_remaining_stages(session, f"Halted: {exc}")
+            session.summary_text = f"Assessment halted due to error: {safe_error}"
+            self._skip_remaining_stages(session, f"Halted: {safe_error}")
             yield self._emit_event(
                 session,
                 EventType.ASSESSMENT_FAILED,
                 AssessmentStage.REPORT_PREPARATION,
-                f"Assessment failed: {exc}",
-                {"error": str(exc), "failure_reason": session.failure_reason},
+                f"Assessment failed: {safe_error}",
+                {"error": safe_error, "failure_reason": session.failure_reason},
             )
             try:
                 self.repository.save_scan_session(session)

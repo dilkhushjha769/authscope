@@ -25,6 +25,7 @@ from backend.ai_agent.orchestrator import DefaultMemoryBridge
 from backend.ai_agent.planner import AssessmentPlan, AssessmentRequest
 from backend.analysis.code_mapper import CodeMapper, MappingStatus
 from backend.analysis.explanation_engine import ExplanationEngine
+from backend.analysis.finding_review import FindingReviewService, ReviewProvider
 from backend.core.assessment_engine import (
     AssessmentEngine,
     CancellationToken,
@@ -373,6 +374,7 @@ class GeminiAuthScopeAgent:
         scope_guard: Optional[ScopeGuard] = None,
         code_mapper: Optional[CodeMapper] = None,
         explanation_engine: Optional[ExplanationEngine] = None,
+        finding_review_provider: Optional[ReviewProvider] = None,
     ) -> None:
         self.scope_guard = scope_guard or ScopeGuard()
         self.repository = repository or FindingRepository()
@@ -384,6 +386,11 @@ class GeminiAuthScopeAgent:
         )
         self.code_mapper = code_mapper or CodeMapper()
         self.explanation_engine = explanation_engine or ExplanationEngine()
+        # Provider injection keeps model transport under host policy control.
+        self.finding_review_service = FindingReviewService(
+            provider=finding_review_provider,
+            scope_guard=self.scope_guard,
+        )
 
     def create_plan(self, target_url: str, assessment_id: str, objective: str = "") -> AssessmentPlan:
         """Generates a bounded assessment plan via the canonical Gemini planner."""
@@ -576,6 +583,48 @@ class GeminiAuthScopeAgent:
                 finding_id = event.metadata.get("finding_id")
                 finding = self.repository.get_finding(str(finding_id)) if finding_id else None
                 if finding is not None:
+                    review_is_eligible = (
+                        event.event_type == EventType.FINDING_CONFIRMED.value
+                        and finding.evidence is not None
+                    )
+                    if review_is_eligible:
+                        yield AssessmentEvent(
+                            assessment_id=scan_id,
+                            event_type="ai_review_started",
+                            stage="AI_REVIEW",
+                            message="Reviewing validated finding evidence.",
+                            metadata={"finding_id": finding.id},
+                        )
+                        yield AssessmentEvent(
+                            assessment_id=scan_id,
+                            event_type="ai_review_progress",
+                            stage="AI_REVIEW",
+                            message="Preparing redacted evidence context for review.",
+                            metadata={"finding_id": finding.id},
+                        )
+                        review = await asyncio.to_thread(
+                            self.finding_review_service.review,
+                            finding,
+                            finding.technical_details.get("source_mapping"),
+                        )
+                        review_data = review.model_dump(mode="json")
+                        event.metadata["ai_review"] = review_data
+                        finding.technical_details["ai_review"] = review_data
+                        yield AssessmentEvent(
+                            assessment_id=scan_id,
+                            event_type="ai_review_completed",
+                            stage="AI_REVIEW",
+                            message="Advisory AI review completed.",
+                            metadata={"finding_id": finding.id, "ai_review": review_data},
+                        )
+                        if review.fix_recommendation:
+                            yield AssessmentEvent(
+                                assessment_id=scan_id,
+                                event_type="fix_recommendation_generated",
+                                stage="AI_REVIEW",
+                                message="Advisory fix recommendation generated.",
+                                metadata={"finding_id": finding.id, "fix_recommendation": review.fix_recommendation},
+                            )
                     enrichment = await asyncio.to_thread(
                         self.enrich_finding_with_source_and_explanation,
                         finding,
