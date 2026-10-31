@@ -9,6 +9,7 @@ from backend.core.session_manager import Role, SessionManager
 from backend.scanner.request_executor import RequestExecutor
 from backend.storage.database import DatabaseManager
 from backend.storage.finding_repository import FindingRepository
+from backend.api.security import assessment_creation_limiter
 
 
 @pytest.fixture
@@ -107,3 +108,9 @@ def in_memory_db() -> DatabaseManager:
 def finding_repo(in_memory_db: DatabaseManager) -> FindingRepository:
     """Provides a FindingRepository backed by an in-memory database."""
     return FindingRepository(db_manager=in_memory_db)
+
+
+@pytest.fixture(autouse=True)
+def reset_assessment_rate_limiter() -> None:
+    """Keep test cases isolated from the process-wide production rate limiter."""
+    assessment_creation_limiter.reset()
