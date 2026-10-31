@@ -18,11 +18,14 @@ import {
   Copy,
   Check,
 } from "lucide-react";
-import { BeginnerExplanation, FindingItem, FindingValidationStatus } from "@/types/assessment";
+import { BeginnerExplanation, FindingItem, FindingValidationStatus, FixVerificationRecord } from "@/types/assessment";
 
 interface FindingCardProps {
   finding: FindingItem;
   index?: number;
+  onVerifyFix?: (findingId: string) => void;
+  verificationPending?: boolean;
+  verificationError?: string | null;
 }
 
 export function resolveFindingStatus(finding: FindingItem): FindingValidationStatus {
@@ -128,7 +131,7 @@ function getStatusMeta(status: FindingValidationStatus): {
   }
 }
 
-export function FindingCard({ finding }: FindingCardProps) {
+export function FindingCard({ finding, onVerifyFix, verificationPending = false, verificationError }: FindingCardProps) {
   const [showRawEvidence, setShowRawEvidence] = useState(false);
   const [fixCopied, setFixCopied] = useState(false);
 
@@ -323,6 +326,7 @@ export function FindingCard({ finding }: FindingCardProps) {
     finding.evidence?.evidence_sha256 ||
     "";
   const beginner: BeginnerExplanation | undefined = finding.beginner_explanation;
+  const verification: FixVerificationRecord | undefined = finding.verification_history?.[0];
   const riskDescriptions: Record<string, string> = {
     CRITICAL: "Could cause very serious damage.",
     HIGH: "Could expose important information or allow serious unauthorized actions.",
@@ -716,6 +720,25 @@ export function FindingCard({ finding }: FindingCardProps) {
         </div>
       </div>
       </details>
+      {normalizedStatus === "CONFIRMED" && (
+        <section className="mt-4 border-t border-zinc-800 pt-3">
+          <button type="button" disabled={!onVerifyFix || verificationPending} onClick={() => onVerifyFix?.(finding.id)} className="rounded-md bg-blue-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">
+            {verificationPending ? "Verifying…" : "Verify Fix"}
+          </button>
+          {verificationError && <p className="mt-2 text-xs text-red-300">{verificationError}</p>}
+          {verification && (
+            <div className="mt-3 rounded-lg border border-zinc-700 bg-zinc-950/70 p-3 text-xs">
+              <div className="font-semibold text-zinc-100">Verification: {verification.new_status}</div>
+              <div className="mt-1 text-zinc-400">Previous finding status: {verification.previous_status}</div>
+              <p className="mt-1 text-zinc-300">{verification.summary || verification.notes}</p>
+              <p className="mt-2 text-zinc-300"><strong>Next step:</strong> {verification.new_status === "FIXED" ? "Review the recorded comparison, then rerun the broader assessment after your change." : verification.new_status === "STILL VULNERABLE" || verification.new_status === "PARTIALLY FIXED" ? "Continue fixing the server-side authorization check and verify the remaining affected route." : "Check the recorded scope, evidence, and test-account state, then retry when the required controls are available."}</p>
+              {verification.differential_result?.before && verification.differential_result?.after && (
+                <details className="mt-2"><summary className="cursor-pointer text-zinc-400">Before and after evidence</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-[10px] text-zinc-300">{JSON.stringify({ before: verification.differential_result.before, after: verification.differential_result.after, remaining_concerns: verification.differential_result.regression_checks }, null, 2)}</pre></details>
+              )}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

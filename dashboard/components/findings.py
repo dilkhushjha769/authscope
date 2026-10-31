@@ -14,6 +14,10 @@ from backend.storage.models import (
     FindingRecord,
     SeverityLevel,
 )
+from backend.core.scope_guard import ScopeGuard
+from backend.core.session_manager import SessionManager
+from backend.retesting.retest_engine import RetestEngine
+from backend.storage.finding_repository import FindingRepository
 
 
 def _render_single_finding_card(finding: FindingRecord, is_confirmed: bool = True) -> None:
@@ -93,6 +97,9 @@ def render_findings_list(
     findings: List[FindingRecord],
     query_adapter: Optional[AssessmentQueryAdapter] = None,
     scan_id: Optional[str] = None,
+    repository: Optional[FindingRepository] = None,
+    scope_guard: Optional[ScopeGuard] = None,
+    session_manager: Optional[SessionManager] = None,
 ) -> None:
     """Renders findings strictly separated into Confirmed Vulnerabilities and Suspicious Results."""
     confirmed = [
@@ -137,11 +144,37 @@ def render_findings_list(
             )
 
     st.markdown("##### 🚨 Confirmed Vulnerabilities (Independently Verified)")
+    status_counts = {"FIXED": 0, "STILL VULNERABLE": 0, "PARTIALLY FIXED": 0, "INCONCLUSIVE": 0, "NOT_TESTED": 0}
+    for item in findings:
+        current = str(item.retest_status or "NOT_TESTED").upper()
+        status_counts[current if current in status_counts else "NOT_TESTED"] += 1
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Issues found", len(findings))
+    metric_cols[1].metric("Fixed", status_counts["FIXED"])
+    metric_cols[2].metric("Still vulnerable", status_counts["STILL VULNERABLE"])
+    metric_cols[3].metric("Partially fixed", status_counts["PARTIALLY FIXED"])
+    metric_cols[4].metric("Need investigation", status_counts["INCONCLUSIVE"] + status_counts["NOT_TESTED"])
     if not confirmed:
         st.caption("0 confirmed vulnerabilities identified in active assessment.")
     else:
         for finding in confirmed:
             _render_single_finding_card(finding, is_confirmed=True)
+            if repository and scope_guard and session_manager and st.button("Verify Fix", key=f"verify_fix_{finding.id}"):
+                session = repository.get_scan_session(finding.scan_id)
+                if not session:
+                    st.error("Assessment session is unavailable; verification was not run.")
+                else:
+                    with st.spinner("Rechecking the original scoped GET authorization test…"):
+                        result = RetestEngine(
+                            repository=repository,
+                            scope_guard=scope_guard,
+                            session_manager=session_manager,
+                            base_url=session.target_url,
+                        ).retest_finding(finding.id)
+                        repository.save_retest_result(result)
+                    st.session_state[f"verification_result_{finding.id}"] = result.model_dump(mode="json")
+                    st.rerun()
+            _render_verification(finding, repository)
 
     st.markdown("##### ⚠️ Suspicious Observations & Discrepancies (Unconfirmed)")
     if not suspicious:
@@ -149,3 +182,25 @@ def render_findings_list(
     else:
         for finding in suspicious:
             _render_single_finding_card(finding, is_confirmed=False)
+
+
+def _render_verification(finding: FindingRecord, repository: Optional[FindingRepository]) -> None:
+    """Displays persisted verification comparison and assessment-local history."""
+    latest = st.session_state.get(f"verification_result_{finding.id}")
+    if repository:
+        history = repository.get_retest_history(finding.id)
+        if history:
+            latest = history[0].model_dump(mode="json")
+    if not latest:
+        return
+    st.markdown(f"**Fix verification:** `{latest.get('new_status', 'INCONCLUSIVE')}`")
+    st.info(latest.get("summary") or latest.get("notes") or "No explanation was recorded.")
+    detail = latest.get("differential_result") or {}
+    before = detail.get("before")
+    after = detail.get("after")
+    if before or after:
+        st.json({"before_fix": before, "after_fix": after, "remaining_concerns": detail.get("regression_checks")})
+    if latest.get("new_status") == "FIXED":
+        st.success("The deterministic authorization comparison supports that this tested issue is fixed.")
+    elif latest.get("new_status") in {"STILL VULNERABLE", "PARTIALLY FIXED"}:
+        st.error("The tested issue remains reproducible or has a remaining tested path.")

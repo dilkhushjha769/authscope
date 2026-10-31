@@ -2411,7 +2411,7 @@ async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
 
 @app.post("/api/assessments/{assessment_id}/retest")
 async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
-    """Re-verifies findings for a given assessment session using RetestEngine."""
+    """Runs safe, evidence-grounded GET verification for findings in this assessment."""
     repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
@@ -2421,15 +2421,10 @@ async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
         )
 
     scope_guard = _get_active_scope_guard()
-    check = scope_guard.validate_request(url=session.target_url, method="GET")
-    if not check.is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Scope violation: {check.reason}",
-        )
-
     findings = repo.list_findings(assessment_id)
-    retest_engine = RetestEngine(repository=repo)
+    from backend.core.session_manager import SessionManager
+
+    retest_engine = RetestEngine(repository=repo, scope_guard=scope_guard, session_manager=SessionManager(load_from_env=True), base_url=session.target_url)
     retest_results = []
     for f in findings:
         log_rec = retest_engine.retest_finding(f.id)
@@ -2443,6 +2438,49 @@ async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
         "retested_count": len(retest_results),
         "results": retest_results,
     }
+
+
+@app.post("/api/assessments/{assessment_id}/findings/{finding_id}/verify-fix")
+async def verify_finding_fix(assessment_id: str, finding_id: str) -> Dict[str, Any]:
+    """Revalidates assessment ownership and scope before replaying one finding's GET evidence."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assessment not found.")
+    finding = repo.get_finding(finding_id)
+    if not finding or finding.scan_id != assessment_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found in this assessment.")
+
+    scope_guard = _get_active_scope_guard()
+
+    from backend.core.session_manager import SessionManager
+
+    engine = RetestEngine(
+        repository=repo,
+        scope_guard=scope_guard,
+        session_manager=SessionManager(load_from_env=True),
+        base_url=session.target_url,
+    )
+    result = engine.retest_finding(finding_id)
+    repo.save_retest_result(result)
+    return {
+        "assessment_id": assessment_id,
+        "finding_id": finding_id,
+        "verification": result.model_dump(mode="json"),
+        "history": [entry.model_dump(mode="json") for entry in repo.get_retest_history(finding_id)],
+    }
+
+
+@app.get("/api/assessments/{assessment_id}/findings/{finding_id}/verification-history")
+def get_finding_verification_history(assessment_id: str, finding_id: str) -> List[Dict[str, Any]]:
+    """Returns verification records only after confirming the finding belongs to this assessment."""
+    repo = _get_repository()
+    if not repo.get_scan_session(assessment_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assessment not found.")
+    finding = repo.get_finding(finding_id)
+    if not finding or finding.scan_id != assessment_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found in this assessment.")
+    return [entry.model_dump(mode="json") for entry in repo.get_retest_history(finding_id)]
 
 
 @app.get("/api/assessments/{assessment_id}/findings")
@@ -2484,6 +2522,10 @@ def get_assessment(assessment_id: str) -> AssessmentSummaryResponse:
         _serialize_detailed_finding(f, session.target_url, source_archive_path=source_archive_path)
         for f in findings
     ]
+    for finding, serialized in zip(findings, serialized_findings):
+        serialized["verification_history"] = [
+            entry.model_dump(mode="json") for entry in repo.get_retest_history(finding.id)
+        ]
     counts = _compute_endpoint_check_counts(assessment_id, repo, findings=findings)
 
     conf_count = max(session.confirmed_findings_count, counts["confirmed"])

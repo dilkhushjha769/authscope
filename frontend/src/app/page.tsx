@@ -163,6 +163,8 @@ export default function Home() {
   const [stages, setStages] = useState<Record<string, AssessmentStageState>>({});
   const [activityEvents, setActivityEvents] = useState<AssessmentEventItem[]>([]);
   const [findings, setFindings] = useState<FindingItem[]>([]);
+  const [verifyingFindingId, setVerifyingFindingId] = useState<string | null>(null);
+  const [verificationErrors, setVerificationErrors] = useState<Record<string, string>>({});
   const [discoveredEndpoints, setDiscoveredEndpoints] = useState<DiscoveredEndpointItem[]>([]);
   const [summaryData, setSummaryData] = useState<AssessmentSummaryResponse | null>(null);
   const [aiProvider, setAiProvider] = useState<AIProviderInfo | null>(null);
@@ -711,6 +713,31 @@ export default function Home() {
     }
   };
 
+  const verifyFix = async (findingId: string) => {
+    if (!assessmentId || verifyingFindingId) return;
+    setVerifyingFindingId(findingId);
+    setVerificationErrors((current) => ({ ...current, [findingId]: "" }));
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/assessments/${assessmentId}/findings/${findingId}/verify-fix`,
+        { method: "POST" },
+      );
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(typeof payload.detail === "string" ? payload.detail : "Fix verification could not run.");
+      }
+      const history = (payload.history || []) as FindingItem["verification_history"];
+      setFindings((current) => current.map((finding) => finding.id === findingId
+        ? { ...finding, retest_status: history?.[0]?.new_status || payload.verification?.new_status, verification_history: history }
+        : finding));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Fix verification failed.";
+      setVerificationErrors((current) => ({ ...current, [findingId]: message }));
+    } finally {
+      setVerifyingFindingId(null);
+    }
+  };
+
   /**
    * Resets the UI back to initial ChatGPT-like prompt screen.
    */
@@ -1224,6 +1251,20 @@ export default function Home() {
                 {/* ========================================================= */}
                 {/* 3B. Live Findings Grouped by Status (Section 7 & 8)       */}
                 {/* ========================================================= */}
+                {findings.length > 0 && (() => {
+                  const counts = findings.reduce<Record<string, number>>((acc, finding) => {
+                    const value = finding.retest_status || "NOT_TESTED";
+                    acc[value] = (acc[value] || 0) + 1;
+                    return acc;
+                  }, {});
+                  return <div className="my-4 grid grid-cols-2 gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 text-xs sm:grid-cols-5">
+                    <div>Issues found: <strong>{findings.length}</strong></div>
+                    <div>Fixed: <strong>{counts.FIXED || 0}</strong></div>
+                    <div>Still vulnerable: <strong>{counts["STILL VULNERABLE"] || 0}</strong></div>
+                    <div>Partially fixed: <strong>{counts["PARTIALLY FIXED"] || 0}</strong></div>
+                    <div>Need investigation: <strong>{(counts.INCONCLUSIVE || 0) + (counts.NOT_TESTED || 0)}</strong></div>
+                  </div>;
+                })()}
                 {confirmedFindings.length > 0 && (
                   <div className="my-5 space-y-3">
                     <div className="text-xs font-mono font-semibold tracking-wide uppercase text-red-400 flex items-center gap-2">
@@ -1232,7 +1273,7 @@ export default function Home() {
                       by Security Engine
                     </div>
                     {confirmedFindings.map((f) => (
-                      <FindingCard key={f.id} finding={f} />
+                      <FindingCard key={f.id} finding={f} onVerifyFix={verifyFix} verificationPending={verifyingFindingId === f.id} verificationError={verificationErrors[f.id]} />
                     ))}
                   </div>
                 )}
@@ -1245,7 +1286,7 @@ export default function Home() {
                       Potential Issue, Evidence Incomplete
                     </div>
                     {suspiciousFindings.map((f) => (
-                      <FindingCard key={f.id} finding={f} />
+                      <FindingCard key={f.id} finding={f} onVerifyFix={verifyFix} verificationPending={verifyingFindingId === f.id} verificationError={verificationErrors[f.id]} />
                     ))}
                   </div>
                 )}
@@ -1257,7 +1298,7 @@ export default function Home() {
                       Inconclusive Checks ({inconclusiveFindings.length})
                     </div>
                     {inconclusiveFindings.map((f) => (
-                      <FindingCard key={f.id} finding={f} />
+                      <FindingCard key={f.id} finding={f} onVerifyFix={verifyFix} verificationPending={verifyingFindingId === f.id} verificationError={verificationErrors[f.id]} />
                     ))}
                   </div>
                 )}
@@ -1269,7 +1310,7 @@ export default function Home() {
                       Not Confirmed ({notConfirmedFindings.length})
                     </div>
                     {notConfirmedFindings.map((f) => (
-                      <FindingCard key={f.id} finding={f} />
+                      <FindingCard key={f.id} finding={f} onVerifyFix={verifyFix} verificationPending={verifyingFindingId === f.id} verificationError={verificationErrors[f.id]} />
                     ))}
                   </div>
                 )}
@@ -1281,7 +1322,7 @@ export default function Home() {
                       Not Tested ({notTestedFindings.length})
                     </div>
                     {notTestedFindings.map((f) => (
-                      <FindingCard key={f.id} finding={f} />
+                      <FindingCard key={f.id} finding={f} onVerifyFix={verifyFix} verificationPending={verifyingFindingId === f.id} verificationError={verificationErrors[f.id]} />
                     ))}
                   </div>
                 )}

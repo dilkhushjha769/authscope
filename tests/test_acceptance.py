@@ -249,7 +249,7 @@ class TestSystemAcceptanceWorkflow:
         final_persisted = acceptance_repo.get_finding(finding_id)
         assert final_persisted is not None
         assert final_persisted.severity == SeverityLevel.HIGH
-        assert final_persisted.confirmation_status == "remediated"
+        assert final_persisted.confirmation_status == "confirmed"
         assert final_persisted.retest_status == "remediated"
         assert final_persisted.last_retested_timestamp is not None
         assert final_persisted.evidence.id == evidence_artifact.id

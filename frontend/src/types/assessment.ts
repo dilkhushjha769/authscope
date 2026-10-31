@@ -214,6 +214,32 @@ export interface FindingItem {
   unauthorized_behavior?: string;
   response_difference?: string;
   evidence_validation_status?: FindingValidationStatus | string;
+  retest_status?: string | null;
+  verification_history?: FixVerificationRecord[];
+}
+
+export type FixVerificationStatus =
+  | "FIXED"
+  | "STILL VULNERABLE"
+  | "PARTIALLY FIXED"
+  | "INCONCLUSIVE"
+  | "NOT_TESTED";
+
+export interface FixVerificationRecord {
+  id: string;
+  finding_id: string;
+  previous_status: string;
+  new_status: FixVerificationStatus;
+  is_vulnerable: boolean;
+  summary?: string | null;
+  notes: string;
+  differential_result?: {
+    before?: Record<string, unknown>;
+    after?: Record<string, unknown>;
+    regression_checks?: Record<string, unknown>;
+    [key: string]: unknown;
+  } | null;
+  retested_at: string;
 }
 
 export interface BeginnerExplanation {
