@@ -1,1047 +1,209 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import ReactMarkdown from "react-markdown";
-import {
-  Shield,
-  ArrowRight,
-  CheckCircle2,
-  AlertCircle,
-  AlertTriangle,
-  Loader2,
-  StopCircle,
-  RotateCcw,
-  Copy,
-  ExternalLink,
-  GitBranch,
-  UploadCloud,
-  FileArchive,
-  X,
-  RefreshCw,
-  Sparkles,
-} from "lucide-react";
-import {
-  AssessmentState,
-  AssessmentActivityEvent,
-  FindingItem,
-  EvidenceArtifactModel,
-} from "@/types/assessment";
-import { AgentActivityPanel } from "@/components/AgentActivityPanel";
-import { FindingCard } from "@/components/FindingCard";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckCircle2, Clock3, Copy, FileText, Loader2, Menu, Moon, Plus, Sun, Wifi, WifiOff, X } from "lucide-react";
+import { api, openAssessmentStream } from "@/api/client";
+import type { AssessmentActivityEvent, AssessmentSummaryResponse } from "@/types/assessment";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
-/**
- * Maps raw backend finding records into typed FindingItem structures
- * for the progressive finding card components.
- */
-function mapRecordToFindingItem(rec: Record<string, unknown>): FindingItem {
-  const id = String(rec.id || `f-${Date.now()}`);
-  const endpoint = String(rec.endpoint || rec.target_endpoint || "");
-  const method = String(rec.http_method || "GET");
-  const category = String(
-    rec.vulnerability_category || rec.vulnerability_type || "BOLA_IDOR"
-  );
-  const title = String(rec.title || `${category} on ${endpoint}`);
-  const severity = String(rec.severity || "MEDIUM").toUpperCase();
-  const confirmation_status = String(
-    rec.confirmation_status || rec.status || "confirmed"
-  ).toUpperCase();
-  const validation_status = String(
-    rec.validation_status || "CONFIRMED"
-  ).toUpperCase();
-  const explanation = String(
-    rec.impact_explanation ||
-      rec.description ||
-      `Differential authorization discrepancy observed on ${endpoint}.`
-  );
-
-  const technicalDetails =
-    (rec.technical_details as Record<string, unknown>) || {};
-  const evidenceObj =
-    (rec.evidence as EvidenceArtifactModel) || null;
-
-  const source_file =
-    (technicalDetails.source_file as string) ||
-    (rec.source_file as string) ||
-    null;
-  const function_name =
-    (technicalDetails.function_name as string) ||
-    (rec.function_name as string) ||
-    null;
-  const line_numbers =
-    (technicalDetails.line_numbers as string) ||
-    (rec.line_numbers as string) ||
-    null;
-  const vulnerable_code =
-    (technicalDetails.vulnerable_code as string) ||
-    (rec.vulnerable_code as string) ||
-    null;
-  const suggested_code =
-    (technicalDetails.suggested_code as string) ||
-    (rec.suggested_code as string) ||
-    null;
-
-  const how_to_fix = String(
-    rec.remediation_recommendation ||
-      rec.remediation_guidance ||
-      "Enforce server-side access control checks before returning resource data."
-  );
-
-  return {
-    id,
-    title,
-    vulnerability_category: category,
-    severity,
-    confidence: confirmation_status,
-    validation_status,
-    explanation,
-    affected_endpoint: endpoint,
-    http_method: method,
-    source_file,
-    function_name,
-    line_numbers,
-    vulnerable_code,
-    suggested_code,
-    how_to_fix,
-    expected_behavior: rec.expected_behavior
-      ? String(rec.expected_behavior)
-      : undefined,
-    actual_behavior: rec.actual_behavior
-      ? String(rec.actual_behavior)
-      : undefined,
-    evidence: evidenceObj,
-  };
-}
+type Lifecycle = "CREATED" | "QUEUED" | "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+type PastScan = { id: string; target_url: string; status: string; started_at?: string; confirmed_findings_count?: number; suspicious_results_count?: number };
+type Finding = Record<string, unknown>;
+const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/$/, "");
+const active = (status: string) => ["CREATED", "QUEUED", "PENDING", "RUNNING"].includes(status.toUpperCase());
+const asText = (value: unknown) => typeof value === "string" ? value : "";
+const uniqueFindings = (items: Finding[]) => [...new Map(items.map((item, index) => [asText(item.id) || `missing-id-${index}`, item])).values()];
+const shortDate = (value?: string) => value ? new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "Recent";
 
 export default function Home() {
-  // Input states
-  const [targetUrl, setTargetUrl] = useState<string>("http://localhost:3000");
-  const [githubRepo, setGithubRepo] = useState<string>("");
-  const [sourceArchive, setSourceArchive] = useState<File | null>(null);
-  const [showAdvancedInputs, setShowAdvancedInputs] = useState<boolean>(false);
+  const [target, setTarget] = useState("");
+  const [id, setId] = useState("");
+  const [status, setStatus] = useState<Lifecycle | "IDLE">("IDLE");
+  const [events, setEvents] = useState<AssessmentActivityEvent[]>([]);
+  const [findings, setFindings] = useState<Finding[]>([]);
+  const [report, setReport] = useState<AssessmentSummaryResponse | null>(null);
+  const [history, setHistory] = useState<PastScan[]>([]);
+  const [error, setError] = useState("");
+  const [streamError, setStreamError] = useState("");
+  const [connected, setConnected] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [light, setLight] = useState(false);
+  const [mobileSidebar, setMobileSidebar] = useState(false);
+  const [historyError, setHistoryError] = useState(false);
+  const [selectedFinding, setSelectedFinding] = useState<string | null>(null);
+  const [copiedFix, setCopiedFix] = useState<string | null>(null);
+  const stream = useRef<AbortController | null>(null);
+  const seenIds = useRef(new Set<number>());
 
-  // Assessment lifecycle states
-  const [assessmentId, setAssessmentId] = useState<string | null>(null);
-  const [status, setStatus] = useState<AssessmentState>("ready");
-  const [error, setError] = useState<string | null>(null);
-
-  // Operational events and progressive findings
-  const [activityEvents, setActivityEvents] = useState<AssessmentActivityEvent[]>([]);
-  const [findings, setFindings] = useState<FindingItem[]>([]);
-  const [isActivityExpanded, setIsActivityExpanded] = useState<boolean>(false);
-
-  // Streaming text output
-  const [streamingText, setStreamingText] = useState<string>("");
-
-  // Elapsed time tracking
-  const [startTime, setStartTime] = useState<number | null>(null);
-  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
-
-  // Reconnection tracking
-  const [reconnectAttempts, setReconnectAttempts] = useState<number>(0);
-  const maxReconnectAttempts = 3;
-
-  // Refs
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const messageEndRef = useRef<HTMLDivElement | null>(null);
-  const seenEventIdsRef = useRef<Set<string>>(new Set());
-  const seenMessageIdsRef = useRef<Set<string>>(new Set());
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const connectSSERef = useRef<((scanId: string) => void) | null>(null);
-  const reconnectAttemptsRef = useRef<number>(0);
-
-  // Timer effect for tracking elapsed duration
-  useEffect(() => {
-    let timer: NodeJS.Timeout | null = null;
-    const isActivelyRunning =
-      status === "running" ||
-      status === "connecting" ||
-      status === "analyzing" ||
-      status === "findings_discovered" ||
-      status === "reconnecting";
-
-    if (isActivelyRunning && startTime) {
-      timer = setInterval(() => {
-        setElapsedSeconds(Math.floor((Date.now() - startTime) / 1000));
-      }, 1000);
-    }
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-  }, [status, startTime]);
-
-  // Auto-scroll as messages and findings stream in
-  useEffect(() => {
-    const isActivelyRunning =
-      status === "running" ||
-      status === "connecting" ||
-      status === "analyzing" ||
-      status === "findings_discovered";
-
-    if (isActivelyRunning) {
-      messageEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [streamingText, activityEvents.length, findings.length, status]);
-
-  /**
-   * Refetches full assessment record from backend SQLite repository
-   * to populate structured findings and detailed evidence artifacts.
-   */
-  const fetchAssessmentDetails = useCallback(async (id: string) => {
+  const fetchHistory = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/assessments/${id}`);
-      if (!res.ok) return;
-      const data = await res.json();
-
-      if (Array.isArray(data.findings) && data.findings.length > 0) {
-        const mapped = data.findings.map((f: Record<string, unknown>) =>
-          mapRecordToFindingItem(f)
-        );
-        setFindings(mapped);
-      }
-    } catch (err) {
-      console.warn("Could not fetch detailed assessment findings:", err);
-    }
+      const response = await fetch(`${API_URL}/api/assessments?limit=10`);
+      if (!response.ok) throw new Error("History unavailable");
+      const items = await response.json() as PastScan[];
+      setHistory(items); setHistoryError(false);
+    } catch { setHistoryError(true); }
   }, []);
 
-  /**
-   * Connects to the SSE stream with automatic reconnection support.
-   */
-  const connectSSE = useCallback(
-    (scanId: string) => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
+  const finish = useCallback(async (assessmentId: string, terminal?: string) => {
+    stream.current?.abort(); setConnected(false);
+    try {
+      const data = await api.get(assessmentId);
+      setReport(data); setFindings(uniqueFindings(data.findings || [])); setEvents(data.events || []);
+      const finalStatus = (terminal || data.status).toUpperCase();
+      setStatus((finalStatus === "CANCELLED" || finalStatus === "FAILED" ? finalStatus : data.status.toUpperCase()) as Lifecycle);
+      void fetchHistory();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load the final assessment."); }
+  }, [fetchHistory]);
+
+  const connect = useCallback((assessmentId: string, previous: AssessmentActivityEvent[] = []) => {
+    setStreamError("");
+    stream.current?.abort();
+    const ids = previous.map((event) => Number(event.id)).filter(Number.isFinite);
+    seenIds.current = new Set(ids);
+    stream.current = openAssessmentStream(assessmentId, Math.max(0, ...ids), (event) => {
+      const eventId = Number(event.id);
+      if (Number.isFinite(eventId) && seenIds.current.has(eventId)) return;
+      if (Number.isFinite(eventId)) seenIds.current.add(eventId);
+      setEvents((existing) => [...existing, event]);
+      if (event.event_type.toLowerCase().includes("finding")) {
+        void api.get(assessmentId).then((data) => setFindings(uniqueFindings(data.findings || []))).catch(() => undefined);
       }
+    }, (done) => { void finish(assessmentId, done.status); }, setConnected, setStreamError);
+  }, [finish]);
 
-      const es = new EventSource(`${API_BASE_URL}/api/assessments/${scanId}/stream`);
-      eventSourceRef.current = es;
-
-      es.addEventListener("activity", (e: MessageEvent) => {
-        try {
-          const eventItem: AssessmentActivityEvent = JSON.parse(e.data);
-          setActivityEvents((prev) => [...prev, eventItem]);
-
-          // Dynamically map operational stage to UI state
-          const etype = eventItem.event_type;
-          const stage = eventItem.stage;
-
-          if (
-            etype === "finding_confirmed" ||
-            etype === "suspicious_behavior_detected"
-          ) {
-            setStatus("findings_discovered");
-            // Asynchronously fetch full finding records
-            fetchAssessmentDetails(scanId);
-          } else if (
-            stage === "endpoint_discovery" ||
-            stage === "session_verification" ||
-            stage === "authorization_testing" ||
-            stage === "evidence_validation"
-          ) {
-            setStatus((prev) =>
-              prev === "findings_discovered" ? "findings_discovered" : "analyzing"
-            );
-          } else if (
-            stage === "target_connection" ||
-            stage === "scope_validation"
-          ) {
-            setStatus((prev) =>
-              prev === "findings_discovered" ? "findings_discovered" : "connecting"
-            );
-          }
-        } catch (err) {
-          console.error("Failed to parse SSE activity event:", err);
-        }
-      });
-
-      es.addEventListener("message", (e: MessageEvent) => {
-        try {
-          const payload = JSON.parse(e.data);
-          if (payload.text) {
-            setStreamingText((prev) => prev + payload.text);
-          }
-        } catch (err) {
-          console.error("Failed to parse SSE message chunk:", err);
-        }
-      });
-
-      // Listen for structured AI agent operational events
-      const agentEventNames = [
-        "assessment_started",
-        "agent_thinking",
-        "agent_plan",
-        "tool_started",
-        "tool_completed",
-        "tool_failed",
-        "finding_discovered",
-        "evidence_validated",
-        "source_location_found",
-        "explanation_generated",
-        "assessment_completed",
-        "assessment_failed",
-      ];
-
-      agentEventNames.forEach((ename) => {
-        es.addEventListener(ename, (e: MessageEvent) => {
-          try {
-            const payload = JSON.parse(e.data);
-            const evItem: AssessmentActivityEvent = {
-              assessment_id: payload.assessment_id || scanId,
-              event_type: ename,
-              stage: payload.tool ? `tool_${payload.tool}` : "agent_reasoning",
-              message: payload.message || `${ename}: ${payload.tool || payload.category || ""}`,
-              timestamp: payload.timestamp || new Date().toISOString(),
-              metadata: payload,
-            };
-            setActivityEvents((prev) => {
-              const duplicate = prev.some(
-                (p) => p.event_type === ename && p.message === evItem.message
-              );
-              return duplicate ? prev : [...prev, evItem];
-            });
-
-            if (ename === "finding_discovered") {
-              setStatus("findings_discovered");
-              fetchAssessmentDetails(scanId);
-            }
-          } catch (err) {
-            console.warn(`Failed to parse ${ename} event:`, err);
-          }
-        });
-      });
-
-      es.addEventListener("done", (e: MessageEvent) => {
-        try {
-          const doneData = JSON.parse(e.data);
-          const rawStatus = String(doneData.status || "").toLowerCase();
-
-          if (rawStatus === "failed") {
-            setStatus("failed");
-          } else if (rawStatus === "cancelled") {
-            setStatus("cancelled");
-          } else {
-            const confirmed = Number(doneData.confirmed_findings || 0);
-            const suspicious = Number(doneData.suspicious_results || 0);
-            if (confirmed === 0 && suspicious === 0) {
-              setStatus("no_vulnerabilities");
-            } else {
-              setStatus("completed");
-            }
-          }
-        } catch {
-          setStatus("completed");
-        }
-
-        // Fetch complete final findings from repository
-        fetchAssessmentDetails(scanId);
-        setReconnectAttempts(0);
-        es.close();
-      });
-
-      es.addEventListener("error", (e: Event) => {
-        console.warn("SSE connection interrupted:", e);
-        es.close();
-
-        // Check if stream closed after completion or needs reconnection
-        setStatus((prevStatus) => {
-          if (
-            prevStatus === "completed" ||
-            prevStatus === "no_vulnerabilities" ||
-            prevStatus === "cancelled" ||
-            prevStatus === "failed"
-          ) {
-            return prevStatus;
-          }
-
-          // Attempt reconnection if active
-          if (reconnectAttemptsRef.current < maxReconnectAttempts) {
-            reconnectAttemptsRef.current += 1;
-            setReconnectAttempts(reconnectAttemptsRef.current);
-            setTimeout(() => {
-              connectSSERef.current?.(scanId);
-            }, 2000 * reconnectAttemptsRef.current);
-            return "reconnecting";
-          } else {
-            setError(
-              "SSE stream connection lost. Backend testing may have finished or timed out."
-            );
-            return "failed";
-          }
-        });
-      });
-    },
-    [fetchAssessmentDetails]
-  );
+  const loadAssessment = async (assessmentId: string) => {
+    try {
+      const data = await api.get(assessmentId);
+      const nextStatus = data.status.toUpperCase() as Lifecycle;
+      setId(data.id); setTarget(data.target_url); setStatus(nextStatus);
+      setEvents(data.events || []); setFindings(uniqueFindings(data.findings || [])); setReport(data);
+      setMobileSidebar(false); setError("");
+      if (active(nextStatus)) connect(data.id, data.events || []);
+      else { stream.current?.abort(); setConnected(false); }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load this assessment."); }
+  };
 
   useEffect(() => {
-    connectSSERef.current = connectSSE;
-  }, [connectSSE]);
+    const timer = window.setTimeout(() => { void fetchHistory(); }, 0);
+    return () => { window.clearTimeout(timer); stream.current?.abort(); };
+  }, [fetchHistory]);
 
-  /**
-   * Restores last assessment on browser refresh if preserved in localStorage.
-   */
-  useEffect(() => {
-    const savedId = localStorage.getItem("authscope_last_assessment_id");
-    if (savedId && !assessmentId && status === "ready") {
-      fetch(`${API_BASE_URL}/api/assessments/${savedId}`)
-        .then((res) => {
-          if (res.ok) return res.json();
-          throw new Error("Not found");
-        })
-        .then((data) => {
-          setAssessmentId(data.id);
-          setTargetUrl(data.target_url);
-          const backendStatus = String(data.status).toLowerCase();
-          const startTimeMs = data.started_at ? new Date(data.started_at).getTime() : Date.now();
-          setStartTime(startTimeMs);
-
-          if (backendStatus === "failed" && (!data.events || data.events.length === 0)) {
-            // Interrupted or empty session from previous server restart; clear stale state to start clean
-            localStorage.removeItem("authscope_last_assessment_id");
-            return;
-          }
-
-          if (backendStatus === "completed") {
-            const hasFindings =
-              (data.confirmed_findings_count || 0) > 0 ||
-              (data.suspicious_results_count || 0) > 0;
-            setStatus(hasFindings ? "completed" : "no_vulnerabilities");
-          } else if (backendStatus === "failed") {
-            setStatus("failed");
-          } else if (backendStatus === "cancelled") {
-            setStatus("cancelled");
-          } else {
-            setStatus("running");
-          }
-
-          setActivityEvents(data.events || []);
-          setStreamingText(data.markdown_content || "");
-
-          if (Array.isArray(data.findings) && data.findings.length > 0) {
-            setFindings(
-              data.findings.map((f: Record<string, unknown>) =>
-                mapRecordToFindingItem(f)
-              )
-            );
-          }
-          setElapsedSeconds(
-            data.completed_at && data.started_at
-              ? Math.max(1, Math.floor((new Date(data.completed_at).getTime() - new Date(data.started_at).getTime()) / 1000))
-              : Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000))
-          );
-
-          if (backendStatus === "running" || backendStatus === "pending") {
-            // Assessment is still running in background! Reconnect to stream and stream new events
-            connectSSE(data.id);
-          } else {
-            setActivityEvents(data.events || []);
-            setStreamingText(data.markdown_content || "");
-          }
-        })
-        .catch(() => {
-          localStorage.removeItem("authscope_last_assessment_id");
-        });
-    }
-  }, [assessmentId, status, connectSSE]);
-
-  /**
-   * Dispatches assessment initiation to backend FastAPI.
-   */
-  const startAssessment = async (urlOverride?: string) => {
-    const finalUrl = (urlOverride || targetUrl).trim();
-    if (!finalUrl) {
-      setError("Please specify an authorized target URL.");
-      return;
-    }
-
-    setError(null);
-    setStatus("connecting");
-    setStreamingText("");
-    setActivityEvents([]);
-    setFindings([]);
-    setIsActivityExpanded(false);
-    setReconnectAttempts(0);
-    reconnectAttemptsRef.current = 0;
-
-    const now = Date.now();
-    setStartTime(now);
-    setElapsedSeconds(0);
-
+  const start = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy || active(status)) return;
+    setError("");
+    const suppliedTarget = target.trim();
+    const normalizedTarget = /^[a-z][a-z\d+.-]*:\/\//i.test(suppliedTarget) ? suppliedTarget : `http://${suppliedTarget}`;
+    let parsed: URL;
+    try { parsed = new URL(normalizedTarget); } catch { setError("Enter a valid website address, such as localhost:3000."); return; }
+    if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) { setError("Only http:// and https:// website addresses can be assessed."); return; }
+    setBusy(true); setEvents([]); setFindings([]); setReport(null); setId(""); setStreamError(""); seenIds.current.clear();
     try {
-      // 1. Submit POST request to backend
-      const res = await fetch(`${API_BASE_URL}/api/assessments`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_url: finalUrl }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.detail || "Assessment launch failed.");
-      }
-
-      const scanId = data.assessment_id;
-      setAssessmentId(scanId);
-      localStorage.setItem("authscope_last_assessment_id", scanId);
-
-      // 2. Open EventSource stream
-      connectSSE(scanId);
-    } catch (err: unknown) {
-      const rawMsg = err instanceof Error ? err.message : "Failed to start assessment.";
-      const msg =
-        rawMsg.toLowerCase().includes("failed to fetch") ||
-        rawMsg.toLowerCase().includes("networkerror")
-          ? "Unable to reach the AuthScope API backend on http://localhost:8000. Please ensure the FastAPI backend is running."
-          : rawMsg;
-      setError(msg);
-      setStatus("failed");
-    }
+      const created = await api.start(parsed.toString().replace(/\/$/, ""));
+      setTarget(created.target_url);
+      setId(created.assessment_id); setStatus(created.status.toUpperCase() as Lifecycle);
+      try {
+        const data = await api.get(created.assessment_id);
+        setReport(data); setEvents(data.events || []); setFindings(uniqueFindings(data.findings || []));
+        connect(created.assessment_id, data.events || []);
+      } catch { connect(created.assessment_id); }
+      setMobileSidebar(false);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Assessment could not be started."); setStatus("IDLE"); }
+    finally { setBusy(false); }
   };
 
-  /**
-   * Safely cancels an active security assessment.
-   */
-  const stopAssessment = async () => {
-    if (!assessmentId) return;
-    try {
-      await fetch(`${API_BASE_URL}/api/assessments/${assessmentId}/stop`, {
-        method: "POST",
-      });
-      setStatus("cancelled");
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-    } catch (err) {
-      console.error("Error stopping assessment:", err);
-    }
+  const newAssessment = () => {
+    stream.current?.abort(); setConnected(false); setStatus("IDLE"); setId(""); setEvents([]); setFindings([]); setReport(null); setError(""); setStreamError(""); setTarget(""); setSelectedFinding(null); setMobileSidebar(false);
   };
 
-  /**
-   * Resets the UI back to initial ChatGPT-like prompt screen.
-   */
-  const resetAssessment = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-    }
-    seenEventIdsRef.current.clear();
-    seenMessageIdsRef.current.clear();
-    localStorage.removeItem("authscope_last_assessment_id");
-    setAssessmentId(null);
-    setStatus("ready");
-    setStreamingText("");
-    setActivityEvents([]);
-    setFindings([]);
-    setIsActivityExpanded(false);
-    setError(null);
-    setReconnectAttempts(0);
-    reconnectAttemptsRef.current = 0;
-    setGithubRepo("");
-    setSourceArchive(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
+  const cancel = async () => {
+    if (!id || !active(status) || !window.confirm("Cancel this running assessment?")) return;
+    setBusy(true); setError("");
+    try { await api.cancel(id); await finish(id, "CANCELLED"); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not cancel the assessment."); }
+    finally { setBusy(false); }
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setSourceArchive(file);
-    }
-  };
+  const mainStatus = active(status) ? "In progress" : status === "COMPLETED" ? "Completed" : status === "FAILED" ? "Failed" : status === "CANCELLED" ? "Cancelled" : "";
+  const visibleFindings = uniqueFindings(findings);
+  const engineCount = (values: string[]) => visibleFindings.filter((finding) => values.includes(asText(finding.validation_status || finding.confirmation_status || finding.status).toUpperCase())).length;
+  const fixesCount = visibleFindings.filter((finding) => Boolean(asText(finding.remediation_recommendation || finding.remediation_guidance))).length;
 
-  return (
-    <div className="flex flex-col min-h-screen bg-[#0B0F17] text-[#F9FAFB]">
-      {/* =================================================================== */}
-      {/* 1. TOP MINIMAL BAR                                                  */}
-      {/* =================================================================== */}
-      <header className="sticky top-0 z-50 flex items-center justify-between px-6 py-3.5 border-b border-[#1E293B]/70 bg-[#0B0F17]/90 backdrop-blur">
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-blue-600/15 border border-blue-500/30 text-blue-400">
-            <Shield className="w-4 h-4" />
-          </div>
-          <div>
-            <span className="font-semibold text-base tracking-tight text-white">
-              AuthScope
-            </span>
-            <span className="ml-2 text-xs text-gray-400 font-mono">
-              AI Security Agent
-            </span>
-          </div>
-        </div>
+  return <div className={`workspace ${light ? "workspace-light" : ""}`}>
+    {mobileSidebar && <button aria-label="Close sidebar backdrop" className="sidebar-backdrop" onClick={() => setMobileSidebar(false)} />}
+    <aside className={`sidebar ${mobileSidebar ? "sidebar-open" : ""}`}>
+      <div className="brand"><div className="brand-mark">A</div><span>AuthScope</span><button className="mobile-close icon-button" aria-label="Close menu" onClick={() => setMobileSidebar(false)}><X size={17} /></button></div>
+      <button className="new-scan" onClick={newAssessment}><Plus size={18} />New scan</button>
+      <div className="history-heading">Past scans</div>
+      <div className="history-list">
+        {history.map((scan) => {
+          const scanStatus = scan.status.toUpperCase();
+          const count = Number(scan.confirmed_findings_count || 0) + Number(scan.suspicious_results_count || 0);
+          const label = scan.target_url ? (() => { try { return new URL(scan.target_url).hostname; } catch { return scan.target_url; } })() : scan.id;
+          return <button key={scan.id} className={`history-item ${id === scan.id ? "history-active" : ""}`} onClick={() => void loadAssessment(scan.id)}>
+            <span className="history-title">{label}</span><span className="history-meta">{count} {count === 1 ? "finding" : "findings"} · {shortDate(scan.started_at)}</span>
+            {active(scanStatus) && <span className="history-live"><i /> Running</span>}
+          </button>;
+        })}
+        {!history.length && <p className="history-empty">{historyError ? "Assessment history is unavailable while the API is offline." : "Your recent scans will appear here."}</p>}
+      </div>
+      <button className="theme-toggle" onClick={() => setLight((value) => !value)}>{light ? <Moon size={17} /> : <Sun size={17} />}<span>{light ? "Dark mode" : "Light mode"}</span></button>
+    </aside>
 
-        <div className="flex items-center gap-3">
-          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#111827] border border-[#1E293B] text-[11px] font-mono text-gray-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            Scope: localhost:3000
-          </div>
-
-          {status !== "ready" && (
-            <button
-              onClick={resetAssessment}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-300 hover:text-white bg-[#111827] hover:bg-[#1E293B] border border-[#1E293B] rounded-lg transition-colors"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              New Assessment
-            </button>
-          )}
-        </div>
-      </header>
-
-      {/* =================================================================== */}
-      {/* MAIN CONTAINER                                                      */}
-      {/* =================================================================== */}
-      <main className="flex-1 flex flex-col items-center justify-start max-w-3xl w-full mx-auto px-4 sm:px-6 py-8">
-        {/* =================================================================== */}
-        {/* 2. INITIAL CHATGPT-LIKE HOME SCREEN (Status: Ready)                 */}
-        {/* =================================================================== */}
-        {status === "ready" && (
-          <div className="flex-1 flex flex-col items-center justify-center w-full my-auto text-center py-12">
-            <div className="flex items-center justify-center w-14 h-14 rounded-2xl bg-blue-600/10 border border-blue-500/20 text-blue-400 mb-6 shadow-lg shadow-blue-500/5">
-              <Shield className="w-7 h-7" />
-            </div>
-
-            <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight text-white mb-3">
-              What should I secure?
-            </h1>
-            <p className="text-sm sm:text-base text-gray-400 max-w-lg mb-8 leading-relaxed">
-              Enter an authorized web application or API URL to test for Broken
-              Object Level Authorization (IDOR), privilege escalation, and access
-              control bypasses.
-            </p>
-
-            {/* Main Form */}
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                startAssessment();
-              }}
-              className="w-full max-w-xl text-left"
-            >
-              {/* Primary URL Input Bar */}
-              <div className="relative flex items-center bg-[#111827] border border-[#263248] focus-within:border-blue-500/70 focus-within:ring-2 focus-within:ring-blue-500/20 rounded-2xl p-2 transition-all shadow-xl shadow-black/40">
-                <input
-                  type="text"
-                  value={targetUrl}
-                  onChange={(e) => setTargetUrl(e.target.value)}
-                  placeholder="Enter website URL to assess..."
-                  className="flex-1 bg-transparent px-4 py-3 text-sm sm:text-base text-white placeholder-gray-500 focus:outline-none font-mono"
-                />
-                <button
-                  type="submit"
-                  disabled={!targetUrl.trim()}
-                  className="flex items-center justify-center px-4 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 text-white font-medium text-sm transition-colors shrink-0"
-                >
-                  Start Assessment
-                  <ArrowRight className="w-4 h-4 ml-1.5" />
+    <section className="main-area">
+      <header className={`topbar ${!id ? "topbar-home" : ""}`}><button className="icon-button mobile-menu" aria-label="Open menu" onClick={() => setMobileSidebar(true)}><Menu size={20} /></button><div className="topbar-title">{id ? "Assessment" : "New scan"}</div>{id && <div className="topbar-actions">{active(status) ? <button className="cancel-button" onClick={() => void cancel()} disabled={busy}>Cancel scan</button> : <button className="subtle-button" onClick={newAssessment}><Plus size={15} />New scan</button>}</div>}</header>
+      <main className={`content ${id ? "content-results" : "content-home"}`}>
+        {!id ? <div className="welcome">
+          <h1>Break it before they do.</h1>
+          <p className="welcome-subtitle">AI that tests your app like an attacker would.</p>
+          <form className="target-form" onSubmit={start}>
+            <div className="target-field"><input aria-label="Website address" type="text" value={target} onChange={(event) => setTarget(event.target.value)} placeholder="http://localhost:3000" required /><button aria-label="Start assessment" type="submit" disabled={busy || !target.trim()}>{busy ? <Loader2 className="spin" size={20} /> : <ArrowUp size={21} />}</button></div>
+            <p className="input-hint">Enter a full address or a website name. Missing schemes default to http://.</p>
+            <p className="scope-note">Only assess websites you own or are authorized to test. ScopeGuard validates the target before requests are sent.</p>
+            {error && <p className="error-message" role="alert">{error}</p>}
+          </form>
+        </div> : <div className="assessment-view">
+          <div className="assessment-heading"><button className="back-link" onClick={newAssessment}><ArrowLeft size={16} />New scan</button><div className="assessment-title-row"><div><h1>{target ? (() => { try { return new URL(target).hostname; } catch { return target; } })() : "Assessment"}</h1><p className="assessment-id">{id}</p></div><span className={`status-pill ${active(status) ? "status-running" : `status-${status.toLowerCase()}`}`}>{active(status) ? <Loader2 size={14} className="spin" /> : status === "COMPLETED" ? <CheckCircle2 size={14} /> : <Clock3 size={14} />}{mainStatus}</span></div></div>
+          {(error || streamError) && <p className="error-message" role="alert">{error || streamError}{streamError && active(status) && <button className="reconnect-button" onClick={() => connect(id, events)}>Reconnect</button>}</p>}
+          <div className="results-grid">
+            <section className="panel"><div className="panel-title"><span>Live activity</span><span className="connection-state">{connected ? <><Wifi size={14} />Connected</> : active(status) ? <><WifiOff size={14} />Reconnecting</> : ""}</span></div><div className="activity-feed">{events.length ? events.map((item, index) => <article className="activity-item" key={`${item.id ?? "event"}-${index}`}><span className="activity-dot" /><div><p>{item.message}</p><small>{item.stage} · {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : ""}</small></div></article>) : <p className="empty-note">Waiting for activity from the assessment engine…</p>}</div></section>
+            <section className="panel findings-panel"><div className="panel-title"><span>Findings</span><span className="count-chip">{visibleFindings.length}</span></div>{visibleFindings.length ? <div className="finding-list">{visibleFindings.map((finding, index) => {
+              const findingId = asText(finding.id) || String(index); const findingStatus = asText(finding.validation_status || finding.confirmation_status || finding.status || "UNVALIDATED").toUpperCase();
+              const title = asText(finding.title || finding.vulnerability_category || finding.vulnerability_type) || "Finding";
+              const endpoint = asText(finding.endpoint || finding.target_endpoint); const severity = asText(finding.severity).toUpperCase() || "Unrated";
+              const details = (finding.technical_details && typeof finding.technical_details === "object" ? finding.technical_details : {}) as Record<string, unknown>;
+              const expanded = selectedFinding === findingId;
+              const engineTitle = findingStatus.replaceAll("_", " ");
+              const recommendation = asText(finding.remediation_recommendation || finding.remediation_guidance);
+              const codeExample = asText(details.suggested_code || finding.suggested_code);
+              const rootCause = asText(details.root_cause);
+              const impactedUsers = Array.isArray(finding.affected_roles) ? finding.affected_roles.join(", ") : asText(finding.affected_role);
+              return <article className="finding-card" key={findingId}>
+                <button className="finding-summary" onClick={() => setSelectedFinding(expanded ? null : findingId)}>
+                  <span className={`severity-mark severity-${severity.toLowerCase()}`} />
+                  <span className="finding-main"><strong>{title}</strong><small>{asText(finding.http_method) || "GET"} {endpoint || "Endpoint not provided"}</small></span>
+                  <span className="finding-badges"><i className={`finding-status status-text-${findingStatus.toLowerCase()}`}>{engineTitle}</i><i>{severity}</i></span>
+                  <ArrowDown size={16} className={expanded ? "rotate" : ""} />
                 </button>
-              </div>
-
-              {/* Quick suggestion button */}
-              <div className="flex items-center justify-between mt-3 text-xs text-gray-400">
-                <div className="flex items-center gap-1.5">
-                  <span>Authorized target:</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTargetUrl("http://localhost:3000");
-                    }}
-                    className="px-2 py-0.5 rounded bg-[#161F30] hover:bg-[#1E2D4A] border border-blue-500/30 text-blue-400 font-mono transition-colors flex items-center gap-1"
-                  >
-                    http://localhost:3000 (Juice Shop)
-                    <ExternalLink className="w-2.5 h-2.5" />
-                  </button>
-                </div>
-
-                {/* Toggle optional source code & repo inputs */}
-                <button
-                  type="button"
-                  onClick={() => setShowAdvancedInputs(!showAdvancedInputs)}
-                  className="text-xs text-gray-400 hover:text-blue-400 transition-colors flex items-center gap-1"
-                >
-                  <Sparkles className="w-3 h-3 text-blue-400" />
-                  {showAdvancedInputs ? "Hide source context" : "Add source code (optional)"}
-                </button>
-              </div>
-
-              {/* Expandable Optional Source Code & Repository Input */}
-              {showAdvancedInputs && (
-                <div className="mt-4 p-4 rounded-xl bg-[#111827]/80 border border-[#1E293B] space-y-3.5 animate-in fade-in duration-200">
-                  <div className="text-xs font-medium text-gray-300">
-                    Optional Source Code Context
-                  </div>
-                  <p className="text-[11px] text-gray-400 leading-normal">
-                    Provide a repository or source archive to map detected runtime vulnerabilities directly to source code files and functions.
-                  </p>
-
-                  {/* GitHub Repo Input */}
-                  <div>
-                    <label className="block text-[11px] font-mono text-gray-400 mb-1">
-                      GitHub Repository URL
-                    </label>
-                    <div className="flex items-center gap-2 bg-[#0A0E17] border border-[#263248] rounded-lg px-3 py-2 text-xs font-mono text-gray-200">
-                      <GitBranch className="w-4 h-4 text-gray-400 shrink-0" />
-                      <input
-                        type="text"
-                        value={githubRepo}
-                        onChange={(e) => setGithubRepo(e.target.value)}
-                        placeholder="https://github.com/juice-shop/juice-shop"
-                        className="flex-1 bg-transparent placeholder-gray-600 focus:outline-none text-xs"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Source Archive Upload */}
-                  <div>
-                    <label className="block text-[11px] font-mono text-gray-400 mb-1">
-                      Source Archive (.zip, .tar.gz)
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        ref={fileInputRef}
-                        type="file"
-                        accept=".zip,.tar.gz,.tgz"
-                        onChange={handleFileUpload}
-                        className="hidden"
-                        id="source-archive-upload"
-                      />
-                      <label
-                        htmlFor="source-archive-upload"
-                        className="cursor-pointer flex items-center gap-2 px-3 py-2 rounded-lg bg-[#0A0E17] hover:bg-[#161F30] border border-[#263248] text-xs font-mono text-gray-300 transition-colors"
-                      >
-                        <UploadCloud className="w-4 h-4 text-blue-400" />
-                        <span>{sourceArchive ? "Change file" : "Choose archive"}</span>
-                      </label>
-
-                      {sourceArchive && (
-                        <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-blue-600/10 border border-blue-500/30 text-blue-300 text-xs font-mono">
-                          <FileArchive className="w-3.5 h-3.5 text-blue-400" />
-                          <span className="truncate max-w-[200px]">
-                            {sourceArchive.name}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSourceArchive(null);
-                              if (fileInputRef.current) {
-                                fileInputRef.current.value = "";
-                              }
-                            }}
-                            className="text-gray-400 hover:text-white ml-1"
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Error message */}
-              {error && (
-                <div className="mt-4 p-3 rounded-xl bg-red-950/40 border border-red-700/50 text-red-300 text-xs flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-red-400" />
-                  <span>{error}</span>
-                </div>
-              )}
-            </form>
+                {expanded && <div className="finding-details">
+                  <div className="engine-verdict"><strong>Security engine verdict</strong><span>{engineTitle}</span><small>{asText(finding.classification || finding.access_verdict)}</small></div>
+                  <h3>Finding description</h3><p>{asText(finding.impact_explanation || finding.description) || "No description was provided by the backend."}</p>
+                  <h3>AI review</h3><div className="ai-unavailable"><strong>AI review was not included in the assessment response.</strong><p>The current API returns the security engine finding and its evidence, but does not return an AI verdict, confidence estimate, reasoning, counter-evidence, or missing-evidence analysis. The engine verdict above remains separate and authoritative.</p></div>
+                  <div className="analysis-columns"><div><h3>Evidence supporting the finding</h3>{finding.evidence ? <pre>{JSON.stringify(finding.evidence, null, 2)}</pre> : <p className="missing-source">No evidence object was included in the API response.</p>}</div><div><h3>Evidence against / missing</h3><p className="missing-source">The current response schema does not provide separate counter-evidence or an AI evidence-gap analysis.</p></div></div>
+                  <h3>Impact</h3><p>{asText(finding.impact_explanation || finding.description) || "Impact details were not supplied."}</p>{impactedUsers && <p className="detail-secondary">Affected roles: {impactedUsers}</p>}
+                  <h3>Root cause</h3><p>{rootCause || "Root-cause analysis was not supplied."}</p>
+                  {details.source_file || finding.source_file ? <><h3>Vulnerable source</h3><p>{asText(details.source_file || finding.source_file)}{details.line_numbers || finding.line_numbers ? `:${String(details.line_numbers || finding.line_numbers)}` : ""}</p>{(details.vulnerable_code || finding.vulnerable_code) && <pre>{asText(details.vulnerable_code || finding.vulnerable_code)}</pre>}</> : <p className="missing-source">Source mapping was not supplied for this finding.</p>}
+                  <h3>Recommended fix</h3><p>{recommendation || "No remediation recommendation was supplied."}</p>
+                  {codeExample && <div className="code-example"><div className="code-caption">Secure code example <button onClick={() => { void navigator.clipboard.writeText(codeExample).then(() => { setCopiedFix(findingId); window.setTimeout(() => setCopiedFix(null), 1800); }); }}><>{copiedFix === findingId ? <Check size={13} /> : <Copy size={13} />}{copiedFix === findingId ? "Copied" : "Copy"}</></button></div><pre><code>{codeExample}</code></pre></div>}
+                  <h3>Additional recommendations and fix verification</h3><p className="missing-source">Separate security controls and retesting steps were not supplied in the current finding response.</p>
+                  {typeof finding.technical_details === "object" && finding.technical_details !== null && <details><summary>Technical evidence</summary><pre>{JSON.stringify(finding.technical_details, null, 2)}</pre></details>}
+                </div>}
+              </article>;
+            })}</div> : <p className="empty-note">{status === "COMPLETED" ? "No findings were returned for this assessment." : "Verified findings will appear here when reported."}</p>}</section>
           </div>
-        )}
-
-        {/* =================================================================== */}
-        {/* 3. CONVERSATIONAL STREAMING SCREEN (Active Assessment)              */}
-        {/* =================================================================== */}
-        {status !== "ready" && (
-          <div className="w-full flex flex-col space-y-6 pb-28">
-            {/* User Target Prompt */}
-            <div className="flex items-start gap-3 w-full">
-              <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center shrink-0 text-white text-xs font-bold shadow-md shadow-blue-600/30">
-                U
-              </div>
-              <div className="flex-1">
-                <div className="text-xs text-gray-400 mb-1">Target Application</div>
-                <div className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#161F30] border border-[#263248] font-mono text-sm text-blue-300">
-                  <span>{targetUrl}</span>
-                  {githubRepo && (
-                    <span className="text-[11px] px-2 py-0.5 rounded bg-[#111827] text-gray-400 border border-gray-700 flex items-center gap-1">
-                      <GitBranch className="w-3 h-3" />
-                      Repo Linked
-                    </span>
-                  )}
-                  {sourceArchive && (
-                    <span className="text-[11px] px-2 py-0.5 rounded bg-[#111827] text-gray-400 border border-gray-700 flex items-center gap-1">
-                      <FileArchive className="w-3 h-3" />
-                      Archive Loaded
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {/* Agent Streaming Response Area */}
-            <div className="flex items-start gap-3 w-full">
-              <div className="w-7 h-7 rounded-full bg-emerald-600/20 border border-emerald-500/30 flex items-center justify-center shrink-0 text-emerald-400 shadow-md shadow-emerald-500/10">
-                <Shield className="w-4 h-4" />
-              </div>
-
-              <div className="flex-1 w-full overflow-hidden">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="text-xs text-gray-400">AuthScope Agent</div>
-                  {/* Status Indicator Badge */}
-                  <div className="text-[11px] font-mono">
-                    {status === "connecting" && (
-                      <span className="text-blue-400">Connecting to target...</span>
-                    )}
-                    {status === "analyzing" && (
-                      <span className="text-indigo-400">Analyzing routes & auth...</span>
-                    )}
-                    {status === "findings_discovered" && (
-                      <span className="text-amber-400">Vulnerabilities flagged</span>
-                    )}
-                    {status === "reconnecting" && (
-                      <span className="text-amber-300 animate-pulse flex items-center gap-1">
-                        <RefreshCw className="w-3 h-3 animate-spin" />
-                        Reconnecting to stream{reconnectAttempts > 0 ? ` (${reconnectAttempts})` : ""}...
-                      </span>
-                    )}
-                    {status === "completed" && (
-                      <span className="text-emerald-400">Assessment Complete</span>
-                    )}
-                    {status === "no_vulnerabilities" && (
-                      <span className="text-emerald-400">No vulnerabilities detected</span>
-                    )}
-                    {status === "failed" && (
-                      <span className="text-red-400">Assessment Halted</span>
-                    )}
-                    {status === "cancelled" && (
-                      <span className="text-gray-400">Assessment Cancelled</span>
-                    )}
-                  </div>
-                </div>
-
-                {/* ========================================================= */}
-                {/* 3A. Expandable Agent Activity Component                   */}
-                {/* ========================================================= */}
-                <AgentActivityPanel
-                  status={status}
-                  events={activityEvents}
-                  isExpanded={isActivityExpanded}
-                  onToggleExpand={() => setIsActivityExpanded(!isActivityExpanded)}
-                  elapsedSeconds={elapsedSeconds}
-                />
-
-                {/* ========================================================= */}
-                {/* 3B. Progressive Findings Cards (When Discovered)          */}
-                {/* ========================================================= */}
-                {findings.length > 0 && (
-                  <div className="mb-6 space-y-4">
-                    <div className="flex items-center justify-between px-1">
-                      <div className="text-xs font-mono font-semibold tracking-wide uppercase text-gray-400 flex items-center gap-2">
-                        <AlertTriangle className="w-4 h-4 text-amber-400" />
-                        Identified Vulnerabilities ({findings.length})
-                      </div>
-                    </div>
-
-                    {findings.map((f, idx) => (
-                      <FindingCard key={f.id || idx} finding={f} index={idx} />
-                    ))}
-                  </div>
-                )}
-
-                {/* No vulnerabilities notification */}
-                {status === "no_vulnerabilities" && (
-                  <div className="mb-6 p-4 rounded-2xl bg-emerald-950/20 border border-emerald-500/30 text-emerald-300 text-xs flex items-center gap-3">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-                    <div>
-                      <div className="font-semibold text-white text-sm">
-                        No authorization vulnerabilities detected
-                      </div>
-                      <div className="text-gray-400 mt-0.5">
-                        The security testing agent evaluated all discovered endpoints and verified that tested routes enforced expected authorization controls.
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* ========================================================= */}
-                {/* 3C. Streaming Conversational Markdown Output              */}
-                {/* ========================================================= */}
-                <div className="prose prose-invert max-w-none text-sm sm:text-base leading-relaxed text-gray-200">
-                  {streamingText ? (
-                    <ReactMarkdown
-                      components={{
-                        h3: ({ children }) => (
-                          <h3 className="text-lg font-semibold text-white mt-6 mb-2 border-b border-[#1E293B] pb-1">
-                            {children}
-                          </h3>
-                        ),
-                        p: ({ children }) => (
-                          <p className="mb-3.5 text-gray-300 leading-relaxed">
-                            {children}
-                          </p>
-                        ),
-                        ul: ({ children }) => (
-                          <ul className="list-disc pl-5 mb-4 space-y-1.5 text-gray-300">
-                            {children}
-                          </ul>
-                        ),
-                        li: ({ children }) => (
-                          <li className="text-gray-300">{children}</li>
-                        ),
-                        code: ({
-                          className,
-                          children,
-                        }: {
-                          className?: string;
-                          children?: React.ReactNode;
-                        }) => {
-                          const codeText = String(children).replace(/\n$/, "");
-                          const isInline =
-                            !className && !codeText.includes("\n");
-
-                          if (isInline) {
-                            return (
-                              <code className="px-1.5 py-0.5 rounded bg-[#161F30] text-blue-300 font-mono text-xs border border-[#263248]">
-                                {children}
-                              </code>
-                            );
-                          }
-
-                          return (
-                            <div className="relative group my-4 rounded-xl overflow-hidden border border-[#263248] bg-[#0A0E17]">
-                              <div className="flex items-center justify-between px-4 py-1.5 bg-[#111827] text-gray-400 text-xs border-b border-[#263248]">
-                                <span className="font-mono">remediation.js</span>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    navigator.clipboard.writeText(codeText)
-                                  }
-                                  className="flex items-center gap-1 text-[11px] hover:text-white transition-colors"
-                                >
-                                  <Copy className="w-3 h-3" />
-                                  Copy
-                                </button>
-                              </div>
-                              <pre className="p-4 text-xs font-mono text-emerald-300 overflow-x-auto leading-normal">
-                                <code>{children}</code>
-                              </pre>
-                            </div>
-                          );
-                        },
-                      }}
-                    >
-                      {streamingText}
-                    </ReactMarkdown>
-                  ) : status === "failed" || status === "cancelled" ? (
-                    <div className="p-4 rounded-xl bg-red-950/20 border border-red-800/40 text-red-300 text-sm flex flex-col gap-2.5">
-                      <div className="flex items-center gap-2 font-medium text-red-400">
-                        <AlertCircle className="w-4 h-4 shrink-0" />
-                        <span>Assessment Halted</span>
-                      </div>
-                      <p className="text-xs text-gray-300 leading-relaxed">
-                        {error || "The assessment was interrupted or halted before completion. Ensure the backend API is running and target application is reachable."}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={resetAssessment}
-                        className="self-start mt-1.5 px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors flex items-center gap-1.5 shadow-md shadow-blue-600/20"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" />
-                        Start New Assessment
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2 text-gray-400 text-sm italic">
-                      <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-                      Connecting to application and executing authorization tests...
-                    </div>
-                  )}
-
-                  {/* Streaming pulse indicator while active */}
-                  {(status === "running" ||
-                    status === "connecting" ||
-                    status === "analyzing" ||
-                    status === "findings_discovered") &&
-                    streamingText && (
-                      <span className="inline-block w-2 h-4 ml-1 bg-blue-500 animate-pulse align-middle" />
-                    )}
-                </div>
-
-                <div ref={messageEndRef} />
-              </div>
-            </div>
-          </div>
-        )}
+          {report && !active(status) && <section className="report-panel"><div className="panel-title"><span><FileText size={17} />Final report</span><button className="subtle-button print-button" onClick={() => window.print()}>Print report</button></div><dl className="report-grid">{[["Target", report.target_url], ["Assessment ID", report.id], ["Status", report.status], ["Started", report.started_at], ["Finished", report.completed_at || "Not provided"], ["Endpoints tested", report.endpoints_tested_count], ["Findings detected", visibleFindings.length], ["Engine confirmed", engineCount(["CONFIRMED", "CONFIRMED_RUNTIME_VULNERABILITY"])], ["Suspicious / inconclusive", engineCount(["SUSPICIOUS", "SUSPECTED", "INCONCLUSIVE"])], ["Fix recommendations supplied", fixesCount], ["AI reviewed", "Not reported by API"]].map(([label, value]) => <div key={String(label)}><dt>{label}</dt><dd>{value}</dd></div>)}</dl><div className="report-separation"><strong>Security engine verdicts</strong><p>Counts above use engine finding statuses. They are not AI conclusions.</p></div><div className="report-separation"><strong>AI assessment</strong><p>The current assessment response contains no AI finding-review result.</p></div><div className="report-separation"><strong>Actual evidence and summary</strong>{report.summary_text ? <p className="report-summary">{report.summary_text}</p> : <p>No overall summary was supplied by the backend.</p>}</div>{status === "FAILED" && report.failure_reason && <p className="error-message">{report.failure_reason}</p>}</section>}
+        </div>}
       </main>
-
-      {/* =================================================================== */}
-      {/* 4. PINNED BOTTOM ACTION BAR (When active)                           */}
-      {/* =================================================================== */}
-      {status !== "ready" && (
-        <footer className="fixed bottom-0 left-0 right-0 z-40 bg-gradient-to-t from-[#0B0F17] via-[#0B0F17]/95 to-transparent pt-6 pb-6 px-4">
-          <div className="max-w-3xl mx-auto flex items-center justify-between gap-4 p-2.5 rounded-2xl bg-[#111827] border border-[#263248] shadow-2xl">
-            <div className="flex items-center gap-2 px-3 text-xs text-gray-400 font-mono">
-              {status === "connecting" ||
-              status === "analyzing" ||
-              status === "running" ||
-              status === "findings_discovered" ? (
-                <>
-                  <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping" />
-                  <span className="text-blue-400 font-medium">
-                    {status === "findings_discovered"
-                      ? `Testing active (${findings.length} findings)`
-                      : "Assessing target..."}
-                  </span>
-                </>
-              ) : status === "reconnecting" ? (
-                <>
-                  <RefreshCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />
-                  <span className="text-amber-300 font-medium">
-                    Reconnecting to stream...
-                  </span>
-                </>
-              ) : status === "completed" || status === "no_vulnerabilities" ? (
-                <>
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-gray-300">Assessment Complete</span>
-                </>
-              ) : (
-                <>
-                  <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="text-amber-400 capitalize">{status}</span>
-                </>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2">
-              {(status === "running" ||
-                status === "connecting" ||
-                status === "analyzing" ||
-                status === "findings_discovered" ||
-                status === "reconnecting") && (
-                <button
-                  type="button"
-                  onClick={stopAssessment}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-red-300 bg-red-950/40 hover:bg-red-900/60 border border-red-800/60 rounded-xl transition-colors"
-                >
-                  <StopCircle className="w-3.5 h-3.5" />
-                  Stop
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={resetAssessment}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-xl transition-colors"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                New Target
-              </button>
-            </div>
-          </div>
-        </footer>
-      )}
-    </div>
-  );
+      {!id && <div className="page-help">Authorized testing only · ScopeGuard validates the target before any assessment begins.</div>}
+    </section>
+  </div>;
 }

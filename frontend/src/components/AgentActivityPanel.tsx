@@ -59,6 +59,8 @@ export function AgentActivityPanel({
           <span className="font-medium text-gray-200">
             {isRunning
               ? `Agent Active (${elapsedSeconds}s)`
+              : isFailed
+              ? `Halted after ${Math.max(1, elapsedSeconds)}s`
               : `Completed in ${Math.max(1, elapsedSeconds)}s`}
           </span>
 

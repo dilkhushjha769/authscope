@@ -124,7 +124,7 @@ def validate_target_url(url: str, scope_guard: Optional[ScopeGuard] = None) -> T
     if parsed.scheme.lower() not in ("http", "https"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid URL scheme '{parsed.scheme}'. Only 'http' and 'https' are allowed.",
+            detail=f"Scope violation: invalid URL scheme '{parsed.scheme}'. Only 'http' and 'https' are allowed.",
         )
 
     if not parsed.hostname:

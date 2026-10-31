@@ -15,9 +15,34 @@ export type AssessmentState =
   | "cancelled"
   | "reconnecting";
 
+export type FindingStatus =
+  | "CONFIRMED"
+  | "SUSPICIOUS"
+  | "NOT_CONFIRMED"
+  | "INCONCLUSIVE"
+  | "NOT_TESTED";
+
+export type SSEEventType =
+  | "assessment_started"
+  | "agent_thinking"
+  | "agent_plan"
+  | "tool_started"
+  | "tool_completed"
+  | "tool_failed"
+  | "endpoint_discovered"
+  | "finding_hypothesis"
+  | "finding_discovered"
+  | "evidence_validated"
+  | "source_location_found"
+  | "explanation_generated"
+  | "assessment_completed"
+  | "assessment_failed"
+  | "assessment_cancelled";
+
 export interface AssessmentActivityEvent {
+  id?: number;
   assessment_id: string;
-  event_type: string;
+  event_type: SSEEventType | string;
   stage: string;
   message: string;
   timestamp: string;
@@ -53,8 +78,11 @@ export interface FindingItem {
   vulnerability_category: string;
   severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO" | string;
   confidence: "CONFIRMED" | "HIGH" | "MEDIUM" | "LOW" | string;
-  validation_status: "CONFIRMED" | "SUSPICIOUS" | "UNVALIDATED" | string;
+  validation_status: FindingStatus | string;
+  finding_status?: FindingStatus | string;
   explanation: string;
+  impact?: string | null;
+  evidence_summary?: string | null;
   affected_endpoint: string;
   http_method: string;
   source_file?: string | null;
@@ -65,6 +93,7 @@ export interface FindingItem {
   how_to_fix?: string | null;
   expected_behavior?: string | null;
   actual_behavior?: string | null;
+  black_box_only?: boolean;
   evidence?: EvidenceArtifactModel | null;
 }
 
@@ -73,7 +102,9 @@ export interface AssessmentSummaryResponse {
   target_url: string;
   status: string;
   started_at: string;
+  updated_at?: string | null;
   completed_at: string | null;
+  failure_reason?: string | null;
   endpoints_discovered_count: number;
   endpoints_tested_count: number;
   confirmed_findings_count: number;

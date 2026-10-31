@@ -1,38 +1,47 @@
-"""FastAPI Application for AuthScope — AI Agent & Assessment API Backend.
+"""FastAPI Application for AuthScope — Unified AI Agent & Security Assessment API Backend.
 
-Connects:
-1. Member 1: Gemini AI Agent Connector.
-2. Member 2: Tool Registry.
-3. Member 3: Assessment Memory & RAG Knowledge Base.
-4. Security Assessment Engine (7-stage deterministic execution).
-
-Provides HTTP REST and Server-Sent Events (SSE) endpoints streaming structured
-agent operational telemetry, thoughts, plans, tool actions, and findings.
+Connects the complete assessment pipeline via Dependency Injection:
+URL input
+→ ScopeGuard validation
+→ Canonical GeminiAuthScopeAgent
+→ ToolRegistryAdapter
+→ Real website security checks (AssessmentEngine)
+→ Cryptographic EvidenceValidator
+→ MemoryManager & RAG
+→ CodeMapper & ExplanationEngine
+→ Real-time SSE streaming
+→ Next.js frontend display.
 """
 
+from __future__ import annotations
+
+import asyncio
 from datetime import datetime, timezone
 import json
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 import uuid
-import asyncio
-from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
-from pathlib import Path
-import sys
 
-from fastapi import FastAPI, HTTPException, Request, Response, status, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from backend.api.adapters import (
+    AssessmentPipelineRequest,
+    GeminiAuthScopeAgent,
+    MemoryManager,
+    ToolRegistryAdapter,
+)
 from backend.config import settings
 from backend.core.assessment_engine import (
     AssessmentEngine,
     AssessmentQueryAdapter,
     CancellationToken,
+    sanitize_event_metadata,
+    sanitize_event_text,
 )
 from backend.core.scope_guard import ScopeGuard
-from backend.core.session_manager import Role, SessionManager
-from backend.scanner.request_executor import RequestExecutor
-from backend.scanner.response_analyzer import AccessVerdict
+from backend.retesting.retest_engine import RetestEngine
 from backend.storage.finding_repository import FindingRepository
 from backend.storage.models import (
     AssessmentEvent,
@@ -40,11 +49,7 @@ from backend.storage.models import (
     EventType,
     FindingRecord,
     ScanSessionRecord,
-    StageStatus,
 )
-from backend.agent.gemini_agent import GeminiAgent
-from backend.agent.memory import AssessmentMemory
-from backend.agent.tools import ToolRegistry
 from backend.api.lifecycle import (
     AssessmentStatus,
     InvalidStateTransitionError,
@@ -63,18 +68,92 @@ from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Active background runners and cancellation tokens indexed by assessment_id
+
+class CleanupStreamingResponse(StreamingResponse):
+    """Closes an async body iterator when a client disconnects mid-stream."""
+
+    async def stream_response(self, send: Any) -> None:
+        try:
+            await super().stream_response(send)
+        finally:
+            close_iterator = getattr(self.body_iterator, "aclose", None)
+            if close_iterator is not None:
+                await close_iterator()
+
+
+# Active cancellation tokens indexed by assessment_id
 active_tokens: Dict[str, CancellationToken] = {}
+
+ALL_REQUIRED_SSE_EVENTS: Set[str] = {
+    "assessment_started",
+    "agent_thinking",
+    "agent_plan",
+    "tool_started",
+    "tool_completed",
+    "tool_failed",
+    "endpoint_discovered",
+    "finding_hypothesis",
+    "finding_discovered",
+    "evidence_validated",
+    "source_location_found",
+    "explanation_generated",
+    "assessment_completed",
+    "assessment_failed",
+    "assessment_cancelled",
+}
 
 
 class AssessmentTaskManager:
-    """Manages decoupled background execution of assessments and SSE client event broadcasting."""
+    """Manages unified background execution of assessments and SSE client event broadcasting.
 
-    def __init__(self) -> None:
-        self._tasks: Dict[str, asyncio.Task] = {}
+    Supports Dependency Injection for `agent` (`GeminiAuthScopeAgent`),
+    `tool_registry` (`ToolRegistryAdapter`), and `memory_manager` (`MemoryManager`).
+    """
+
+    def __init__(
+        self,
+        agent: Optional[Any] = None,
+        tool_registry: Optional[Any] = None,
+        memory_manager: Optional[Any] = None,
+    ) -> None:
+        self._tasks: Dict[str, asyncio.Task[None]] = {}
         self._tokens: Dict[str, CancellationToken] = {}
-        self._subscribers: Dict[str, List[asyncio.Queue]] = {}
+        self._subscribers: Dict[str, List[asyncio.Queue[Any]]] = {}
         self._lock = asyncio.Lock()
+
+        # Injected dependencies (if None, default production adapters are instantiated per run)
+        self.agent = agent
+        self.tool_registry = tool_registry
+        self.memory_manager = memory_manager
+
+    def configure_dependencies(
+        self,
+        agent: Optional[Any] = None,
+        tool_registry: Optional[Any] = None,
+        memory_manager: Optional[Any] = None,
+    ) -> None:
+        """Configures injected components for the unified pipeline (or mock adapters in tests)."""
+        self.agent = agent
+        self.tool_registry = tool_registry
+        self.memory_manager = memory_manager
+
+    def reset_dependencies(self) -> None:
+        """Resets injected dependencies back to production defaults."""
+        self.agent = None
+        self.tool_registry = None
+        self.memory_manager = None
+
+    def get_agent(self, repo: FindingRepository) -> Any:
+        """Returns the injected agent or constructs the default canonical GeminiAuthScopeAgent."""
+        if self.agent is not None:
+            return self.agent
+        memory = self.memory_manager or MemoryManager(repository=repo)
+        tools = self.tool_registry or ToolRegistryAdapter()
+        return GeminiAuthScopeAgent(
+            tool_registry=tools,
+            memory_manager=memory,
+            repository=repo,
+        )
 
     def get_token(self, scan_id: str) -> Optional[CancellationToken]:
         return self._tokens.get(scan_id)
@@ -102,13 +181,22 @@ class AssessmentTaskManager:
         target_url: str,
         token: CancellationToken,
         repo: FindingRepository,
-    ) -> Optional[asyncio.Task]:
-        """Starts a managed background task for assessment execution."""
+        github_repo: Optional[str] = None,
+        source_archive_path: Optional[str] = None,
+    ) -> Optional[asyncio.Task[None]]:
+        """Starts a managed background task for unified assessment execution."""
         self._tokens[scan_id] = token
         try:
             loop = asyncio.get_running_loop()
             task = loop.create_task(
-                self._run_task(scan_id, target_url, token, repo),
+                self._run_task(
+                    scan_id=scan_id,
+                    target_url=target_url,
+                    token=token,
+                    repo=repo,
+                    github_repo=github_repo,
+                    source_archive_path=source_archive_path,
+                ),
                 name=f"assessment_{scan_id}",
             )
             self._tasks[scan_id] = task
@@ -117,33 +205,128 @@ class AssessmentTaskManager:
             logger.warning(f"No running event loop detected for background task {scan_id}")
             return None
 
+    @staticmethod
+    def _coerce_event(scan_id: str, raw_item: Union[AssessmentEvent, Dict[str, Any]]) -> AssessmentEvent:
+        """Normalizes an AssessmentEvent or dictionary emitted by an agent into an AssessmentEvent."""
+        if isinstance(raw_item, AssessmentEvent):
+            raw_item.assessment_id = scan_id
+            return raw_item
+        data = dict(raw_item)
+        etype = str(data.get("event_type") or data.get("type") or EventType.STAGE_UPDATED.value)
+        stage = str(data.get("stage") or AssessmentStage.AUTHORIZATION_TESTING.value)
+        msg = str(data.get("message") or etype)
+        meta = dict(data.get("metadata") or {k: v for k, v in data.items() if k not in ("id", "assessment_id", "event_type", "type", "stage", "message", "timestamp")})
+        return AssessmentEvent(
+            id=data.get("id"),
+            assessment_id=scan_id,
+            event_type=etype,
+            stage=stage,
+            message=sanitize_event_text(msg),
+            timestamp=str(data.get("timestamp") or datetime.now(timezone.utc).isoformat()),
+            metadata=sanitize_event_metadata(meta),
+        )
+
     async def _run_task(
         self,
         scan_id: str,
         target_url: str,
         token: CancellationToken,
         repo: FindingRepository,
+        github_repo: Optional[str] = None,
+        source_archive_path: Optional[str] = None,
     ) -> None:
-        """Background worker executing the assessment generator decoupled from client connections."""
+        """Background worker executing the single unified assessment pipeline."""
         logger.info(f"Background assessment task started for {scan_id} ({target_url})")
-        engine = AssessmentEngine(repository=repo)
-        gen = engine.stream_assessment(target_url=target_url, cancel_token=token)
+        active_agent = self.get_agent(repo=repo)
+        pipeline_req = AssessmentPipelineRequest(
+            assessment_id=scan_id,
+            target_url=target_url,
+            github_repo=github_repo,
+            source_archive_path=source_archive_path,
+        )
 
         async def _execute_steps() -> None:
-            while True:
-                # Run generator next() in worker thread without blocking event loop
-                event = await asyncio.to_thread(lambda: next(gen, None))
-                if event is None:
-                    break
+            # Brief yield so HTTP POST /retry caller observes initial PENDING state
+            # and SSE client can attach before execution transitions to RUNNING
+            await asyncio.sleep(0.05)
+            curr_sess = repo.get_scan_session(scan_id)
+            if curr_sess and curr_sess.status == "PENDING":
+                curr_sess.status = "RUNNING"
+                curr_sess.updated_at = datetime.now(timezone.utc)
+                repo.save_scan_session(curr_sess)
 
-                # Prepare conversational markdown chunk
+            stream_iter = active_agent.astream_assessment(pipeline_req, cancel_token=token)
+            async for raw_ev in stream_iter:
+                event = self._coerce_event(scan_id, raw_ev)
+
+                # Ensure event is persisted in SQLite with a valid sequential ID for replay
+                if not event.id:
+                    repo.save_event(event)
+
+                # Update session state if custom/mock agent emitted terminal event
+                if event.event_type == EventType.ASSESSMENT_COMPLETED.value:
+                    sess = repo.get_scan_session(scan_id)
+                    if sess and sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
+                        sess.status = "COMPLETED"
+                        sess.completed_at = datetime.now(timezone.utc)
+                        sess.updated_at = datetime.now(timezone.utc)
+                        sess.summary_text = event.message
+                        sess.confirmed_findings_count = int(
+                            event.metadata.get("confirmed_findings", sess.confirmed_findings_count)
+                        )
+                        sess.suspicious_results_count = int(
+                            event.metadata.get("suspicious_results", sess.suspicious_results_count)
+                        )
+                        repo.save_scan_session(sess)
+                elif event.event_type == EventType.ASSESSMENT_CANCELLED.value:
+                    sess = repo.get_scan_session(scan_id)
+                    if sess and sess.status != "CANCELLED":
+                        sess.status = "CANCELLED"
+                        sess.completed_at = datetime.now(timezone.utc)
+                        sess.updated_at = datetime.now(timezone.utc)
+                        sess.summary_text = event.message
+                        repo.save_scan_session(sess)
+                elif event.event_type == EventType.ASSESSMENT_FAILED.value:
+                    sess = repo.get_scan_session(scan_id)
+                    if sess and sess.status != "FAILED":
+                        sess.status = "FAILED"
+                        sess.failure_reason = str(event.metadata.get("reason", "EXECUTION_ERROR"))
+                        sess.completed_at = datetime.now(timezone.utc)
+                        sess.updated_at = datetime.now(timezone.utc)
+                        sess.summary_text = event.message
+                        repo.save_scan_session(sess)
+
                 msg_chunk = _format_event_message_chunk(event, repo=repo)
-
-                # Broadcast to all currently connected SSE clients
                 await self._broadcast(scan_id, ("activity", event, msg_chunk))
 
-                # Yield brief time to asyncio event loop
-                await asyncio.sleep(0.04)
+                if token.is_cancelled and event.event_type != EventType.ASSESSMENT_CANCELLED.value:
+                    cancel_sess = repo.get_scan_session(scan_id)
+                    if cancel_sess and cancel_sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
+                        cancel_sess.status = "CANCELLED"
+                        cancel_sess.completed_at = datetime.now(timezone.utc)
+                        cancel_sess.updated_at = datetime.now(timezone.utc)
+                        cancel_sess.summary_text = "Assessment cancelled safely by operator."
+                        repo.save_scan_session(cancel_sess)
+                        cancel_ev = AssessmentEvent(
+                            assessment_id=scan_id,
+                            event_type=EventType.ASSESSMENT_CANCELLED.value,
+                            stage=AssessmentStage.REPORT_PREPARATION.value,
+                            message="Assessment cancelled safely by operator.",
+                        )
+                        repo.save_event(cancel_ev)
+                        cancel_chunk = _format_event_message_chunk(cancel_ev, repo=repo)
+                        await self._broadcast(scan_id, ("activity", cancel_ev, cancel_chunk))
+                    break
+
+                await asyncio.sleep(0.02)
+
+            # Finalize session if generator completed without setting terminal status
+            final_check = repo.get_scan_session(scan_id)
+            if final_check and final_check.status in ("PENDING", "RUNNING"):
+                final_check.status = "CANCELLED" if token.is_cancelled else "COMPLETED"
+                final_check.completed_at = datetime.now(timezone.utc)
+                final_check.updated_at = datetime.now(timezone.utc)
+                repo.save_scan_session(final_check)
 
         try:
             await asyncio.wait_for(_execute_steps(), timeout=settings.assessment_timeout_seconds)
@@ -157,7 +340,9 @@ class AssessmentTaskManager:
                     curr_session.failure_reason = "TIMEOUT"
                     curr_session.completed_at = datetime.now(timezone.utc)
                     curr_session.updated_at = datetime.now(timezone.utc)
-                    curr_session.summary_text = f"Assessment exceeded timeout limit ({settings.assessment_timeout_seconds}s)."
+                    curr_session.summary_text = (
+                        f"Assessment exceeded timeout limit ({settings.assessment_timeout_seconds}s)."
+                    )
                     repo.save_scan_session(curr_session)
                     timeout_ev = AssessmentEvent(
                         assessment_id=scan_id,
@@ -167,9 +352,13 @@ class AssessmentTaskManager:
                         metadata={"reason": "TIMEOUT", "timeout_seconds": settings.assessment_timeout_seconds},
                     )
                     repo.save_event(timeout_ev)
+                    await self._broadcast(scan_id, ("activity", timeout_ev, _format_event_message_chunk(timeout_ev)))
             except Exception as e:
                 logger.warning(f"Error recording timeout for {scan_id}: {e}")
-            await self._broadcast(scan_id, ("error", f"Assessment timed out after {settings.assessment_timeout_seconds}s", None))
+            await self._broadcast(
+                scan_id,
+                ("error", f"Assessment timed out after {settings.assessment_timeout_seconds}s", None),
+            )
         except Exception as exc:
             logger.error(f"Error in background assessment task {scan_id}: {exc}", exc_info=True)
             try:
@@ -181,11 +370,19 @@ class AssessmentTaskManager:
                     curr_session.updated_at = datetime.now(timezone.utc)
                     curr_session.summary_text = f"Assessment failed: {exc}"
                     repo.save_scan_session(curr_session)
+                    fail_ev = AssessmentEvent(
+                        assessment_id=scan_id,
+                        event_type=EventType.ASSESSMENT_FAILED.value,
+                        stage=AssessmentStage.REPORT_PREPARATION.value,
+                        message=f"Assessment failed: {exc}",
+                        metadata={"reason": "EXECUTION_ERROR"},
+                    )
+                    repo.save_event(fail_ev)
+                    await self._broadcast(scan_id, ("activity", fail_ev, _format_event_message_chunk(fail_ev)))
             except Exception:
                 pass
             await self._broadcast(scan_id, ("error", str(exc), None))
         finally:
-            # Broadcast done event to subscribers
             final_session = repo.get_scan_session(scan_id)
             done_payload = {
                 "status": final_session.status if final_session else "COMPLETED",
@@ -196,7 +393,9 @@ class AssessmentTaskManager:
                 "suspicious_results": final_session.suspicious_results_count if final_session else 0,
             }
             await self._broadcast(scan_id, ("done", done_payload, None))
-            logger.info(f"Background assessment task completed for {scan_id} with status {done_payload['status']}")
+            logger.info(
+                f"Background assessment task completed for {scan_id} with status {done_payload['status']}"
+            )
 
     async def _broadcast(self, scan_id: str, item: Any) -> None:
         queues = list(self._subscribers.get(scan_id, []))
@@ -206,14 +405,14 @@ class AssessmentTaskManager:
             except asyncio.QueueFull:
                 pass
 
-    def subscribe(self, scan_id: str) -> asyncio.Queue:
+    def subscribe(self, scan_id: str) -> asyncio.Queue[Any]:
         if scan_id not in self._subscribers:
             self._subscribers[scan_id] = []
-        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        q: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
         self._subscribers[scan_id].append(q)
         return q
 
-    def unsubscribe(self, scan_id: str, q: asyncio.Queue) -> None:
+    def unsubscribe(self, scan_id: str, q: asyncio.Queue[Any]) -> None:
         if scan_id in self._subscribers and q in self._subscribers[scan_id]:
             self._subscribers[scan_id].remove(q)
             if not self._subscribers[scan_id]:
@@ -222,7 +421,6 @@ class AssessmentTaskManager:
 
 # Global task manager instance
 task_manager = AssessmentTaskManager()
-# Maintain active_tokens dictionary for backwards-compatible references
 active_tokens = task_manager._tokens
 
 app = FastAPI(
@@ -244,6 +442,7 @@ async def startup_recovery() -> None:
 
 # Enforce request payload size limit middleware (rejects > 1MB with HTTP 413)
 app.add_middleware(RequestSizeLimitMiddleware)
+
 
 # Enable CORS for explicit configured development origins only (never wildcard with credentials)
 cors_origins_list = (
@@ -289,13 +488,14 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 class CreateAssessmentRequest(BaseModel):
     """Payload for launching a new security assessment."""
+
     target_url: str = Field(
         default="http://localhost:3000",
         description="Target base URL to test (must be an explicitly allowlisted scope target).",
     )
     github_repo: Optional[str] = Field(
         default=None,
-        description="Optional repository URL for source code mapping.",
+        description="Optional repository URL or path for source code mapping.",
     )
     source_archive_path: Optional[str] = Field(
         default=None,
@@ -305,6 +505,7 @@ class CreateAssessmentRequest(BaseModel):
 
 class CreateAssessmentResponse(BaseModel):
     """Response returned when an assessment is successfully accepted."""
+
     assessment_id: str
     target_url: str
     status: str
@@ -314,6 +515,7 @@ class CreateAssessmentResponse(BaseModel):
 
 class AssessmentSummaryResponse(BaseModel):
     """Response for assessment state query."""
+
     id: str
     target_url: str
     status: str
@@ -374,10 +576,9 @@ def _format_event_message_chunk(
             msg += "Cross-account authorization differential matrix is ready.\n\n"
         return msg
     elif etype == EventType.SUSPICIOUS_BEHAVIOR_DETECTED.value:
-        # Load finding if available to build from actual validated record
         finding_id = event.metadata.get("finding_id")
         if finding is None and finding_id and repo:
-            finding = repo.get_finding(finding_id)
+            finding = repo.get_finding(str(finding_id))
 
         ep = finding.target_endpoint if finding else event.metadata.get("endpoint", "")
         code = event.metadata.get("status_code", 200)
@@ -386,23 +587,32 @@ def _format_event_message_chunk(
         actual = (
             finding.actual_behavior
             if finding and finding.actual_behavior
-            else event.metadata.get("actual_behavior", f"Unauthenticated request to `{ep}` returned HTTP {code} with application data.")
+            else event.metadata.get(
+                "actual_behavior",
+                f"Unauthenticated request to `{ep}` returned HTTP {code} with application data.",
+            )
         )
         expected = (
             finding.expected_behavior
             if finding and finding.expected_behavior
-            else event.metadata.get("expected_behavior", f"Access to `{ep}` should require valid authentication and authorization.")
+            else event.metadata.get(
+                "expected_behavior",
+                f"Access to `{ep}` should require valid authentication and authorization.",
+            )
         )
         title = finding.title if finding else event.metadata.get("title", f"Suspicious Access Pattern: `{ep}`")
         sha = (
             finding.evidence.evidence_sha256[:16]
             if finding and finding.evidence and finding.evidence.evidence_sha256
-            else event.metadata.get("sha256", "")[:16]
+            else str(event.metadata.get("sha256", ""))[:16]
         )
         rem = (
             finding.remediation_guidance
             if finding and finding.remediation_guidance
-            else event.metadata.get("remediation", "// Enforce authentication and role verification middleware\napp.use(verifyAuthSession);")
+            else event.metadata.get(
+                "remediation",
+                "// Enforce authentication and role verification middleware\napp.use(verifyAuthSession);",
+            )
         )
 
         sha_text = f" (Evidence SHA-256: `{sha}...`)" if sha else ""
@@ -420,7 +630,7 @@ def _format_event_message_chunk(
     elif etype == EventType.FINDING_CONFIRMED.value:
         finding_id = event.metadata.get("finding_id")
         if finding is None and finding_id and repo:
-            finding = repo.get_finding(finding_id)
+            finding = repo.get_finding(str(finding_id))
 
         ep = finding.target_endpoint if finding else event.metadata.get("endpoint", "")
         sev = (
@@ -431,9 +641,13 @@ def _format_event_message_chunk(
         sha = (
             finding.evidence.evidence_sha256[:16]
             if finding and finding.evidence and finding.evidence.evidence_sha256
-            else event.metadata.get("sha256", "")[:16]
+            else str(event.metadata.get("sha256", ""))[:16]
         )
-        title = finding.title if finding else event.metadata.get("title", "Confirmed Broken Object Level Authorization (IDOR)")
+        title = (
+            finding.title
+            if finding
+            else event.metadata.get("title", "Confirmed Broken Object Level Authorization (IDOR)")
+        )
         category = (
             (finding.vulnerability_category or finding.vulnerability_type)
             if finding
@@ -442,12 +656,18 @@ def _format_event_message_chunk(
         actual = (
             finding.actual_behavior
             if finding and finding.actual_behavior
-            else event.metadata.get("actual_behavior", "Authorized test persona was able to access a private resource belonging to another tenant.")
+            else event.metadata.get(
+                "actual_behavior",
+                "Authorized test persona was able to access a private resource belonging to another tenant.",
+            )
         )
         expected = (
             finding.expected_behavior
             if finding and finding.expected_behavior
-            else event.metadata.get("expected_behavior", "Cross-account access should be strictly rejected with HTTP 403 Forbidden.")
+            else event.metadata.get(
+                "expected_behavior",
+                "Cross-account access should be strictly rejected with HTTP 403 Forbidden.",
+            )
         )
         impact = (
             finding.impact_explanation or finding.description
@@ -457,7 +677,10 @@ def _format_event_message_chunk(
         rem = (
             finding.remediation_guidance or finding.remediation_recommendation
             if finding
-            else event.metadata.get("remediation", "// Verify session identity matches resource owner\nif (req.user.id !== resource.UserId) return res.status(403);")
+            else event.metadata.get(
+                "remediation",
+                "// Verify session identity matches resource owner\nif (req.user.id !== resource.UserId) return res.status(403);",
+            )
         )
         verdict = finding.access_verdict if finding else "CONFIRMED_UNAUTHORIZED_ACCESS"
         val_status = finding.validation_status if finding else "CONFIRMED"
@@ -497,105 +720,383 @@ def _format_event_message_chunk(
 def _map_event_to_agent_sse(
     event: AssessmentEvent,
     assessment_id: str,
-    agent: GeminiAgent,
+    repo: Optional[FindingRepository] = None,
 ) -> List[Tuple[str, Dict[str, Any]]]:
-    """Maps internal assessment events to structured AI agent events."""
+    """Maps unified pipeline AssessmentEvents to the 15 structured SSE event types.
+
+    Supports all 15 required SSE event types:
+    - assessment_started
+    - agent_thinking
+    - agent_plan
+    - tool_started
+    - tool_completed
+    - tool_failed
+    - endpoint_discovered
+    - finding_hypothesis
+    - finding_discovered
+    - evidence_validated
+    - source_location_found
+    - explanation_generated
+    - assessment_completed
+    - assessment_failed
+    - assessment_cancelled
+    """
     etype = event.event_type
     results: List[Tuple[str, Dict[str, Any]]] = []
+    meta = event.metadata or {}
 
-    if etype == EventType.SCOPE_VALIDATION_STARTED.value:
-        results.append(("tool_started", {
-            "type": "tool_started",
-            "tool": "check_scope",
-            "message": "Validating target against ScopeGuard allowlist",
-            "assessment_id": assessment_id,
-        }))
-    elif etype == EventType.SCOPE_VALIDATION_COMPLETED.value:
-        results.append(("tool_completed", {
-            "type": "tool_completed",
-            "tool": "check_scope",
-            "message": "Target verified within authorized scope (localhost:3000)",
-            "assessment_id": assessment_id,
-        }))
-    elif etype == EventType.CONNECTION_COMPLETED.value:
-        results.append(("agent_thinking", {
-            "type": "agent_thinking",
-            "message": "Target application connection verified; mapping attack surface routes",
-            "assessment_id": assessment_id,
-        }))
-    elif etype == EventType.ENDPOINT_DISCOVERY_COMPLETED.value:
-        count = event.metadata.get("endpoints_discovered", 0)
-        results.append(("tool_completed", {
-            "type": "tool_completed",
-            "tool": "discover_routes",
-            "message": f"Discovered {count} attack surface routes",
-            "assessment_id": assessment_id,
-        }))
-    elif etype == EventType.AUTHORIZATION_TEST_STARTED.value:
-        results.append(("tool_started", {
-            "type": "tool_started",
-            "tool": "compare_access",
-            "message": "Executing authorization differential testing across discovered endpoints",
-            "assessment_id": assessment_id,
-        }))
-    elif etype == EventType.AUTHORIZATION_TEST_COMPLETED.value:
-        tested = event.metadata.get("tested_count", 0)
-        results.append(("tool_completed", {
-            "type": "tool_completed",
-            "tool": "compare_access",
-            "message": f"Completed authorization differential analysis across {tested} endpoints",
-            "assessment_id": assessment_id,
-        }))
-    elif etype in (EventType.SUSPICIOUS_BEHAVIOR_DETECTED.value, EventType.FINDING_CONFIRMED.value):
-        ep = event.metadata.get("endpoint", "")
-        sev = event.metadata.get("severity", "HIGH" if etype == EventType.FINDING_CONFIRMED.value else "MEDIUM")
-        cat = event.metadata.get("vulnerability_candidate", "BOLA_IDOR" if etype == EventType.FINDING_CONFIRMED.value else "BFLA")
-        results.append(("finding_discovered", {
-            "type": "finding_discovered",
-            "endpoint": ep,
-            "category": cat,
-            "severity": sev,
-            "message": f"Authorization discrepancy identified on {ep}",
-            "assessment_id": assessment_id,
-        }))
-
-        # Generate cognitive plain-English explanation via Agent / RAG Memory
-        expl_data = agent.generate_explanation(
-            endpoint=ep,
-            vulnerability_category=cat,
-            validation_status="CONFIRMED" if etype == EventType.FINDING_CONFIRMED.value else "SUSPICIOUS",
-            evidence_summary=event.message,
+    if etype == EventType.ASSESSMENT_STARTED.value:
+        target_url = meta.get("target_url", "http://localhost:3000")
+        results.append(
+            (
+                "assessment_started",
+                {
+                    "type": "assessment_started",
+                    "message": event.message or f"Assessment initialized for {target_url}",
+                    "assessment_id": assessment_id,
+                    "target_url": target_url,
+                },
+            )
         )
-        results.append(("explanation_generated", {
-            "type": "explanation_generated",
-            "endpoint": ep,
-            "category": cat,
-            "explanation": expl_data["explanation"],
-            "remediation_code": expl_data.get("remediation_code"),
-            "assessment_id": assessment_id,
-        }))
+        thinking_msg = meta.get(
+            "thinking_message",
+            f"Formulating authorization testing strategy for {target_url}.",
+        )
+        results.append(
+            (
+                "agent_thinking",
+                {
+                    "type": "agent_thinking",
+                    "message": thinking_msg,
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+        plan_steps = meta.get(
+            "plan_steps",
+            [
+                "1. Validate target scope against strict ScopeGuard allowlist.",
+                "2. Establish target connectivity and verify HTTP response.",
+                "3. Discover attack surface endpoints and parameterized resources.",
+                "4. Validate multi-role testing personas (User A, User B, Admin).",
+                "5. Execute cross-account differential tests on identified endpoints.",
+                "6. Cryptographically sign and validate evidence artifacts (SHA-256).",
+                "7. Compile findings and synthesize remediation code patches.",
+            ],
+        )
+        plan_summary = meta.get("plan_summary", "7-stage authorization evaluation plan initialized.")
+        results.append(
+            (
+                "agent_plan",
+                {
+                    "type": "agent_plan",
+                    "message": plan_summary,
+                    "steps": plan_steps,
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype == EventType.SCOPE_VALIDATION_STARTED.value:
+        results.append(
+            (
+                "tool_started",
+                {
+                    "type": "tool_started",
+                    "tool": "check_scope",
+                    "message": "Validating target against ScopeGuard allowlist",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype == EventType.SCOPE_VALIDATION_COMPLETED.value:
+        results.append(
+            (
+                "tool_completed",
+                {
+                    "type": "tool_completed",
+                    "tool": "check_scope",
+                    "message": "Target verified within authorized scope (localhost:3000)",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype == EventType.CONNECTION_COMPLETED.value:
+        results.append(
+            (
+                "agent_thinking",
+                {
+                    "type": "agent_thinking",
+                    "message": "Target application connection verified; mapping attack surface routes",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+        results.append(
+            (
+                "tool_started",
+                {
+                    "type": "tool_started",
+                    "tool": "discover_routes",
+                    "message": "Discovering application endpoints and parameterized routes",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype == EventType.ENDPOINT_DISCOVERED.value:
+        results.append(
+            (
+                "endpoint_discovered",
+                {
+                    "type": "endpoint_discovered",
+                    "endpoint": meta.get("path") or meta.get("endpoint") or event.message,
+                    "method": meta.get("method", "GET"),
+                    "category": meta.get("category", "API"),
+                    "message": event.message,
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype == EventType.ENDPOINT_DISCOVERY_COMPLETED.value:
+        count = meta.get("endpoints_discovered", 0)
+        results.append(
+            (
+                "tool_completed",
+                {
+                    "type": "tool_completed",
+                    "tool": "discover_routes",
+                    "message": f"Discovered {count} attack surface routes",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype == EventType.AUTHORIZATION_TEST_STARTED.value:
+        results.append(
+            (
+                "tool_started",
+                {
+                    "type": "tool_started",
+                    "tool": "compare_access",
+                    "message": "Executing authorization differential testing across discovered endpoints",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype == EventType.AUTHORIZATION_TEST_COMPLETED.value:
+        tested = meta.get("tested_count", 0)
+        results.append(
+            (
+                "tool_completed",
+                {
+                    "type": "tool_completed",
+                    "tool": "compare_access",
+                    "message": f"Completed authorization differential analysis across {tested} endpoints",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype in (EventType.SUSPICIOUS_BEHAVIOR_DETECTED.value, EventType.FINDING_CONFIRMED.value):
+        is_confirmed = etype == EventType.FINDING_CONFIRMED.value
+        finding_id = meta.get("finding_id")
+        finding = repo.get_finding(str(finding_id)) if (finding_id and repo) else None
+
+        ep = (finding.target_endpoint if finding else None) or str(meta.get("endpoint", ""))
+        sev = (
+            (finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity))
+            if finding
+            else str(meta.get("severity", "HIGH" if is_confirmed else "MEDIUM"))
+        )
+        cat = (
+            (finding.vulnerability_category or finding.vulnerability_type)
+            if finding
+            else str(meta.get("vulnerability_candidate", "BOLA_IDOR" if is_confirmed else "BFLA"))
+        )
+        val_status = "CONFIRMED" if is_confirmed else "SUSPICIOUS"
+
+        # 1. Emit finding_hypothesis first
+        results.append(
+            (
+                "finding_hypothesis",
+                {
+                    "type": "finding_hypothesis",
+                    "endpoint": ep,
+                    "category": cat,
+                    "severity": sev,
+                    "status": val_status,
+                    "message": f"Hypothesis: potential {cat} authorization discrepancy on {ep}",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+
+        # 2. If confirmed, emit evidence_validated BEFORE finding_discovered
+        if is_confirmed:
+            sha = (
+                finding.evidence.evidence_sha256
+                if (finding and finding.evidence and finding.evidence.evidence_sha256)
+                else str(meta.get("sha256", ""))
+            )
+            results.append(
+                (
+                    "evidence_validated",
+                    {
+                        "type": "evidence_validated",
+                        "endpoint": ep,
+                        "finding_id": finding.id if finding else finding_id,
+                        "validation_status": "CONFIRMED",
+                        "evidence_sha256": sha,
+                        "message": f"Cryptographic evidence validated for {ep} (SHA-256)",
+                        "assessment_id": assessment_id,
+                    },
+                )
+            )
+
+        # 3. Emit finding_discovered
+        results.append(
+            (
+                "finding_discovered",
+                {
+                    "type": "finding_discovered",
+                    "finding_id": finding.id if finding else finding_id,
+                    "endpoint": ep,
+                    "category": cat,
+                    "severity": sev,
+                    "status": val_status,
+                    "validation_status": val_status,
+                    "message": f"Authorization discrepancy ({val_status}) identified on {ep}",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+
+        # 4. Emit source_location_found
+        src_info = meta.get("source_info") or {}
+        src_file = src_info.get("source_file") or (
+            finding.technical_details.get("source_file") if finding else None
+        )
+        line_nums = src_info.get("line_numbers") or (
+            finding.technical_details.get("line_numbers") if finding else None
+        )
+        func_name = src_info.get("function_name") or (
+            finding.technical_details.get("function_name") if finding else None
+        )
+        black_box = not bool(src_file)
+        results.append(
+            (
+                "source_location_found",
+                {
+                    "type": "source_location_found",
+                    "endpoint": ep,
+                    "source_file": src_file,
+                    "function_name": func_name,
+                    "line_numbers": line_nums,
+                    "black_box_only": black_box,
+                    "message": (
+                        f"Mapped {ep} to {src_file}:{line_nums}"
+                        if src_file
+                        else f"Black-box assessment only for {ep} — no source code repository provided."
+                    ),
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+
+        # 5. Emit explanation_generated
+        explanation_text = (
+            meta.get("explanation")
+            or (finding.impact_explanation or finding.description if finding else None)
+            or event.message
+        )
+        remediation_code = (
+            meta.get("remediation_code")
+            or (finding.remediation_guidance or finding.remediation_recommendation if finding else None)
+            or ""
+        )
+        results.append(
+            (
+                "explanation_generated",
+                {
+                    "type": "explanation_generated",
+                    "endpoint": ep,
+                    "category": cat,
+                    "explanation": explanation_text,
+                    "remediation_code": remediation_code,
+                    "message": f"Generated security explanation and remediation for {ep}",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
     elif etype == EventType.EVIDENCE_VALIDATION_COMPLETED.value:
-        results.append(("evidence_validated", {
-            "type": "evidence_validated",
-            "message": "Cryptographic evidence artifacts signed and verified (SHA-256)",
-            "assessment_id": assessment_id,
-            "confirmed_count": event.metadata.get("confirmed_count", 0),
-            "suspicious_count": event.metadata.get("suspicious_count", 0),
-        }))
+        results.append(
+            (
+                "evidence_validated",
+                {
+                    "type": "evidence_validated",
+                    "message": "Cryptographic evidence artifacts signed and verified (SHA-256)",
+                    "assessment_id": assessment_id,
+                    "confirmed_count": meta.get("confirmed_count", 0),
+                    "suspicious_count": meta.get("suspicious_count", 0),
+                },
+            )
+        )
     elif etype == EventType.ASSESSMENT_COMPLETED.value:
-        results.append(("assessment_completed", {
-            "type": "assessment_completed",
-            "message": "Assessment concluded successfully",
-            "assessment_id": assessment_id,
-            "confirmed_findings": event.metadata.get("confirmed_findings", 0),
-            "suspicious_results": event.metadata.get("suspicious_results", 0),
-        }))
+        results.append(
+            (
+                "assessment_completed",
+                {
+                    "type": "assessment_completed",
+                    "message": event.message or "Assessment concluded successfully",
+                    "assessment_id": assessment_id,
+                    "confirmed_findings": meta.get("confirmed_findings", 0),
+                    "suspicious_results": meta.get("suspicious_results", 0),
+                },
+            )
+        )
     elif etype == EventType.ASSESSMENT_FAILED.value:
-        results.append(("assessment_failed", {
-            "type": "assessment_failed",
-            "message": event.message,
-            "assessment_id": assessment_id,
-        }))
+        if event.stage in (
+            AssessmentStage.SCOPE_VALIDATION.value,
+            AssessmentStage.TARGET_CONNECTION.value,
+            AssessmentStage.ENDPOINT_DISCOVERY.value,
+            AssessmentStage.AUTHORIZATION_TESTING.value,
+        ):
+            results.append(
+                (
+                    "tool_failed",
+                    {
+                        "type": "tool_failed",
+                        "tool": meta.get("tool", event.stage),
+                        "message": event.message,
+                        "assessment_id": assessment_id,
+                    },
+                )
+            )
+        results.append(
+            (
+                "assessment_failed",
+                {
+                    "type": "assessment_failed",
+                    "message": event.message,
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype == EventType.ASSESSMENT_CANCELLED.value:
+        results.append(
+            (
+                "assessment_cancelled",
+                {
+                    "type": "assessment_cancelled",
+                    "message": event.message or "Assessment cancelled by operator.",
+                    "assessment_id": assessment_id,
+                },
+            )
+        )
+    elif etype in ALL_REQUIRED_SSE_EVENTS:
+        # Direct pass-through for structured events emitted directly by mock or custom agents
+        payload = dict(meta)
+        payload.setdefault("type", etype)
+        payload.setdefault("message", event.message)
+        payload.setdefault("assessment_id", assessment_id)
+        results.append((etype, payload))
 
     return results
 
@@ -657,6 +1158,10 @@ async def create_assessment(req: CreateAssessmentRequest, request: Request) -> C
         status="PENDING",
         started_at=datetime.now(timezone.utc),
         stages=stages,
+        config={
+            "github_repo": req.github_repo,
+            "source_archive_path": req.source_archive_path,
+        },
     )
     repo.save_scan_session(session)
 
@@ -668,6 +1173,8 @@ async def create_assessment(req: CreateAssessmentRequest, request: Request) -> C
         target_url=target_clean,
         token=token,
         repo=repo,
+        github_repo=req.github_repo,
+        source_archive_path=req.source_archive_path,
     )
 
     logger.info(f"Initialized assessment session {scan_id} for target {target_clean}")
@@ -683,10 +1190,10 @@ async def create_assessment(req: CreateAssessmentRequest, request: Request) -> C
 @app.get("/api/assessments/{assessment_id}/stream")
 async def stream_assessment(
     assessment_id: str,
-    request: Request = None,
+    request: Request = None,  # type: ignore[assignment]
     last_event_id: Optional[str] = Query(default=None),
 ) -> StreamingResponse:
-    """Server-Sent Events (SSE) endpoint streaming real operational events, thoughts, plans, and markdown."""
+    """Server-Sent Events (SSE) endpoint streaming real operational events, thoughts, plans, and findings."""
     repo = FindingRepository()
     session = repo.get_scan_session(assessment_id)
     if not session:
@@ -705,75 +1212,92 @@ async def stream_assessment(
         except ValueError:
             pass
 
-    # Initialize Memory, Tool Registry, and Gemini Agent
-    memory = AssessmentMemory(assessment_id=session.id, target_url=session.target_url, repository=repo)
-    scope_guard = ScopeGuard()
-    executor = RequestExecutor(scope_guard=scope_guard)
-    tools = ToolRegistry(scope_guard=scope_guard, executor=executor, memory=memory)
-    agent = GeminiAgent(tool_registry=tools, memory=memory, scope_guard=scope_guard)
-
     async def sse_generator() -> AsyncGenerator[str, None]:
-        # Track highest event ID delivered to this SSE connection
         last_sent_id = after_id or 0
+        # A cursor means this is a reconnect; do not replay the synthetic startup plan.
+        emitted_initial_started = after_id is not None
+        last_heartbeat = asyncio.get_running_loop().time()
 
-        # 1. Replay stored events from repository (deduplicated by ID)
-        stored_events = repo.list_events(assessment_id, after_id=after_id)
-        for ev in stored_events:
-            ev_id = ev.id or 0
-            if ev_id > last_sent_id:
-                last_sent_id = ev_id
-
-            yield f"id: {ev_id}\nevent: activity\ndata: {ev.model_dump_json()}\n\n"
-            msg_chunk = _format_event_message_chunk(ev, repo=repo)
-            if msg_chunk:
-                yield f"id: {ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
-
-        # 2. Check if the assessment is already completed or cancelled
-        current_session = repo.get_scan_session(assessment_id) or session
-        is_active = task_manager.is_running(assessment_id)
-
-        if not is_active and current_session.status in ("COMPLETED", "FAILED", "CANCELLED"):
-            done_payload = {
-                "status": current_session.status,
-                "summary": current_session.summary_text,
-                "endpoints_discovered": current_session.endpoints_discovered_count,
-                "endpoints_tested": current_session.endpoints_tested_count,
-                "confirmed_findings": current_session.confirmed_findings_count,
-                "suspicious_results": current_session.suspicious_results_count,
-            }
-            yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
-            return
-
-        # Emit initial planning events only on clean first connection (not on reconnect replay)
-        if after_id is None or after_id == 0:
-            yield f"event: assessment_started\ndata: {json.dumps({'type': 'assessment_started', 'message': f'Assessment initialized for {session.target_url}', 'assessment_id': assessment_id, 'target_url': session.target_url})}\n\n"
-            yield f"event: agent_thinking\ndata: {json.dumps({'type': 'agent_thinking', 'message': f'Formulating authorization testing strategy for {session.target_url}.', 'assessment_id': assessment_id})}\n\n"
-            plan_res = agent.plan_assessment(session.target_url)
-            yield f"event: agent_plan\ndata: {json.dumps({'type': 'agent_plan', 'message': plan_res['plan_summary'], 'steps': plan_res['steps'], 'assessment_id': assessment_id})}\n\n"
-
-        # Ensure active task is running in task_manager
-        if not is_active and current_session.status in ("PENDING", "RUNNING"):
-            token = active_tokens.get(assessment_id) or CancellationToken()
-            active_tokens[assessment_id] = token
-            task_manager.start_assessment_task(
-                scan_id=assessment_id,
-                target_url=session.target_url,
-                token=token,
-                repo=repo,
-            )
-
-        # 3. Subscribe to live background broadcast queue
+        # Subscribe to live queue BEFORE replaying stored events so zero events are missed
         queue = task_manager.subscribe(assessment_id)
         try:
+            # 1. Replay stored events from repository (deduplicated by ID)
+            stored_events = repo.list_events(assessment_id, after_id=after_id)
+            for ev in stored_events:
+                ev_id = ev.id or 0
+                if ev_id > last_sent_id:
+                    last_sent_id = ev_id
+
+                yield f"id: {ev_id}\nevent: activity\ndata: {ev.model_dump_json()}\n\n"
+                msg_chunk = _format_event_message_chunk(ev, repo=repo)
+                if msg_chunk:
+                    yield f"id: msg_{ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
+
+                agent_events = _map_event_to_agent_sse(ev, assessment_id, repo=repo)
+                for event_type, payload in agent_events:
+                    if after_id is not None and event_type in {"assessment_started", "agent_thinking", "agent_plan"}:
+                        continue
+                    if event_type == "assessment_started":
+                        emitted_initial_started = True
+                    yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+            # 2. Check if the assessment is already completed, failed, or cancelled
+            current_session = repo.get_scan_session(assessment_id) or session
+            is_active = task_manager.is_running(assessment_id)
+
+            if not is_active and current_session.status in ("COMPLETED", "FAILED", "CANCELLED"):
+                # Drain any remaining items in queue before closing
+                while not queue.empty():
+                    item = queue.get_nowait()
+                    if item[0] == "activity":
+                        _, ev, msg_chunk = item
+                        ev_id = ev.id or 0
+                        if ev_id > 0 and ev_id <= last_sent_id:
+                            continue
+                        if ev_id > 0:
+                            last_sent_id = max(last_sent_id, ev_id)
+                        yield f"id: {ev_id}\nevent: activity\ndata: {ev.model_dump_json()}\n\n"
+                        if msg_chunk:
+                            yield f"id: msg_{ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
+                        for event_type, payload in _map_event_to_agent_sse(ev, assessment_id, repo=repo):
+                            if after_id is not None and event_type in {"assessment_started", "agent_thinking", "agent_plan"}:
+                                continue
+                            yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+                done_payload = {
+                    "status": current_session.status,
+                    "summary": current_session.summary_text,
+                    "endpoints_discovered": current_session.endpoints_discovered_count,
+                    "endpoints_tested": current_session.endpoints_tested_count,
+                    "confirmed_findings": current_session.confirmed_findings_count,
+                    "suspicious_results": current_session.suspicious_results_count,
+                }
+                yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+                return
+
+            # Ensure active task is running in task_manager if session is still PENDING/RUNNING
+            if not is_active and current_session.status in ("PENDING", "RUNNING"):
+                token = active_tokens.get(assessment_id) or CancellationToken()
+                active_tokens[assessment_id] = token
+                cfg = current_session.config or {}
+                task_manager.start_assessment_task(
+                    scan_id=assessment_id,
+                    target_url=session.target_url,
+                    token=token,
+                    repo=repo,
+                    github_repo=cfg.get("github_repo"),
+                    source_archive_path=cfg.get("source_archive_path"),
+                )
+
+            # 3. Stream live events from the unified background task queue
             while True:
-                # Wait for broadcast item or client disconnect, with 15s heartbeat
+                # Heartbeats keep idle SSE connections alive while work continues.
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=15.0)
                 except asyncio.TimeoutError:
-                    # Emit heartbeat comment every 15s of inactivity
+                    last_heartbeat = asyncio.get_running_loop().time()
                     yield f": heartbeat {datetime.now(timezone.utc).isoformat()}\n\n"
                     continue
-
                 kind = item[0]
 
                 if kind == "activity":
@@ -789,8 +1313,14 @@ async def stream_assessment(
                     if msg_chunk:
                         yield f"id: {ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
 
-                    agent_events = _map_event_to_agent_sse(ev, assessment_id, agent)
+                    agent_events = _map_event_to_agent_sse(ev, assessment_id, repo=repo)
                     for event_type, payload in agent_events:
+                        if after_id is not None and event_type in {"assessment_started", "agent_thinking", "agent_plan"}:
+                            continue
+                        if event_type == "assessment_started" and emitted_initial_started:
+                            continue
+                        if event_type == "assessment_started":
+                            emitted_initial_started = True
                         yield f"id: {ev_id}\nevent: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
                 elif kind == "done":
@@ -800,6 +1330,13 @@ async def stream_assessment(
 
                 elif kind == "error":
                     _, err_msg, _ = item
+                    err_payload = {
+                        "type": "assessment_failed",
+                        "error": err_msg,
+                        "message": err_msg,
+                        "assessment_id": assessment_id,
+                    }
+                    yield f"event: assessment_failed\ndata: {json.dumps(err_payload)}\n\n"
                     yield f"event: error\ndata: {json.dumps({'error': err_msg})}\n\n"
                     break
 
@@ -808,13 +1345,15 @@ async def stream_assessment(
             raise
         except Exception as exc:
             logger.error(f"Error streaming live SSE events for {assessment_id}: {exc}")
-            err_data = json.dumps({"type": "assessment_failed", "error": str(exc), "assessment_id": assessment_id})
+            err_data = json.dumps(
+                {"type": "assessment_failed", "error": str(exc), "message": str(exc), "assessment_id": assessment_id}
+            )
             yield f"event: assessment_failed\ndata: {err_data}\n\n"
             yield f"event: error\ndata: {err_data}\n\n"
         finally:
             task_manager.unsubscribe(assessment_id, queue)
 
-    return StreamingResponse(
+    return CleanupStreamingResponse(
         sse_generator(),
         media_type="text/event-stream",
         headers={
@@ -862,6 +1401,7 @@ def stop_assessment(assessment_id: str) -> Dict[str, Any]:
     return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
 
 
+
 @app.post("/api/assessments/{assessment_id}/retry", response_model=CreateAssessmentResponse)
 async def retry_assessment(assessment_id: str, request: Request) -> CreateAssessmentResponse:
     """Retries an interrupted, failed, or cancelled assessment."""
@@ -906,7 +1446,6 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
             detail=f"Scope violation: {check.reason}",
         )
 
-    # Reset session fields for retry
     now = datetime.now(timezone.utc)
     session.status = "PENDING"
     session.failure_reason = ""
@@ -921,14 +1460,16 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
     session.summary_text = ""
     repo.save_scan_session(session)
 
-    # Launch background task
     token = CancellationToken()
     active_tokens[assessment_id] = token
+    cfg = session.config or {}
     task_manager.start_assessment_task(
         scan_id=assessment_id,
         target_url=session.target_url,
         token=token,
         repo=repo,
+        github_repo=cfg.get("github_repo"),
+        source_archive_path=cfg.get("source_archive_path"),
     )
 
     logger.info(f"Retried assessment session {assessment_id} for target {session.target_url}")
@@ -972,6 +1513,54 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
         message="Assessment retried and running in background. Connect to SSE stream to observe.",
     )
 
+
+@app.post("/api/assessments/{assessment_id}/retest")
+async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
+    """Re-verifies findings for a given assessment session using RetestEngine."""
+    repo = FindingRepository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Assessment {assessment_id} not found.",
+        )
+
+    scope_guard = ScopeGuard()
+    check = scope_guard.validate_request(url=session.target_url, method="GET")
+    if not check.is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Scope violation: {check.reason}",
+        )
+
+    findings = repo.list_findings(assessment_id)
+    retest_engine = RetestEngine(repository=repo)
+    retest_results = []
+    for f in findings:
+        log_rec = retest_engine.retest_finding(f.id)
+        repo.save_retest_result(log_rec)
+        retest_results.append(log_rec.model_dump(mode="json"))
+
+    return {
+        "assessment_id": assessment_id,
+        "target_url": session.target_url,
+        "retested_count": len(retest_results),
+        "results": retest_results,
+    }
+
+
+@app.get("/api/assessments/{assessment_id}/findings")
+def get_assessment_findings(assessment_id: str) -> List[Dict[str, Any]]:
+    """Retrieves all validated and suspicious findings for a specific assessment."""
+    repo = FindingRepository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Assessment {assessment_id} not found.",
+        )
+    findings = repo.list_findings(assessment_id)
+    return [f.model_dump(mode="json") for f in findings]
 
 
 @app.get("/api/assessments/{assessment_id}", response_model=AssessmentSummaryResponse)
@@ -1016,7 +1605,6 @@ def list_assessments(limit: int = Query(default=10, ge=1, le=50)) -> List[Dict[s
     repo = FindingRepository()
     sessions = repo.list_scan_sessions(limit=limit)
     return [s.model_dump(mode="json") for s in sessions]
-
 
 
 @app.get("/", include_in_schema=False)
