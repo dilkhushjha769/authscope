@@ -54,10 +54,16 @@ from backend.tools.schemas import (
     MapEndpointToCodeOutput,
     ProbeAccessControlInput,
     ProbeAccessControlOutput,
+    RetestFindingInput,
+    RetestFindingOutput,
+    SaveFindingInput,
+    SaveFindingOutput,
     TestAccessControlInput,
     TestAccessControlOutput,
     TestBflaInput,
     TestBflaOutput,
+    TestUnauthorizedModificationInput,
+    TestUnauthorizedModificationOutput,
     ToolCategory,
     ToolCompletedEvent,
     ToolEventBase,
@@ -605,6 +611,28 @@ class ToolRegistry:
                 requires_scope_check=True
             )
         )
+        self.register_tool(
+            ToolDefinition(
+                name="test_four_role_access",
+                description="Executes four-role authorization-differential testing across Anonymous, User A, User B, and Admin.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=CompareEndpointAccessInput,
+                output_model=CompareEndpointAccessOutput,
+                handler=lambda args, ctx: self.authorization_tools.compare_endpoint_access(args, ctx),
+                requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="test_unauthorized_modification",
+                description="Tests whether an unauthorized role can modify another user's resource using safe non-destructive test fixtures.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=TestUnauthorizedModificationInput,
+                output_model=TestUnauthorizedModificationOutput,
+                handler=lambda args, ctx: self.authorization_tools.test_unauthorized_modification(args, ctx),
+                requires_scope_check=True
+            )
+        )
 
         # 3. Source Analysis Tools
         self.register_tool(
@@ -667,5 +695,25 @@ class ToolRegistry:
                 input_model=GetAssessmentSummaryInput,
                 output_model=GetAssessmentSummaryOutput,
                 handler=lambda args, ctx: self.report_tools.get_assessment_summary(args, ctx)
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="save_finding",
+                description="Persists a validated finding and its signed, sanitized evidence artifact to SQLite.",
+                category=ToolCategory.REPORTING,
+                input_model=SaveFindingInput,
+                output_model=SaveFindingOutput,
+                handler=lambda args, ctx: self.report_tools.save_finding(args, ctx)
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="retest_finding",
+                description="Retests an existing finding across roles to verify whether remediation resolved the vulnerability.",
+                category=ToolCategory.REPORTING,
+                input_model=RetestFindingInput,
+                output_model=RetestFindingOutput,
+                handler=lambda args, ctx: self.report_tools.retest_finding(args, ctx)
             )
         )

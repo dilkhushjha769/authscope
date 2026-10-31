@@ -175,6 +175,57 @@ class RemediationEngine:
 
         return self._build_generic_rbac_snippet(framework=norm_framework)
 
+    def generate_recommendation(
+        self,
+        vulnerability_type: str,
+        endpoint: str = "/",
+        resource_type: Optional[str] = None,
+        framework: str = "express",
+    ) -> Any:
+        """Generates a structured remediation recommendation for a given vulnerability type and endpoint."""
+        norm_framework = self._normalize_framework(framework)
+        v_upper = (vulnerability_type or "BROKEN_ACCESS_CONTROL").upper()
+        if "BOLA" in v_upper or "IDOR" in v_upper:
+            code_patch = self._build_bola_code_snippet(endpoint=endpoint, framework=norm_framework)
+            steps = (
+                f"Enforce strict server-side resource ownership verification on '{endpoint}'. "
+                f"Verify that the authenticated caller owns the requested {resource_type or 'resource'} before returning or modifying it."
+            )
+            cwe = "CWE-639: Authorization Bypass Through User-Controlled Key"
+            owasp = "OWASP API1:2023 Broken Object Level Authorization"
+        elif "BFLA" in v_upper or "PRIVILEGE" in v_upper:
+            code_patch = self._build_bfla_code_snippet(endpoint=endpoint, framework=norm_framework)
+            steps = (
+                f"Attach role-based access control (RBAC) middleware to '{endpoint}' requiring verified administrative privileges."
+            )
+            cwe = "CWE-285: Improper Authorization"
+            owasp = "OWASP API5:2023 Broken Function Level Authorization"
+        elif "AUTH" in v_upper:
+            code_patch = self._build_auth_code_snippet(endpoint=endpoint, framework=norm_framework)
+            steps = (
+                f"Attach authentication middleware to '{endpoint}' requiring a valid signed session token before handler execution."
+            )
+            cwe = "CWE-306: Missing Authentication for Critical Function"
+            owasp = "OWASP API2:2023 Broken Authentication"
+        else:
+            code_patch = self._build_generic_rbac_snippet(framework=norm_framework)
+            steps = f"Enforce server-side authorization checks and deny-by-default access control on '{endpoint}'."
+            cwe = "CWE-284: Improper Access Control"
+            owasp = "OWASP A01:2021 Broken Access Control"
+
+        class _SimpleRemediationSummary(BaseModel):
+            remediation_steps: str
+            code_Patch_example: str
+            cwe_reference: str
+            owasp_reference: str
+
+        return _SimpleRemediationSummary(
+            remediation_steps=steps,
+            code_Patch_example=code_patch,
+            cwe_reference=cwe,
+            owasp_reference=owasp,
+        )
+
     # --------------------------------------------------------------------------
     # Deterministic Remediation Builders
     # --------------------------------------------------------------------------

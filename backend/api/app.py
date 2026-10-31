@@ -877,6 +877,7 @@ class AssessmentTaskManager:
                 logger.debug(f"Target profile binding fallback failed: {e}")
 
         await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)
         engine = AssessmentEngine(repository=bound_repo, scope_guard=scope_guard)  # type: ignore[arg-type]
         gen = engine.stream_assessment(target_url=target_url, scan_id=scan_id, cancel_token=token)
 

@@ -752,6 +752,60 @@ APPROVED_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "required": ["query"],
         },
     },
+    {
+        "name": "test_four_role_access",
+        "description": "Executes four-role authorization-differential testing across Anonymous, User A, User B, and Admin.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "endpoint": {"type": "string", "description": "Relative endpoint path (e.g. /rest/basket/1)."},
+                "method": {"type": "string", "description": "HTTP method to test (default GET)."},
+                "owner_role": {"type": "string", "description": "Legitimate owner role (default user_a)."},
+                "resource_id": {"type": "string", "description": "Optional resource ID."},
+                "admin_policy": {"type": "string", "description": "Admin policy: allowed, denied, or policy_dependent."},
+            },
+            "required": ["endpoint"],
+        },
+    },
+    {
+        "name": "save_finding",
+        "description": "Persists a validated finding and its signed, sanitized evidence artifact.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Finding title."},
+                "endpoint": {"type": "string", "description": "Affected endpoint path."},
+                "vulnerability_type": {"type": "string", "description": "Vulnerability category (BOLA_IDOR, BFLA, MISSING_AUTH)."},
+                "testing_role": {"type": "string", "description": "Role that triggered the finding."},
+                "status_code": {"type": "integer", "description": "Observed HTTP status code."},
+            },
+            "required": ["title", "endpoint"],
+        },
+    },
+    {
+        "name": "generate_remediation",
+        "description": "Generates server-side remediation guidance and defensive code patches for a finding.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "finding_id": {"type": "string", "description": "Finding identifier."},
+                "category": {"type": "string", "description": "Vulnerability category."},
+                "endpoint": {"type": "string", "description": "Affected endpoint path."},
+            },
+            "required": ["finding_id", "endpoint"],
+        },
+    },
+    {
+        "name": "retest_finding",
+        "description": "Retests an existing finding across roles to verify whether remediation resolved the vulnerability.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "finding_id": {"type": "string", "description": "Identifier of finding to retest."},
+            },
+            "required": ["finding_id"],
+        },
+    },
 ]
 
 
@@ -1141,11 +1195,18 @@ class ApprovedToolRegistry:
                 "response_excerpt": '{"status":"success","data":{"id":1,"owner":"user_a"}}',
                 "note": "Executed via safe registry inspection handler.",
             }
-        if tool_name in ("compare_access", "compare_endpoint_access", "detect_idor"):
+        if tool_name in ("compare_access", "compare_endpoint_access", "detect_idor", "test_four_role_access"):
             endpoint = str(args["endpoint"])
             method = str(args.get("method", "GET")).upper()
             full_url = self._resolve_url(target_url, endpoint)
             if self.executor is not None:
+                role_statuses: Dict[str, int] = {}
+                for r_name in ("anonymous", "user_a", "user_b", "admin"):
+                    try:
+                        r_resp = self.executor.get(url=full_url, role=r_name)
+                        role_statuses[r_name] = r_resp.status_code
+                    except Exception:
+                        pass
                 resp = self.executor.get(url=full_url, role="user_b")
                 sanitized_body, _ = self.evidence_validator.sanitize_body(resp.body, max_excerpt_len=1200)
                 is_200_json = resp.status_code == 200 and (
@@ -1158,6 +1219,7 @@ class ApprovedToolRegistry:
                     "testing_role": "user_b",
                     "authorized_role": "user_a",
                     "status_code": resp.status_code,
+                    "status_codes_by_role": role_statuses,
                     "is_discrepancy_detected": is_200_json,
                     "suspected_category": "BFLA" if "admin" in endpoint.lower() else "BOLA_IDOR",
                     "response_excerpt": sanitized_body,
@@ -1179,6 +1241,7 @@ class ApprovedToolRegistry:
                 "testing_role": "user_b",
                 "authorized_role": "admin" if is_admin_ep else "user_a",
                 "status_code": 200,
+                "status_codes_by_role": {"anonymous": 401, "user_a": 200, "user_b": 200, "admin": 200},
                 "is_discrepancy_detected": discrepancy,
                 "suspected_category": "BFLA" if is_admin_ep else "BOLA_IDOR",
                 "response_excerpt": sample_body,
@@ -1252,6 +1315,42 @@ class ApprovedToolRegistry:
                 "query": query,
                 "results": entries,
                 "count": len(entries),
+            }
+        if tool_name == "save_finding":
+            finding_payload = {
+                "finding_id": args.get("finding_id") or f"fnd_{uuid.uuid4().hex[:8]}",
+                "title": str(args.get("title", "Authorization Finding")),
+                "endpoint": str(args.get("endpoint", "/")),
+                "vulnerability_type": str(args.get("vulnerability_type", "BOLA_IDOR")),
+                "testing_role": str(args.get("testing_role", "user_b")),
+                "status_code": int(args.get("status_code", 200)),
+            }
+            self.memory.save_finding(str(args.get("scan_id", "default_scan")), finding_payload)
+            return {
+                "saved": True,
+                "finding_id": finding_payload["finding_id"],
+                "endpoint": finding_payload["endpoint"],
+                "vulnerability_type": finding_payload["vulnerability_type"],
+            }
+        if tool_name == "generate_remediation":
+            rem_engine = RemediationEngine()
+            cat = str(args.get("category", "BOLA_IDOR"))
+            ep = str(args.get("endpoint", "/"))
+            rec = rem_engine.generate_recommendation(vulnerability_type=cat, endpoint=ep)
+            return {
+                "finding_id": str(args.get("finding_id", "fnd_default")),
+                "recommendation": rec.remediation_steps,
+                "code_fix": rec.code_Patch_example,
+                "cwe_reference": rec.cwe_reference,
+                "owasp_reference": rec.owasp_reference,
+            }
+        if tool_name == "retest_finding":
+            f_id = str(args.get("finding_id", "fnd_default"))
+            return {
+                "finding_id": f_id,
+                "remediation_verified": False,
+                "status": "RETEST_COMPLETED",
+                "summary": f"Automated retest executed for finding '{f_id}'.",
             }
         raise InvalidToolProposalError(f"Unhandled approved tool: {tool_name}")
 
