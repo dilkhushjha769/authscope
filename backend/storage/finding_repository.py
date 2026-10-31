@@ -61,7 +61,7 @@ class FindingRepository:
         """Explicitly re-initializes DDL schema if needed."""
         self.db.init_schema()
 
-    def save_scan_session(self, session: ScanSessionRecord) -> str:
+    def save_scan_session(self, session: ScanSessionRecord, allow_reset: bool = False) -> str:
         """Inserts or updates a ScanSessionRecord in SQLite."""
         stages_serialized = {
             k: v.model_dump(mode="json") for k, v in (session.stages or {}).items()
@@ -71,6 +71,12 @@ class FindingRepository:
         updated_str = _dt_to_iso(session.updated_at or datetime.now(timezone.utc))
 
         with self.db.get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT status FROM scan_sessions WHERE id = ?", (session.id,))
+            existing = cur.fetchone()
+            if not allow_reset and existing and existing["status"] in ("CANCELLED", "COMPLETED", "FAILED") and session.status in ("RUNNING", "PENDING", "CREATED", "QUEUED"):
+                session.status = existing["status"]
+
             conn.execute(
                 """
                 INSERT OR REPLACE INTO scan_sessions (

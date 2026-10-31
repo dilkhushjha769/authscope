@@ -2933,7 +2933,7 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
     session.confirmed_findings_count = 0
     session.suspicious_results_count = 0
     session.summary_text = ""
-    repo.save_scan_session(session)
+    repo.save_scan_session(session, allow_reset=True)
 
     token = CancellationToken()
     active_tokens[assessment_id] = token
