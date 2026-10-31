@@ -31,6 +31,8 @@ export default function Home() {
   const [historyError, setHistoryError] = useState(false);
   const [selectedFinding, setSelectedFinding] = useState<string | null>(null);
   const [copiedFix, setCopiedFix] = useState<string | null>(null);
+  const [severityFilter, setSeverityFilter] = useState("ALL");
+  const [showAllActivity, setShowAllActivity] = useState(false);
   const stream = useRef<AbortController | null>(null);
   const seenIds = useRef(new Set<number>());
 
@@ -76,7 +78,7 @@ export default function Home() {
       const nextStatus = data.status.toUpperCase() as Lifecycle;
       setId(data.id); setTarget(data.target_url); setStatus(nextStatus);
       setEvents(data.events || []); setFindings(uniqueFindings(data.findings || [])); setReport(data);
-      setMobileSidebar(false); setError("");
+      setMobileSidebar(false); setError(""); setSeverityFilter("ALL"); setShowAllActivity(false); setSelectedFinding(null);
       if (active(nextStatus)) connect(data.id, data.events || []);
       else { stream.current?.abort(); setConnected(false); }
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load this assessment."); }
@@ -96,7 +98,7 @@ export default function Home() {
     let parsed: URL;
     try { parsed = new URL(normalizedTarget); } catch { setError("Enter a valid website address, such as localhost:3000."); return; }
     if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) { setError("Only http:// and https:// website addresses can be assessed."); return; }
-    setBusy(true); setEvents([]); setFindings([]); setReport(null); setId(""); setStreamError(""); seenIds.current.clear();
+    setBusy(true); setEvents([]); setFindings([]); setReport(null); setId(""); setStreamError(""); seenIds.current.clear(); setSeverityFilter("ALL"); setShowAllActivity(false); setSelectedFinding(null);
     try {
       const created = await api.start(parsed.toString().replace(/\/$/, ""));
       setTarget(created.target_url);
@@ -112,7 +114,7 @@ export default function Home() {
   };
 
   const newAssessment = () => {
-    stream.current?.abort(); setConnected(false); setStatus("IDLE"); setId(""); setEvents([]); setFindings([]); setReport(null); setError(""); setStreamError(""); setTarget(""); setSelectedFinding(null); setMobileSidebar(false);
+    stream.current?.abort(); setConnected(false); setStatus("IDLE"); setId(""); setEvents([]); setFindings([]); setReport(null); setError(""); setStreamError(""); setTarget(""); setSelectedFinding(null); setSeverityFilter("ALL"); setShowAllActivity(false); setMobileSidebar(false);
   };
 
   const cancel = async () => {
@@ -125,6 +127,9 @@ export default function Home() {
 
   const mainStatus = active(status) ? "In progress" : status === "COMPLETED" ? "Completed" : status === "FAILED" ? "Failed" : status === "CANCELLED" ? "Cancelled" : "";
   const visibleFindings = uniqueFindings(findings);
+  const availableSeverities = [...new Set(visibleFindings.map((finding) => asText(finding.severity).toUpperCase()).filter(Boolean))];
+  const filteredFindings = severityFilter === "ALL" ? visibleFindings : visibleFindings.filter((finding) => asText(finding.severity).toUpperCase() === severityFilter);
+  const displayedEvents = showAllActivity ? events : events.slice(-6);
   const engineCount = (values: string[]) => visibleFindings.filter((finding) => values.includes(asText(finding.validation_status || finding.confirmation_status || finding.status).toUpperCase())).length;
   const fixesCount = visibleFindings.filter((finding) => Boolean(asText(finding.remediation_recommendation || finding.remediation_guidance))).length;
 
@@ -172,8 +177,8 @@ export default function Home() {
                 <div className="assistant-byline"><strong>AuthScope</strong><span>AI-powered authorized security testing</span></div>
                 <p className="assistant-intro">{active(status) ? "Assessment is running. Activity below is streamed from the security engine." : status === "COMPLETED" ? "Assessment complete. Review the returned evidence and findings below." : status === "FAILED" ? "The assessment failed. See the backend status and any recorded activity below." : status === "CANCELLED" ? "Assessment cancelled. The activity recorded before cancellation remains available below." : "Assessment details and backend activity are shown below."}</p>
           <div className="results-grid">
-            <section className="panel activity-panel"><div className="panel-title"><span>Agent activity</span><span className="connection-state">{connected ? <><Wifi size={14} />Live connection</> : active(status) ? <><WifiOff size={14} />Reconnecting</> : ""}</span></div><div className="activity-feed">{events.length ? events.map((item, index) => <article className="activity-item" key={`${item.id ?? "event"}-${index}`}><span className="activity-dot" /><div><p>{item.message}</p><small>{item.stage} · {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : ""}</small></div></article>) : <p className="empty-note">Waiting for activity from the assessment engine…</p>}</div></section>
-            <section className="panel findings-panel"><div className="panel-title"><span>Findings</span><span className="count-chip">{visibleFindings.length}</span></div>{visibleFindings.length ? <div className="finding-list">{visibleFindings.map((finding, index) => {
+            <section className="panel activity-panel"><div className="panel-title"><span>Agent activity <span className="count-chip">{events.length}</span></span><span className="activity-controls">{events.length > 6 && <button className="text-button" onClick={() => setShowAllActivity((value) => !value)}>{showAllActivity ? "Show latest" : "Show all activity"}</button>}<span className="connection-state">{connected ? <><Wifi size={14} />Live connection</> : active(status) ? <><WifiOff size={14} />Reconnecting</> : ""}</span></span></div><div className="activity-feed">{displayedEvents.length ? displayedEvents.map((item, index) => <article className="activity-item" key={`${item.id ?? "event"}-${index}`}><span className="activity-dot" /><div><p>{item.message}</p><small>{item.stage} · {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : ""}</small></div></article>) : <p className="empty-note">Waiting for activity from the assessment engine…</p>}</div></section>
+            <section className="panel findings-panel"><div className="panel-title"><span>Findings <span className="count-chip">{visibleFindings.length}</span></span></div>{visibleFindings.length ? <><div className="severity-filters" role="group" aria-label="Filter findings by severity"><button className={severityFilter === "ALL" ? "selected" : ""} aria-pressed={severityFilter === "ALL"} onClick={() => setSeverityFilter("ALL")}>All <span>{visibleFindings.length}</span></button>{availableSeverities.map((severity) => <button className={severityFilter === severity ? "selected" : ""} aria-pressed={severityFilter === severity} key={severity} onClick={() => setSeverityFilter(severity)}>{severity} <span>{visibleFindings.filter((finding) => asText(finding.severity).toUpperCase() === severity).length}</span></button>)}</div><div className="finding-list">{filteredFindings.map((finding, index) => {
               const findingId = asText(finding.id) || String(index); const findingStatus = asText(finding.validation_status || finding.confirmation_status || finding.status || "UNVALIDATED").toUpperCase();
               const title = asText(finding.title || finding.vulnerability_category || finding.vulnerability_type) || "Finding";
               const endpoint = asText(finding.endpoint || finding.target_endpoint); const severity = asText(finding.severity).toUpperCase() || "Unrated";
@@ -205,7 +210,7 @@ export default function Home() {
                   {typeof finding.technical_details === "object" && finding.technical_details !== null && <details><summary>Technical evidence</summary><pre>{JSON.stringify(finding.technical_details, null, 2)}</pre></details>}
                 </div>}
               </article>;
-            })}</div> : <p className="empty-note">{status === "COMPLETED" ? "No findings were returned for this assessment." : "Verified findings will appear here when reported."}</p>}</section>
+            })}</div></> : <p className="empty-note">{status === "COMPLETED" ? "No findings were returned for this assessment." : "Verified findings will appear here when reported."}</p>}</section>
           </div>
           {report && !active(status) && <section className="report-panel"><div className="panel-title"><span><FileText size={17} />Final report</span><button className="subtle-button print-button" onClick={() => window.print()}>Print report</button></div><dl className="report-grid">{[["Target", report.target_url], ["Assessment ID", report.id], ["Status", report.status], ["Started", report.started_at], ["Finished", report.completed_at || "Not provided"], ["Endpoints tested", report.endpoints_tested_count], ["Findings detected", visibleFindings.length], ["Engine confirmed", engineCount(["CONFIRMED", "CONFIRMED_RUNTIME_VULNERABILITY"])], ["Suspicious / inconclusive", engineCount(["SUSPICIOUS", "SUSPECTED", "INCONCLUSIVE"])], ["Fix recommendations supplied", fixesCount], ["AI reviewed", "Not reported by API"]].map(([label, value]) => <div key={String(label)}><dt>{label}</dt><dd>{value}</dd></div>)}</dl><div className="report-separation"><strong>Security engine verdicts</strong><p>Counts above use engine finding statuses. They are not AI conclusions.</p></div><div className="report-separation"><strong>AI assessment</strong><p>The current assessment response contains no AI finding-review result.</p></div><div className="report-separation"><strong>Actual evidence and summary</strong>{report.summary_text ? <p className="report-summary">{report.summary_text}</p> : <p>No overall summary was supplied by the backend.</p>}</div>{status === "FAILED" && report.failure_reason && <p className="error-message">{report.failure_reason}</p>}</section>}
               </div>

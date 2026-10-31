@@ -6,6 +6,8 @@
 - Restored backend startup. `backend.api.app` imports successfully, Uvicorn starts, and `/api/health` returns `healthy`.
 - Connected the minimal AuthScope workspace to the existing assessment create, fetch, stream, stop, and history endpoints.
 - Reshaped the assessment screen into a chat-style conversation with the target bubble, AuthScope reply header, live engine activity, findings, and report. Kept events and findings sourced from the backend; did not copy the prototype sample data or timed fake progress.
+- Refined the visual system with a warm neutral palette, serif display headline, softer surfaces, accessible focus styles, and consistent light/dark colors. Added severity filters based on returned finding severities and a compact activity view that can expand to the full event history.
+- Mapped the supplied HTML metadata into the Next.js app layout. The supplied `main.tsx` and `vite-env.d.ts` are Vite-specific; their roles remain covered by Next.js `layout.tsx` and `next-env.d.ts`, so they were not copied.
 - Added localhost URL normalization, submission/loading/error states, retry and reconnect behavior, event ID deduplication, finding/report rendering, and print styling.
 - Removed the extra authorization checkbox while retaining an authorization notice and server-side ScopeGuard validation.
 - Kept the security engine verdict separate from AI review. The UI reports AI review as unavailable when no AI finding analysis is returned by the backend.
