@@ -18,7 +18,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" className="dark h-full">
-      <body className="h-full bg-[#0B0F17] text-[#F9FAFB] flex flex-col selection:bg-blue-600 selection:text-white">
+      <body className="h-full bg-[#262624] text-[#f4f2ec] flex flex-col selection:bg-[#5fa37f]/30 selection:text-[#f4f2ec]">
         {children}
       </body>
     </html>
