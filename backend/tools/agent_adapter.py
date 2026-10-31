@@ -54,6 +54,9 @@ CANONICAL_ALIASES: Dict[str, str] = {
     "test_https": "check_transport_security",
     "check_transport": "check_transport_security",
     "scan_misconfigurations": "run_security_misconfiguration_scan",
+    "run_attack_chain": "execute_attack_chain",
+    "test_attack_chain": "execute_attack_chain",
+    "verify_attack_chain": "retest_attack_chain",
 }
 
 
@@ -112,9 +115,9 @@ class ToolRegistryAdapter:
         if context is None and assessment_id:
             context = {"assessment_id": assessment_id}
 
-        if context is None and assessment_id:
-            context = {"assessment_id": assessment_id}
-
+        if context is None and assessment_id:
+            context = {"assessment_id": assessment_id}
+
         # Resolve aliases
         effective_name = CANONICAL_ALIASES.get(tool_name, tool_name)
 

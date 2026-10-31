@@ -699,3 +699,77 @@ class RunMisconfigurationScanOutput(BaseModel):
     suppressed_duplicates_count: int
     categories: Dict[str, Any]
     findings: List[Dict[str, Any]]
+
+
+
+# ==============================================================================
+# Attack Chain Execution & Verification Schemas (Member 2)
+# ==============================================================================
+
+
+class ValidateAttackChainInput(BaseModel):
+    """Input for deterministic pre-execution validation of an attack chain."""
+    chain: Dict[str, Any] = Field(..., description="Candidate attack chain structure from planner or generator")
+    target_url: Optional[str] = Field(default=None, description="Explicit target base URL override")
+    role_override: Optional[str] = Field(default=None, description="Optional role session override to validate")
+
+
+class ValidateAttackChainOutput(BaseModel):
+    """Output of pre-execution chain validation."""
+    is_valid: bool
+    chain_id: str
+    scenario: str
+    step_count: int
+    rejection_reasons: List[str] = Field(default_factory=list)
+    validated_target_url: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ExecuteAttackChainInput(BaseModel):
+    """Input for executing a validated multi-step attack chain across roles."""
+    chain: Dict[str, Any] = Field(..., description="Validated candidate attack chain from planner")
+    target_url: Optional[str] = Field(default=None, description="Target base URL override")
+    scan_id: str = Field(default="scan_default_chain", description="Active assessment scan ID")
+    role_assignments: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Optional mapping of step_id to testing role (e.g. {'step-1': 'user_a', 'step-2': 'user_b'})"
+    )
+    save_findings: bool = Field(default=True, description="Whether to persist confirmed findings and evidence to SQLite")
+
+
+class ExecuteAttackChainOutput(BaseModel):
+    """Output of multi-step attack chain execution and authorization verification."""
+    chain_id: str
+    chain_name: str
+    scenario: str
+    status: str
+    is_confirmed: bool
+    steps_executed: int
+    total_steps: int
+    step_results: List[Dict[str, Any]] = Field(default_factory=list)
+    extracted_context: Dict[str, str] = Field(default_factory=dict)
+    vulnerability_category: str
+    severity: str
+    confidence: str
+    remediation_steps: List[str] = Field(default_factory=list)
+    remediation_code_patch: Optional[str] = None
+    finding_id: Optional[str] = None
+    summary: str
+    reproducibility_steps: List[str] = Field(default_factory=list)
+
+
+class RetestAttackChainInput(BaseModel):
+    """Input for retesting an existing attack chain finding."""
+    finding_id: str = Field(..., description="ID of the chain finding to retest")
+    scan_id: Optional[str] = Field(default=None, description="Assessment scan ID context")
+
+
+class RetestAttackChainOutput(BaseModel):
+    """Output of attack chain retest verification."""
+    finding_id: str
+    retest_status: str
+    is_vulnerable: bool
+    remediation_verified: bool
+    summary: str
+    steps_retested: int
+    details: Dict[str, Any] = Field(default_factory=dict)

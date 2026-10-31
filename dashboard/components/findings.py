@@ -86,6 +86,43 @@ def _render_single_finding_card(finding: FindingRecord, is_confirmed: bool = Tru
             with st.expander("🛠️ Prescriptive Server-Side Remediation Guidance", expanded=False):
                 st.markdown(finding.remediation_guidance)
 
+        # Render Multi-Endpoint Attack Chain Details if present
+        tech_details = finding.technical_details or {}
+        if "chain_id" in tech_details or "steps" in tech_details:
+            with st.expander("🔗 Multi-Endpoint Attack-Chain Telemetry & Step Sequence", expanded=True):
+                col_ch1, col_ch2, col_ch3 = st.columns(3)
+                with col_ch1:
+                    st.markdown(f"**Chain ID:** `{(tech_details.get('chain_id') or finding.id)}`")
+                    st.markdown(f"**Scenario:** `{tech_details.get('scenario', finding.vulnerability_type)}`")
+                with col_ch2:
+                    steps_list = tech_details.get("steps") or []
+                    st.markdown(f"**Step Count:** `{len(steps_list)}`")
+                    st.markdown(f"**Vulnerable Step:** `{(tech_details.get('vulnerable_step_id') or 'N/A')}`")
+                with col_ch3:
+                    risk_meta = tech_details.get("risk_assessment") or {}
+                    st.markdown(f"**Severity Rating:** `{risk_meta.get('severity', sev_str)}`")
+                    st.markdown(f"**Confidence:** `{risk_meta.get('confidence', 'CONFIRMED')}`")
+
+                st.markdown("##### Ordered Execution Sequence")
+                for s in steps_list:
+                    s_id = s.get("step_id", "step")
+                    s_meth = s.get("method", "GET")
+                    s_ep = s.get("endpoint_path") or s.get("endpoint") or ""
+                    s_role = s.get("role_used") or s.get("role") or ""
+                    s_code = s.get("status_code", 0)
+                    s_verdict = s.get("verdict", "")
+                    s_icon = "🔴" if "CONFIRMED" in s_verdict or "UNAUTHORIZED" in s_verdict else ("🟢" if "ALLOWED" in s_verdict or "DENIED" in s_verdict else "⚪")
+                    st.markdown(
+                        f"- {s_icon} **`{s_id}`** `[{s_role}]` `{s_meth} {s_ep}` → **HTTP {s_code}** ({s_verdict})"
+                    )
+                    if s.get("actual_behavior"):
+                        st.caption(f"  Observed: {s['actual_behavior']}")
+
+                ctx = tech_details.get("extracted_context") or {}
+                if ctx:
+                    st.markdown("##### Bound Context Identifiers")
+                    st.json(ctx)
+
         if finding.evidence and finding.evidence.sanitized_response_evidence:
             with st.expander("📄 Raw Differential Telemetry (Sanitized)", expanded=False):
                 st.markdown(f"**Fingerprint (SHA-256):** `{finding.evidence.evidence_sha256}`")

@@ -806,6 +806,31 @@ APPROVED_TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "required": ["finding_id"],
         },
     },
+    {
+        "name": "validate_attack_chain",
+        "description": "Validates attack chain endpoints, scope, methods, and dependencies prior to execution.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "chain": {"type": "object", "description": "Candidate attack chain dictionary."},
+                "target_url": {"type": "string", "description": "Target base URL."},
+            },
+            "required": ["chain"],
+        },
+    },
+    {
+        "name": "execute_attack_chain",
+        "description": "Executes a multi-endpoint attack chain across testing roles, binds parameters, and verifies authorization.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "chain": {"type": "object", "description": "Validated attack chain dictionary."},
+                "target_url": {"type": "string", "description": "Target base URL."},
+                "scan_id": {"type": "string", "description": "Assessment scan ID context."},
+            },
+            "required": ["chain"],
+        },
+    },
 ]
 
 
@@ -1354,6 +1379,21 @@ class ApprovedToolRegistry:
                 "status": "RETEST_COMPLETED",
                 "summary": f"Automated retest executed for finding '{f_id}'.",
             }
+        if tool_name == "validate_attack_chain":
+            from backend.scanner.attack_chain_executor import AttackChainValidator
+            validator = AttackChainValidator(scope_guard=self.scope_guard, base_url=target_url)
+            val_res = validator.validate_chain(chain=args.get("chain", {}), target_url=target_url)
+            return val_res.model_dump()
+        if tool_name in ("execute_attack_chain", "run_attack_chain"):
+            from backend.scanner.attack_chain_executor import AttackChainExecutor
+            executor = AttackChainExecutor(scope_guard=self.scope_guard, base_url=target_url)
+            exec_res = executor.execute_chain(
+                chain=args.get("chain", {}),
+                target_url=target_url,
+                scan_id=str(args.get("scan_id", "scan_default")),
+                save_finding=bool(args.get("save_findings", False)),
+            )
+            return exec_res.model_dump()
         raise InvalidToolProposalError(f"Unhandled approved tool: {tool_name}")
 
     def execute_tool_call(
@@ -1917,6 +1957,27 @@ class AgentOrchestrator:
                 "endpoint": ep,
                 "summary": f"Evidence validation for {ep} completed with status {status_val}.",
                 "recommended_next_step": "finish",
+            }
+
+        if tool_name in ("execute_attack_chain", "run_attack_chain"):
+            c_status = str(out.get("status", "")).upper()
+            is_conf = bool(out.get("is_confirmed", False))
+            scen = str(out.get("scenario", "MULTI_STEP_CHAIN"))
+            cid = str(out.get("chain_id", "chain"))
+            if is_conf or c_status == "CONFIRMED":
+                candidate_discrepancies.append({
+                    "endpoint": str(out.get("target_url", "/")),
+                    "method": "CHAIN",
+                    "status_code": 200,
+                    "suspected_category": scen,
+                    "is_confirmed": True,
+                    "summary": f"Confirmed multi-step attack chain: {cid}",
+                })
+            return {
+                "status": "CONFIRMED" if is_conf else c_status or "COMPLETED",
+                "endpoint": None,
+                "summary": out.get("summary") or f"Executed attack chain {cid}: status={c_status}",
+                "recommended_next_step": "finish" if is_conf else "continue",
             }
 
         return {

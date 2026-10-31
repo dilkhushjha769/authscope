@@ -66,6 +66,12 @@ from backend.tools.schemas import (
     TestBflaOutput,
     TestUnauthorizedModificationInput,
     TestUnauthorizedModificationOutput,
+    ValidateAttackChainInput,
+    ValidateAttackChainOutput,
+    ExecuteAttackChainInput,
+    ExecuteAttackChainOutput,
+    RetestAttackChainInput,
+    RetestAttackChainOutput,
     ToolCategory,
     ToolCompletedEvent,
     ToolEventBase,
@@ -665,6 +671,38 @@ class ToolRegistry:
                 output_model=TestUnauthorizedModificationOutput,
                 handler=lambda args, ctx: self.authorization_tools.test_unauthorized_modification(args, ctx),
                 requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="validate_attack_chain",
+                description="Deterministically validates an attack chain's endpoints, scope, methods, and dependencies prior to execution.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=ValidateAttackChainInput,
+                output_model=ValidateAttackChainOutput,
+                handler=lambda args, ctx: self.authorization_tools.validate_attack_chain(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="execute_attack_chain",
+                description="Executes a multi-endpoint attack chain across the four testing roles, binds parameters, and verifies authorization violations with evidence.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=ExecuteAttackChainInput,
+                output_model=ExecuteAttackChainOutput,
+                handler=lambda args, ctx: self.authorization_tools.execute_attack_chain(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="retest_attack_chain",
+                description="Replays an attack chain sequence to verify whether a previously confirmed finding has been fixed.",
+                category=ToolCategory.REPORTING,
+                input_model=RetestAttackChainInput,
+                output_model=RetestAttackChainOutput,
+                handler=lambda args, ctx: self.authorization_tools.retest_attack_chain(args, ctx),
             )
         )
 
