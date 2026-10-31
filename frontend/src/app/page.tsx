@@ -49,6 +49,8 @@ export default function Home() {
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const seenEventIdsRef = useRef<Set<string>>(new Set());
+  const seenMessageIdsRef = useRef<Set<string>>(new Set());
 
   // Timer effect
   useEffect(() => {
@@ -70,11 +72,68 @@ export default function Home() {
     }
   }, [streamingText, activityEvents, status]);
 
+  // Connect to SSE event stream with deduplication and reconnection support
+  const connectToStream = (scanId: string, isRecovery: boolean = false) => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+    }
+
+    if (!isRecovery) {
+      seenEventIdsRef.current.clear();
+      seenMessageIdsRef.current.clear();
+      setActivityEvents([]);
+      setStreamingText("");
+    }
+
+    const es = new EventSource(`${API_BASE_URL}/api/assessments/${scanId}/stream`);
+    eventSourceRef.current = es;
+
+    es.addEventListener("activity", (e: MessageEvent) => {
+      try {
+        const eventItem: AssessmentActivityEvent = JSON.parse(e.data);
+        const eventKey = e.lastEventId ? String(e.lastEventId) : `${eventItem.event_type}_${eventItem.timestamp}_${eventItem.message}`;
+        if (seenEventIdsRef.current.has(eventKey)) return;
+        seenEventIdsRef.current.add(eventKey);
+        setActivityEvents((prev) => [...prev, eventItem]);
+      } catch (err) {
+        console.error("Failed to parse activity event:", err);
+      }
+    });
+
+    es.addEventListener("message", (e: MessageEvent) => {
+      try {
+        const msgKey = e.lastEventId;
+        if (msgKey && seenMessageIdsRef.current.has(msgKey)) return;
+        if (msgKey) seenMessageIdsRef.current.add(msgKey);
+        const payload = JSON.parse(e.data);
+        if (payload.text) {
+          setStreamingText((prev) => prev + payload.text);
+        }
+      } catch (err) {
+        console.error("Failed to parse message chunk:", err);
+      }
+    });
+
+    es.addEventListener("done", (e: MessageEvent) => {
+      try {
+        const doneData = JSON.parse(e.data);
+        setStatus(doneData.status?.toLowerCase() === "failed" ? "failed" : "completed");
+      } catch {
+        setStatus("completed");
+      }
+      es.close();
+    });
+
+    es.addEventListener("error", (e: Event) => {
+      console.warn("SSE stream connection interrupted or closed:", e);
+      // Browser EventSource automatically attempts reconnection for active streams
+    });
+  };
+
   // Handle URL recovery on refresh if assessment ID exists in localStorage
   useEffect(() => {
     const savedId = localStorage.getItem("authscope_last_assessment_id");
     if (savedId && !assessmentId && status === "idle") {
-      // Re-fetch assessment status
       fetch(`${API_BASE_URL}/api/assessments/${savedId}`)
         .then((res) => {
           if (res.ok) return res.json();
@@ -83,21 +142,24 @@ export default function Home() {
         .then((data) => {
           setAssessmentId(data.id);
           setTargetUrl(data.target_url);
-          setStatus(data.status.toLowerCase());
-          setActivityEvents(data.events || []);
-          setStreamingText(data.markdown_content || "");
+          const scanStatus = data.status.toLowerCase();
+          setStatus(scanStatus);
+
+          const startTimeMs = data.started_at ? new Date(data.started_at).getTime() : Date.now();
+          setStartTime(startTimeMs);
           setElapsedSeconds(
             data.completed_at && data.started_at
-              ? Math.max(
-                  1,
-                  Math.floor(
-                    (new Date(data.completed_at).getTime() -
-                      new Date(data.started_at).getTime()) /
-                      1000
-                  )
-                )
-              : 12
+              ? Math.max(1, Math.floor((new Date(data.completed_at).getTime() - new Date(data.started_at).getTime()) / 1000))
+              : Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000))
           );
+
+          if (scanStatus === "running" || scanStatus === "pending") {
+            // Assessment is still running in background! Reconnect to stream and stream new events
+            connectToStream(data.id, true);
+          } else {
+            setActivityEvents(data.events || []);
+            setStreamingText(data.markdown_content || "");
+          }
         })
         .catch(() => {
           localStorage.removeItem("authscope_last_assessment_id");
@@ -141,48 +203,7 @@ export default function Home() {
       localStorage.setItem("authscope_last_assessment_id", scanId);
 
       // 2. Open Server-Sent Events (SSE) stream
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
-
-      const es = new EventSource(`${API_BASE_URL}/api/assessments/${scanId}/stream`);
-      eventSourceRef.current = es;
-
-      es.addEventListener("activity", (e: MessageEvent) => {
-        try {
-          const eventItem: AssessmentActivityEvent = JSON.parse(e.data);
-          setActivityEvents((prev) => [...prev, eventItem]);
-        } catch (err) {
-          console.error("Failed to parse activity event:", err);
-        }
-      });
-
-      es.addEventListener("message", (e: MessageEvent) => {
-        try {
-          const payload = JSON.parse(e.data);
-          if (payload.text) {
-            setStreamingText((prev) => prev + payload.text);
-          }
-        } catch (err) {
-          console.error("Failed to parse message chunk:", err);
-        }
-      });
-
-      es.addEventListener("done", (e: MessageEvent) => {
-        try {
-          const doneData = JSON.parse(e.data);
-          setStatus(doneData.status?.toLowerCase() === "failed" ? "failed" : "completed");
-        } catch {
-          setStatus("completed");
-        }
-        es.close();
-      });
-
-      es.addEventListener("error", (e: Event) => {
-        console.warn("SSE connection error or closed:", e);
-        // If assessment completes or closes normally, close EventSource
-        es.close();
-      });
+      connectToStream(scanId, false);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to start assessment.";
       setError(msg);
@@ -209,6 +230,8 @@ export default function Home() {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
+    seenEventIdsRef.current.clear();
+    seenMessageIdsRef.current.clear();
     localStorage.removeItem("authscope_last_assessment_id");
     setAssessmentId(null);
     setStatus("idle");

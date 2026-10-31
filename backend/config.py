@@ -54,7 +54,18 @@ class Settings(BaseSettings):
     follow_redirects: bool = Field(default=False, alias="FOLLOW_REDIRECTS")
     safe_mode: bool = Field(default=True, alias="SAFE_MODE")
 
-    @field_validator("allowed_hosts", "allowed_schemes", "allowed_methods", mode="after")
+    # CORS Configuration - Explicit development origins only; never wildcard with credentials
+    cors_origins: Union[List[str], str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3001",
+        ],
+        alias="CORS_ORIGINS",
+    )
+
+    @field_validator("allowed_hosts", "allowed_schemes", "allowed_methods", "cors_origins", mode="after")
     @classmethod
     def parse_string_list(cls, v: Any) -> List[str]:
         if isinstance(v, str):

@@ -160,10 +160,10 @@ class FindingRepository:
             config=cfg,
         )
 
-    def save_event(self, event: AssessmentEvent) -> None:
-        """Persists a sanitized real-time AssessmentEvent to SQLite."""
+    def save_event(self, event: AssessmentEvent) -> int:
+        """Persists a sanitized real-time AssessmentEvent to SQLite and sets event.id."""
         with self.db.get_connection() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO assessment_events (
                     scan_id, event_type, stage, message, timestamp, metadata_json
@@ -179,14 +179,27 @@ class FindingRepository:
                 ),
             )
             conn.commit()
+            if cursor.lastrowid is not None:
+                event.id = cursor.lastrowid
+                return cursor.lastrowid
+        return 0
 
-    def list_events(self, scan_id: str) -> List[AssessmentEvent]:
-        """Lists all persisted events for a given assessment in chronological order."""
+    def list_events(self, scan_id: str, after_id: Optional[int] = None) -> List[AssessmentEvent]:
+        """Lists all persisted events for a given assessment in chronological order.
+
+        Args:
+            scan_id: Assessment scan ID.
+            after_id: Optional event ID cursor for incremental replay and SSE reconnection.
+        """
+        query = "SELECT * FROM assessment_events WHERE scan_id = ?"
+        params: List[Any] = [scan_id]
+        if after_id is not None:
+            query += " AND id > ?"
+            params.append(after_id)
+        query += " ORDER BY id ASC"
+
         with self.db.get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM assessment_events WHERE scan_id = ? ORDER BY id ASC",
-                (scan_id,),
-            ).fetchall()
+            rows = conn.execute(query, tuple(params)).fetchall()
 
         events: List[AssessmentEvent] = []
         for r in rows:
@@ -198,6 +211,7 @@ class FindingRepository:
                     pass
             events.append(
                 AssessmentEvent(
+                    id=r["id"] if "id" in r.keys() else None,
                     assessment_id=r["scan_id"],
                     event_type=r["event_type"],
                     stage=r["stage"],

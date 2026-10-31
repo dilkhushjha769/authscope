@@ -95,6 +95,7 @@ class EvidenceValidationStatus(str, Enum):
 
 class AssessmentEvent(BaseModel):
     """Structured real-time event emitted during an assessment."""
+    id: Optional[int] = None
     assessment_id: str
     event_type: str
     stage: str
