@@ -1,0 +1,39 @@
+[
+  {
+    "id": "fnd_idor_basket_01",
+    "scan_id": "scan_20261031_001",
+    "title": "Broken Object Level Authorization (IDOR) on Shopping Basket",
+    "vulnerability_type": "BOLA_IDOR",
+    "severity": "HIGH",
+    "status": "confirmed",
+    "target_endpoint": "/rest/basket/1",
+    "http_method": "GET",
+    "affected_roles": [
+      "user_b",
+      "anonymous"
+    ],
+    "description": "The endpoint /rest/basket/{id} returns customer cart details based solely on the URL path ID parameter. Requesting basket ID 1 using User B credentials successfully returned User A's private product inventory and order metadata without proper ownership verification.",
+    "remediation_guidance": "// Node.js / Express Remediation\nconst basket = await BasketModel.findByPk(req.params.id);\nif (!basket) return res.status(404).send('Basket not found');\nif (basket.UserId !== req.user.id && req.user.role !== 'admin') {\n    return res.status(403).json({ error: 'Access Denied: You do not own this basket' });\n}",
+    "evidence": {
+      "evidence_id": "evi_8a4f91c2",
+      "finding_id": "fnd_idor_basket_01",
+      "timestamp": "2026-10-31T15:30:00Z",
+      "test_role": "user_b",
+      "authorized_role": "user_a",
+      "raw_request": {
+        "method": "GET",
+        "url": "http://localhost:3000/rest/basket/1",
+        "headers": {
+          "Host": "localhost:3000",
+          "Authorization": "Bearer [REDACTED_USER_B_JWT]"
+        }
+      },
+      "raw_response": {
+        "status_code": 200,
+        "body": "{\"status\":\"success\",\"data\":{\"id\":1,\"UserId\":1,\"Products\":[{\"id\":1,\"name\":\"Apple Juice\"}]}}"
+      },
+      "evidence_sha256": "8a4f91c2b53e7f22384a86b3a097d8e6a1476b7e193e4d9c7f12e5a6438901b2"
+    }
+  }
+]
+
