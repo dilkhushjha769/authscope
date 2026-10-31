@@ -505,6 +505,14 @@ class FindingRepository:
 
         data_dict["updated_at"] = datetime.now(timezone.utc)
 
+        # Validate merged update with FindingRecord before applying to SQLite
+        merged_dict = current.model_dump()
+        merged_dict.update(data_dict)
+        try:
+            FindingRecord(**merged_dict)
+        except Exception as e:
+            raise InvalidDataError(f"Invalid update data: {e}") from e
+
         # Build parameterized UPDATE statement
         fields_to_update = []
         values = []
@@ -581,6 +589,11 @@ class FindingRepository:
                 raise InvalidDataError(f"Invalid retest log data: {e}") from e
 
         with self.db.session_scope() as conn:
+            # Check parent finding existence
+            cursor = conn.execute("SELECT id FROM findings WHERE id = ?", (retest.finding_id,))
+            if not cursor.fetchone():
+                raise RecordNotFoundError(f"Cannot save retest result: Finding '{retest.finding_id}' does not exist.")
+
             conn.execute(
                 """
                 INSERT INTO retest_logs (
