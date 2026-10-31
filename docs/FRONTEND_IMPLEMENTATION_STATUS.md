@@ -61,8 +61,7 @@ The remaining test warnings are FastAPI `on_event` deprecation, an unregistered 
 ## Known limitations
 
 - AI review requires a backend API/SSE contract addition before the frontend can show real AI review conclusions or progress.
-- Screenshot evidence was not saved.
-- A frontend process already running on port 3001 serves an older stylesheet bundle. Restart that process to load the latest chat-style assessment layout.
+- No screenshot file was added to the repository; the desktop and mobile preview was verified in the browser at `http://localhost:3001`.
 - Local run requires dependencies from `requirements.txt` (including `google-genai`) and a configured `NEXT_PUBLIC_API_URL`.
 
 ## Run locally
