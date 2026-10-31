@@ -3,15 +3,15 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckCircle2, Clock3, Copy, Download, FileText, Loader2, Menu, Moon, Plus, Sun, Wifi, WifiOff, X } from "lucide-react";
 import { api, openAssessmentStream } from "@/api/client";
-import type { AssessmentActivityEvent, AssessmentSummaryResponse } from "@/types/assessment";
+import type { AssessmentActivityEvent, AssessmentSummaryResponse, FindingItem } from "@/types/assessment";
 
 type Lifecycle = "CREATED" | "QUEUED" | "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
 type PastScan = { id: string; target_url: string; status: string; started_at?: string; confirmed_findings_count?: number; suspicious_results_count?: number };
-type Finding = Record<string, unknown>;
+type Finding = FindingItem;
 const API_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/$/, "");
 const active = (status: string) => ["CREATED", "QUEUED", "PENDING", "RUNNING"].includes(status.toUpperCase());
 const asText = (value: unknown) => typeof value === "string" ? value : "";
-const uniqueFindings = (items: Finding[]) => [...new Map(items.map((item, index) => [asText(item.id) || `missing-id-${index}`, item])).values()];
+const uniqueFindings = (items: FindingItem[]) => [...new Map(items.map((item, index) => [asText(item.id) || `missing-id-${index}`, item])).values()];
 const shortDate = (value?: string) => value ? new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "Recent";
 const formatDuration = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 
@@ -227,7 +227,7 @@ export default function Home() {
                   <ArrowDown size={16} className={expanded ? "rotate" : ""} />
                 </button>
                 {expanded && <div className="finding-details">
-                  <div className="engine-verdict"><strong>Security engine verdict</strong><span>{engineTitle}</span><small>{asText(finding.classification || finding.access_verdict)}</small></div>
+                  <div className="engine-verdict"><strong>Security engine verdict</strong><span>{engineTitle}</span><small>{asText((finding as unknown as Record<string, unknown>).classification || finding.access_verdict)}</small></div>
                   <h3>Finding description</h3><p>{asText(finding.impact_explanation || finding.description) || "No description was provided by the backend."}</p>
                   <h3>AI review</h3><div className="ai-unavailable"><strong>AI review was not included in the assessment response.</strong><p>The current API returns the security engine finding and its evidence, but does not return an AI verdict, confidence estimate, reasoning, counter-evidence, or missing-evidence analysis. The engine verdict above remains separate and authoritative.</p></div>
                   <h3>Proof</h3>{finding.evidence ? <><p className="detail-secondary">Sensitive request and response values are redacted by the security engine.</p><div className="proof-grid"><div><span>Request sent</span><pre>{`${asText(evidence.request_method || evidence.http_method || finding.http_method) || "GET"} ${asText(evidence.request_url || evidence.endpoint || finding.endpoint || finding.target_endpoint) || "Endpoint not provided"}`}</pre></div><div><span>Response received</span><pre>{[evidence.response_status ? `HTTP ${String(evidence.response_status)}` : "", asText(evidence.sanitized_response_evidence || evidence.sanitized_response_body || evidence.actual_behavior)].filter(Boolean).join("\n\n") || "Response details were not included."}</pre></div></div><details className="evidence-technical"><summary>Full sanitized evidence</summary><pre>{JSON.stringify(finding.evidence, null, 2)}</pre></details></> : <p className="missing-source">No evidence object was included in the API response.</p>}
