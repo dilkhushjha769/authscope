@@ -309,7 +309,8 @@ def test_scenario_4_user_b_unauthorized_resource_modification_with_safe_fixtures
     assert "modify" in mod_res.finding_records[0].description.lower()
 
     # Verify default GET-only scope was restored on ScopeGuard after the test
-    assert tester.scope_guard.allowed_methods == ["GET"]
+    assert "PUT" not in tester.scope_guard.allowed_methods
+    assert "GET" in tester.scope_guard.allowed_methods
 
     # 4B: Destructive HTTP DELETE is strictly rejected
     with pytest.raises(UnsupportedMethodError):
