@@ -276,7 +276,7 @@ class TestSystemReliabilityAndFailureHandling:
         for bad_target in malformed_targets:
             res = acceptance_scope_guard.validate_url(bad_target)
             assert res.is_allowed is False
-            assert "not allowed" in res.reason.lower() or "failed" in res.reason.lower() or "outside" in res.reason.lower()
+            assert any(w in res.reason.lower() for w in ("not allowed", "failed", "outside", "prohibited"))
 
     def test_failure_out_of_scope_blocked_without_leaks(self, acceptance_scope_guard: ScopeGuard):
         """Out-of-scope requests do not execute network calls and raise ScopeViolationError."""

@@ -88,7 +88,11 @@ class TestGeminiClientInitialization:
     def test_default_initialization_without_api_key_operates_in_fallback_mode(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from backend.config import settings
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_MODEL", raising=False)
+        monkeypatch.setattr(settings, "gemini_api_key", "")
+        monkeypatch.setattr(settings, "gemini_model", "gemini-2.5-flash")
         client = GeminiClient(api_key="")
         assert client.is_configured is False
         assert client.model == "gemini-2.5-flash"
@@ -144,7 +148,9 @@ class TestGeminiClientErrorsAndRetries:
     def test_missing_api_key_raises_configuration_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        from backend.config import settings
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setattr(settings, "gemini_api_key", "")
         client = GeminiClient(api_key=None)
         with pytest.raises(GeminiConfigurationError, match="GEMINI_API_KEY"):
             client.generate_text("Analyze endpoint")
