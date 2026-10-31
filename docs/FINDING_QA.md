@@ -1,6 +1,6 @@
 # Finding Q&A
 
-Each finding card includes an **Ask Gemini about this finding** panel. Questions are sent to the assessment API with a short, bounded conversation history. The API confirms that the finding belongs to the requested assessment, then supplies Gemini with a redacted snapshot of that finding and its stored evidence. The conversation is held by the browser and is not persisted by the backend.
+When Gemini is configured, each confirmed finding is automatically sent through the existing evidence-grounded AI review stage. Gemini explains what the issue means, what an attacker could do, the likely impact, and practical remediation steps. Its review remains advisory; the Python security engine controls confirmation and severity. Finding cards also include an **Ask Gemini about this finding** panel. Questions are sent to the assessment API with a short, bounded conversation history. The API confirms that the finding belongs to the requested assessment, then supplies Gemini with a redacted snapshot of that finding and its stored evidence. The conversation is held by the browser and is not persisted by the backend.
 
 Set `GEMINI_API_KEY` on the backend to enable responses. `GEMINI_MODEL` selects the configured model. Without a valid key, the endpoint returns `503`; temporary provider failures return a generic `502` message and do not expose credentials or provider internals.
 

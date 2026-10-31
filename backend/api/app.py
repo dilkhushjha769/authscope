@@ -832,7 +832,7 @@ class AssessmentTaskManager:
                     finding = repo.get_finding(str(finding_id)) if finding_id else None
                     if finding is not None:
                         review_service = FindingReviewService(
-                            provider=self.finding_review_provider,
+                            provider=self.finding_review_provider or self._default_finding_review_provider(),
                             scope_guard=scope_guard,
                         )
                         await self._broadcast(scan_id, ("activity", AssessmentEvent(
@@ -965,6 +965,14 @@ class AssessmentTaskManager:
             self._subscribers[scan_id].remove(q)
             if not self._subscribers[scan_id]:
                 self._subscribers.pop(scan_id, None)
+
+    @staticmethod
+    def _default_finding_review_provider() -> Optional[ReviewProvider]:
+        """Build Gemini review provider when configured; keep deterministic fallback otherwise."""
+        config = GeminiAgentConfig.from_env()
+        if not config.is_configured:
+            return None
+        return GeminiClient(config=config)
 
 
 def _compute_endpoint_check_counts(

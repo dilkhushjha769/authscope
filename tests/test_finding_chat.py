@@ -101,3 +101,17 @@ def test_chat_api_binds_finding_to_assessment(monkeypatch: pytest.MonkeyPatch, f
             FindingChatRequest(question="Explain the evidence"),
         ))
     assert error.value.status_code == 404
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_assessment_review_uses_gemini_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: bool,
+) -> None:
+    config = type("Config", (), {"is_configured": configured})()
+    sentinel = object()
+    monkeypatch.setattr(api_module.GeminiAgentConfig, "from_env", staticmethod(lambda: config))
+    monkeypatch.setattr(api_module, "GeminiClient", lambda config: sentinel)
+
+    provider = api_module.AssessmentTaskManager._default_finding_review_provider()
+    assert (provider is sentinel) is configured

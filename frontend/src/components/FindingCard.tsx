@@ -422,6 +422,7 @@ export function FindingCard({ finding, onVerifyFix, verificationPending = false,
       <div className="mt-4 space-y-3 text-sm leading-relaxed">
         <p className="text-xs text-zinc-300"><strong className="text-zinc-100">Risk level: {severityLabel}</strong> — {beginner?.risk_description || riskDescriptions[severity] || "Risk level set by the security engine."}</p>
         <section><h5 className="font-semibold text-white">What happened?</h5><p className="text-zinc-300">{beginner?.what_is_the_problem || "A plain-language explanation is unavailable for this finding."}</p></section>
+        <p className="text-[11px] text-zinc-500">{aiReview ? "Gemini explanation grounded in the captured finding evidence." : "Plain-language explanation from the available finding facts."} The security engine remains responsible for the finding status.</p>
         <section><h5 className="font-semibold text-white">What could an attacker do?</h5><p className="text-zinc-300">{beginner?.what_attacker_can_do || "The available information does not establish what an attacker could do."}</p></section>
         <section><h5 className="font-semibold text-white">Why is it dangerous?</h5><p className="text-zinc-300">{beginner?.real_world_impact || beginner?.why_it_matters || "The impact is not established by the available information."}</p></section>
         <section>
