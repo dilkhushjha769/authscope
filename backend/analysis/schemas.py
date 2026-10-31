@@ -1,0 +1,46 @@
+"""Pydantic schemas re-exported for the backend.analysis package."""
+
+from backend.agent.schemas import (
+    AnalysisStatus,
+    ConfidenceLevel,
+    ConfirmationStatus,
+    DataSensitivityLevel,
+    EvidenceType,
+    EvidenceValidation,
+    ExploitabilityLevel,
+    FindingAnalysis,
+    FindingAnalysisInput,
+    FindingAnalysisOutput,
+    PrivilegeGainedLevel,
+    RemediationRecommendation,
+    SecurityEvidence,
+    SeverityAssessment,
+    SeverityLevel,
+    ValidationMethod,
+    ValidationStatus,
+    VulnerabilityCategory,
+    AffectedResource,
+)
+
+__all__ = [
+    "AnalysisStatus",
+    "ConfidenceLevel",
+    "ConfirmationStatus",
+    "DataSensitivityLevel",
+    "EvidenceType",
+    "EvidenceValidation",
+    "ExploitabilityLevel",
+    "FindingAnalysis",
+    "FindingAnalysisInput",
+    "FindingAnalysisOutput",
+    "PrivilegeGainedLevel",
+    "RemediationRecommendation",
+    "SecurityEvidence",
+    "SeverityAssessment",
+    "SeverityLevel",
+    "ValidationMethod",
+    "ValidationStatus",
+    "VulnerabilityCategory",
+    "AffectedResource",
+]
+

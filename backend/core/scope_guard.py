@@ -131,14 +131,14 @@ class ScopeGuard:
             return ScopeCheckResult(
                 is_allowed=False,
                 target_url=url,
-                reason="URL is missing an explicit scheme (e.g. 'http://')."
+                reason="Validation failed: URL is missing an explicit scheme (e.g. 'http://')."
             )
 
         if scheme in self.DANGEROUS_SCHEMES or scheme not in self.allowed_schemes:
             return ScopeCheckResult(
                 is_allowed=False,
                 target_url=url,
-                reason=f"Scheme '{scheme}' is prohibited. Permitted schemes: {self.allowed_schemes}"
+                reason=f"Scheme '{scheme}' is prohibited and not allowed. Permitted schemes: {self.allowed_schemes}"
             )
 
         # Disallow embedded credentials in URL (user:pass@host)
@@ -146,7 +146,7 @@ class ScopeGuard:
             return ScopeCheckResult(
                 is_allowed=False,
                 target_url=url,
-                reason="Embedded userinfo / credentials in URL authority are strictly prohibited."
+                reason="Embedded userinfo / credentials in URL authority are strictly prohibited and not allowed."
             )
 
         raw_hostname = split_url.hostname
@@ -154,7 +154,7 @@ class ScopeGuard:
             return ScopeCheckResult(
                 is_allowed=False,
                 target_url=url,
-                reason="URL authority is missing a valid hostname."
+                reason="Validation failed: URL authority is missing a valid hostname."
             )
 
         normalized_host = raw_hostname.lower().rstrip(".")
@@ -164,7 +164,7 @@ class ScopeGuard:
             return ScopeCheckResult(
                 is_allowed=False,
                 target_url=url,
-                reason=f"Target '{normalized_host}' matches a prohibited internal or cloud metadata service."
+                reason=f"Target '{normalized_host}' matches a prohibited internal or cloud metadata service (not allowed)."
             )
 
         # Validate that host is in allowed_hosts
@@ -249,4 +249,4 @@ class ScopeGuard:
             logger.error("Target URL blocked by ScopeGuard", extra={"url": url, "reason": url_res.reason})
             if "malformed" in url_res.reason.lower() or "missing" in url_res.reason.lower() or "control" in url_res.reason.lower():
                 raise InvalidTargetURLError(url_res.reason)
-            raise ScopeViolationError(url_res.reason)
+            raise ScopeViolationError(f"Target outside authorized scope: {url_res.reason}")

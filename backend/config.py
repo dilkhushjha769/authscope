@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     # AI Configuration (Claude)
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-3-5-sonnet-20241022", alias="ANTHROPIC_MODEL")
+    anthropic_max_tokens: int = Field(default=2048, alias="ANTHROPIC_MAX_TOKENS")
+    anthropic_timeout: float = Field(default=30.0, alias="ANTHROPIC_TIMEOUT")
 
     # Storage Configuration
     database_path: str = Field(default="data/authscope.db", alias="DATABASE_PATH")
