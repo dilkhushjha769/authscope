@@ -319,6 +319,19 @@ class AuthorizationTester:
 
             artifact: Optional[EvidenceArtifact] = None
             final_role_verdict = comparison.verdict
+            if (
+                disc_ep.category == EndpointCategory.ADMIN_FUNCTION
+                and owner_role == Role.ADMIN
+                and trole != Role.ADMIN
+                and comparison.verdict == AccessVerdict.SUSPICIOUS_ACCESS
+                and comparison.similarity_ratio >= 0.80
+                and comparison.test_inspection.is_json
+                and not comparison.test_inspection.is_empty_payload
+                and not comparison.test_inspection.is_spa_html_fallback
+            ):
+                final_role_verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
+                comparison.verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
+                comparison.is_confirmed = True
 
             if comparison.verdict in (
                 AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS,
@@ -426,6 +439,236 @@ class AuthorizationTester:
             resource_id=resource_id,
             method=method,
         )
+
+    def test_bola_idor(
+        self,
+        endpoint: DiscoveredEndpoint | str,
+        resource_id: Optional[str] = None,
+        owner_role: Role = Role.USER_A,
+        attacker_role: Role = Role.USER_B,
+        human_approved: bool = False,
+    ) -> DifferentialResult:
+        """Executes a strict 10-step ownership-differential BOLA/IDOR test.
+
+        Enforces:
+        1. Obtain a genuine User A session and verify authentication.
+        2. Obtain a separate genuine User B session and verify authentication.
+           If valid separate sessions are unavailable, returns NOT_TESTED.
+        3. Identify an actual resource owned by User A.
+           If ownership cannot be established without guessing, returns INCONCLUSIVE.
+        4. Verify User A can access the resource (baseline).
+           If User A baseline fails, returns INCONCLUSIVE.
+        5. Request the same resource as User B.
+        6. Capture actual response.
+        7. Compare access behavior and protected resource data (never rely on 200 alone).
+        8. Establish whether User B accessed User A's private resource.
+        9. Validate evidence via EvidenceValidator.
+        10. Return structured DifferentialResult.
+        """
+        disc_ep = self.discovery.register_endpoint(endpoint) if isinstance(endpoint, str) else endpoint
+        endpoint_str = disc_ep.path
+
+        # Step 1 & 2: Check genuine separate sessions
+        user_a_ready = self.session_manager.is_authenticated(owner_role)
+        user_b_ready = self.session_manager.is_authenticated(attacker_role)
+        if not (user_a_ready and user_b_ready):
+            return DifferentialResult(
+                endpoint=endpoint_str,
+                owner_role=owner_role,
+                overall_verdict=AccessVerdict.NOT_TESTED,
+                is_discrepancy_detected=False,
+                is_confirmed=False,
+                summary=f"Valid separate sessions for '{owner_role.value}' and '{attacker_role.value}' are unavailable. Test skipped without guessing credentials."
+            )
+
+        # Step 3: Identify an actual resource owned by User A (no guessing arbitrary IDs)
+        effective_res_id = resource_id or disc_ep.extracted_resource_id
+        if not effective_res_id and TEMPLATE_PARAM_REGEX.search(disc_ep.path):
+            owner_session = self.session_manager.get_session(owner_role)
+            if disc_ep.resource_type:
+                owned_set = owner_session.owned_resources.get(disc_ep.resource_type.lower(), set())
+                if owned_set:
+                    effective_res_id = sorted(owned_set)[0]
+
+        if not effective_res_id and TEMPLATE_PARAM_REGEX.search(disc_ep.path):
+            return DifferentialResult(
+                endpoint=endpoint_str,
+                owner_role=owner_role,
+                overall_verdict=AccessVerdict.INCONCLUSIVE,
+                is_discrepancy_detected=False,
+                is_confirmed=False,
+                summary=f"Resource ownership for '{owner_role.value}' could not be established on '{endpoint_str}'. IDOR test inconclusive without guessing arbitrary IDs."
+            )
+
+        # Step 4: Verify User A can access the resource (baseline verification)
+        resolved_url = self.discovery.build_concrete_url(disc_ep, resource_id=effective_res_id)
+        owner_resp = self.executor.send_request(
+            role=owner_role,
+            method="GET",
+            url=resolved_url,
+        )
+        owner_insp = self.analyzer.inspect_response(owner_resp)
+        if not (owner_insp.is_http_success and not owner_insp.is_empty_payload and not owner_insp.is_spa_html_fallback):
+            return DifferentialResult(
+                endpoint=endpoint_str,
+                resolved_url=resolved_url,
+                owner_role=owner_role,
+                resource_id=effective_res_id,
+                overall_verdict=AccessVerdict.INCONCLUSIVE,
+                is_discrepancy_detected=False,
+                is_confirmed=False,
+                summary=f"Baseline request for owner '{owner_role.value}' failed with HTTP {owner_resp.status_code}. Cannot establish valid ownership baseline."
+            )
+
+        # Step 5 - 10: Perform full test with attacker
+        return self.test_resource_access(
+            endpoint=disc_ep,
+            owner_role=owner_role,
+            test_roles=[attacker_role],
+            resource_id=effective_res_id,
+            method="GET",
+            human_approved=human_approved,
+        )
+
+    def test_bfla(
+        self,
+        endpoint: DiscoveredEndpoint | str,
+        admin_role: Role = Role.ADMIN,
+        test_roles: Optional[List[Role]] = None,
+        human_approved: bool = False,
+    ) -> DifferentialResult:
+        """Executes a Broken Function Level Authorization (BFLA) test across roles.
+
+        Tests access to administrative/privileged endpoints from lower-privilege roles
+        (ANONYMOUS, USER_A, USER_B) compared against ADMIN baseline when configured.
+        Requires evidence that lower-privilege identity accessed protected information.
+        """
+        disc_ep = self.discovery.register_endpoint(endpoint) if isinstance(endpoint, str) else endpoint
+        roles_to_probe = test_roles or [Role.ANONYMOUS, Role.USER_A, Role.USER_B]
+
+        if self.session_manager.is_authenticated(admin_role):
+            return self.test_resource_access(
+                endpoint=disc_ep,
+                owner_role=admin_role,
+                test_roles=roles_to_probe,
+                method="GET",
+                human_approved=human_approved,
+            )
+        else:
+            resolved_url = self.discovery.build_concrete_url(disc_ep)
+            role_responses: Dict[Role, HttpResponseModel] = {}
+            probe_outcomes: Dict[Role, RoleProbeOutcome] = {}
+            evidence_list: List[EvidenceArtifact] = []
+            is_discrepancy = False
+            overall_verdict = AccessVerdict.CORRECTLY_DENIED
+
+            for role in roles_to_probe:
+                resp = self.executor.send_request(role=role, method="GET", url=resolved_url)
+                role_responses[role] = resp
+                insp = self.analyzer.inspect_response(resp)
+
+                if insp.is_http_success and not insp.is_empty_payload and not insp.is_spa_html_fallback:
+                    verdict = AccessVerdict.SUSPICIOUS_ACCESS
+                    is_discrepancy = True
+                    overall_verdict = AccessVerdict.SUSPICIOUS_ACCESS
+                    artifact = self.evidence_validator.create_and_sign_evidence(
+                        finding_id=f"fnd_{uuid.uuid4().hex[:8]}",
+                        test_role=role,
+                        authorized_role=admin_role,
+                        method="GET",
+                        url=resolved_url,
+                        headers={},
+                        response=resp,
+                        endpoint=disc_ep.path,
+                        expected_behavior=f"Privileged route '{disc_ep.path}' should restrict access to '{role.value}' (HTTP 401/403).",
+                        actual_behavior=f"Role '{role.value}' received HTTP {resp.status_code} ({len(resp.body)} bytes).",
+                        validation_status=EvidenceValidationStatus.SUSPICIOUS,
+                    )
+                    evidence_list.append(artifact)
+                else:
+                    verdict = AccessVerdict.CORRECTLY_DENIED
+
+                probe_outcomes[role] = RoleProbeOutcome(
+                    role=role,
+                    response=resp,
+                    verdict=verdict,
+                )
+
+            return DifferentialResult(
+                endpoint=disc_ep.path,
+                resolved_url=resolved_url,
+                method="GET",
+                owner_role=admin_role,
+                role_responses=role_responses,
+                probe_outcomes=probe_outcomes,
+                overall_verdict=overall_verdict,
+                is_discrepancy_detected=is_discrepancy,
+                is_confirmed=False,
+                vulnerability_candidate="BFLA" if is_discrepancy else None,
+                evidence_artifacts=evidence_list,
+                summary=f"BFLA probe for '{disc_ep.path}' completed across {len(roles_to_probe)} roles without admin baseline."
+            )
+
+    @staticmethod
+    def build_canonical_finding(
+        result: DifferentialResult,
+        assessment_id: str = "default_assessment",
+    ) -> Optional[Dict[str, Any]]:
+        """Constructs a canonical finding dictionary satisfying Phase 5.3 contract."""
+        if not result.evidence_artifacts and not result.is_discrepancy_detected:
+            return None
+
+        from backend.utils.helpers import compute_sha256
+
+        artifact = result.evidence_artifacts[0] if result.evidence_artifacts else None
+        finding_id = artifact.finding_id if artifact else f"fnd_{uuid.uuid4().hex[:8]}"
+        testing_role = artifact.test_role.value if artifact else Role.USER_B.value
+
+        owner_resp = result.role_responses.get(result.owner_role)
+        baseline_resp_data = {
+            "status_code": owner_resp.status_code if owner_resp else 0,
+            "content_length": owner_resp.content_length if owner_resp else 0,
+            "body_preview": owner_resp.body[:500] if owner_resp else "",
+        }
+
+        test_role_enum = Role(testing_role) if testing_role in [r.value for r in Role] else Role.USER_B
+        test_resp = result.role_responses.get(test_role_enum) or (list(result.role_responses.values())[-1] if result.role_responses else None)
+        comp_resp_data = {
+            "status_code": test_resp.status_code if test_resp else 0,
+            "content_length": test_resp.content_length if test_resp else 0,
+            "body_preview": test_resp.body[:500] if test_resp else "",
+        }
+
+        sanitized_ev = artifact.sanitized_response_evidence if artifact else (test_resp.body[:1500] if test_resp else "")
+
+        response_hashes = {
+            "baseline_sha256": compute_sha256(owner_resp.body) if owner_resp and owner_resp.body else None,
+            "comparison_sha256": compute_sha256(test_resp.body) if test_resp and test_resp.body else None,
+            "evidence_sha256": artifact.evidence_sha256 if artifact else None,
+        }
+
+        val_status = artifact.validation_status.value if artifact and hasattr(artifact.validation_status, "value") else str(result.overall_verdict.value)
+        confirmation_reason = (
+            f"Vulnerability '{result.vulnerability_candidate or 'BOLA_IDOR'}' validated: "
+            f"Testing role '{testing_role}' successfully retrieved protected resource data owned by '{result.owner_role.value}'."
+            if result.is_confirmed
+            else f"Status {val_status}: {result.summary}"
+        )
+
+        return {
+            "finding_id": finding_id,
+            "assessment_id": assessment_id,
+            "target_url": result.resolved_url,
+            "endpoint": result.endpoint,
+            "method": result.method,
+            "testing_role": testing_role,
+            "baseline_response": baseline_resp_data,
+            "comparison_response": comp_resp_data,
+            "sanitized_evidence": sanitized_ev,
+            "response_hashes": response_hashes,
+            "validation_status": val_status,
+            "confirmation_reason": confirmation_reason,
+        }
 
     def verify_potential_finding(
         self,

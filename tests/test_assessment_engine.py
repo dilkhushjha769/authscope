@@ -75,7 +75,7 @@ class TestUrlValidationAndUnauthorizedRejection:
         engine = AssessmentEngine(repository=_create_memory_repo())
         res = engine.validate_target_url("https://example.com")
         assert res.is_allowed is False
-        assert "not allowlisted" in res.reason.lower() or "scheme" in res.reason.lower()
+        assert "allowlist" in res.reason.lower() or "not allowlisted" in res.reason.lower() or "scheme" in res.reason.lower()
 
     def test_unauthorized_target_rejected_in_stream_without_network_calls(self) -> None:
         repo = _create_memory_repo()

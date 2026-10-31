@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.analysis.evidence_validator import EvidenceValidator
+from backend.analysis.code_mapper import CodeMapper, MappingStatus
 from backend.storage.models import EvidenceArtifact, EvidenceValidationStatus, FindingRecord
 from backend.utils.helpers import AuthScopeException
 from backend.utils.logger import get_logger
@@ -61,16 +62,17 @@ class ExplanationConfidenceLevel(str, Enum):
 
 
 class CodeExample(BaseModel):
-    """Illustrative code example pair (vulnerable vs. corrected).
+    """Code example pair (vulnerable vs. corrected).
 
-    IMPORTANT: ``is_illustrative`` is always ``True``.  These examples are
-    educational illustrations, never excerpts from the actual target source.
+    When backed by verified source code via CodeMapper, ``is_illustrative`` is False
+    and ``source_location`` specifies the exact file and lines.
+    Otherwise, ``is_illustrative`` is True and represents an educational illustration.
     """
     model_config = ConfigDict(extra="forbid")
 
     is_illustrative: bool = Field(
         True,
-        description="Always True — these are educational examples, NOT actual target source code.",
+        description="Whether this is an educational illustrative example (True) or actual verified source code (False).",
     )
     language: str = Field("python", description="Programming language of the example.")
     vulnerable_code: str = Field(..., description="Example of code that contains the vulnerability.")
@@ -80,6 +82,12 @@ class CodeExample(BaseModel):
     corrected_code: str = Field(..., description="Corrected version of the same code snippet.")
     explanation_of_fix: str = Field(
         ..., description="Plain-English explanation of why the corrected version is secure."
+    )
+    source_location: Optional[str] = Field(
+        None, description="Verified file path and line numbers if mapped from actual source."
+    )
+    snippet_provenance: Optional[str] = Field(
+        None, description="Provenance of the snippet: 'ACTUAL_VERIFIED_SOURCE' or 'ILLUSTRATIVE_EXAMPLE'."
     )
 
 
@@ -152,6 +160,12 @@ class EvidenceSummary(BaseModel):
     redacted_fields: List[str] = Field(
         default_factory=list, description="Fields that were sanitized."
     )
+    source_location: Optional[str] = Field(
+        None, description="Preserved source location if mapped or provided."
+    )
+    snippet_provenance: Optional[str] = Field(
+        None, description="Provenance of code snippet ('ACTUAL_VERIFIED_SOURCE', 'ILLUSTRATIVE_EXAMPLE', or 'UNAVAILABLE')."
+    )
     timestamp: str = Field("", description="UTC timestamp of evidence collection.")
 
 
@@ -184,11 +198,17 @@ class ExplanationReport(BaseModel):
     where_was_it_found: str = Field(
         ..., description="Endpoint and HTTP method where the vulnerability was observed."
     )
+    source_location: Optional[str] = Field(
+        None, description="Verified source location if available from CodeMapper."
+    )
+    snippet_provenance: Optional[str] = Field(
+        None, description="Provenance of code representation."
+    )
 
     # ── Code example (field 10) ───────────────────────────────────────────────
     code_example: Optional[CodeExample] = Field(
         None,
-        description="Illustrative vulnerable/corrected code pair (always is_illustrative=True).",
+        description="Vulnerable/corrected code pair with illustrative or verified source flags.",
     )
 
     # ── Evidence (field 11) ───────────────────────────────────────────────────
@@ -740,9 +760,18 @@ class ExplanationEngine:
     Invariants:
     - ``validation_status`` is CONFIRMED only when evidence has a 2xx response
       AND non-empty sanitized_response_evidence.
-    - ``code_example.is_illustrative`` is always True.
+    - When verified code is available via CodeMapper, ``code_example.is_illustrative`` is False.
+      Otherwise, ``code_example.is_illustrative`` is always True.
     - JWTs and Bearer tokens are stripped before inclusion in any report field.
     """
+
+    def __init__(self, code_mapper: Optional[CodeMapper] = None) -> None:
+        """Initializes the ExplanationEngine.
+
+        Args:
+            code_mapper: Optional CodeMapper instance to correlate findings with actual verified source code.
+        """
+        self.code_mapper = code_mapper
 
     def generate_explanation(self, finding: FindingRecord) -> ExplanationReport:
         """Generate a full ExplanationReport for the supplied FindingRecord.
@@ -774,8 +803,27 @@ class ExplanationEngine:
         confidence = self._determine_confidence(finding, validation_status)
         simple_exp = self._build_simple_explanation(finding, vuln_type)
         technical_exp = self._build_technical_explanation(finding, vuln_type)
-        code_ex = self._build_code_example(vuln_type)
-        evidence_summary = self._integrate_evidence(finding)
+        code_ex = self._build_code_example(vuln_type, finding)
+
+        source_loc = code_ex.source_location if code_ex else None
+        provenance = (
+            code_ex.snippet_provenance
+            if code_ex and code_ex.snippet_provenance
+            else ("ACTUAL_VERIFIED_SOURCE" if source_loc else "ILLUSTRATIVE_EXAMPLE")
+        )
+
+        evidence_summary = self._integrate_evidence(
+            finding, source_location=source_loc, snippet_provenance=provenance
+        )
+
+        disclaimer = (
+            "Source code location verified against target repository."
+            if (code_ex and not code_ex.is_illustrative)
+            else (
+                "This report was generated from supplied finding data only. "
+                "Code examples are illustrative and do not represent actual target source code."
+            )
+        )
 
         report = ExplanationReport(
             vulnerability_name=finding.title or self._default_title(finding, vuln_type),
@@ -787,10 +835,13 @@ class ExplanationEngine:
             where_was_it_found=(
                 f"{finding.http_method.upper()} {finding.endpoint}"
             ),
+            source_location=source_loc,
+            snippet_provenance=provenance,
             code_example=code_ex,
             evidence_summary=evidence_summary,
             finding_id=finding.id,
             generated_at=datetime.now(timezone.utc).isoformat(),
+            disclaimer=disclaimer,
         )
 
         logger.info(
@@ -931,15 +982,55 @@ class ExplanationEngine:
             owasp_reference=str(tmpl.get("owasp", "")),
         )
 
-    def _build_code_example(self, vuln_type: str) -> Optional[CodeExample]:
-        """Return an illustrative CodeExample for the vulnerability type, or None."""
+    def _build_code_example(
+        self, vuln_type: str, finding: Optional[FindingRecord] = None
+    ) -> Optional[CodeExample]:
+        """Return a CodeExample for the vulnerability, using verified code if mapped."""
+        if self.code_mapper and finding:
+            try:
+                mapping_res = self.code_mapper.map_finding(finding)
+                if mapping_res.status == MappingStatus.EXACT and mapping_res.location:
+                    loc = mapping_res.location
+                    default_example = _CODE_EXAMPLES.get(vuln_type)
+                    lang = "javascript" if loc.file_path.endswith((".js", ".ts")) else "python"
+                    prob_desc = (
+                        f"Actual code at {loc.file_path} (lines {loc.start_line}-{loc.end_line})"
+                        f"{f' in handler `{loc.function_name}`' if loc.function_name else ''}: "
+                        f"{default_example.explanation_of_problem if default_example else 'Lacks proper authorization checks.'}"
+                    )
+                    return CodeExample(
+                        is_illustrative=False,
+                        language=lang,
+                        vulnerable_code=loc.code_snippet,
+                        explanation_of_problem=prob_desc,
+                        corrected_code=(
+                            default_example.corrected_code if default_example else "# Apply authorization check"
+                        ),
+                        explanation_of_fix=(
+                            default_example.explanation_of_fix if default_example else "Verify authorization."
+                        ),
+                        source_location=f"{loc.file_path}:{loc.start_line}-{loc.end_line}",
+                        snippet_provenance="ACTUAL_VERIFIED_SOURCE",
+                    )
+            except Exception as e:
+                logger.warning("Code mapping failed during explanation generation: %s", e)
+
         example = _CODE_EXAMPLES.get(vuln_type)
         if example is None:
             logger.debug("No code example template for vuln_type=%s", vuln_type)
-        return example
+            return None
+
+        return example.model_copy(update={
+            "is_illustrative": True,
+            "source_location": None,
+            "snippet_provenance": "ILLUSTRATIVE_EXAMPLE",
+        })
 
     def _integrate_evidence(
-        self, finding: FindingRecord
+        self,
+        finding: FindingRecord,
+        source_location: Optional[str] = None,
+        snippet_provenance: Optional[str] = None,
     ) -> Optional[EvidenceSummary]:
         """Extract and sanitize evidence fields for inclusion in the report.
 
@@ -986,6 +1077,8 @@ class ExplanationEngine:
             evidence_validation_status=evidence.evidence_validation_status,
             validation_status=val_status_str,
             redacted_fields=list(evidence.redacted_fields or []),
+            source_location=source_location,
+            snippet_provenance=snippet_provenance,
             timestamp=evidence.timestamp.isoformat() if evidence.timestamp else "",
         )
 

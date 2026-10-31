@@ -1,8 +1,8 @@
 """AuthScope Gemini AI Brain & Bounded Security Agent Package (`backend.ai_agent`).
 
 Exports the official Google GenAI client wrapper, configuration, planner,
-approved tool registry, memory system protocol, bounded orchestrator, and
-high-level agent facade.
+approved tool registry, tool executor protocol, memory provider protocol,
+bounded orchestrator, and high-level `GeminiAuthScopeAgent` facade.
 """
 
 from backend.ai_agent.agent import GeminiAgent, GeminiAuthScopeAgent
@@ -20,16 +20,23 @@ from backend.ai_agent.gemini_client import (
 from backend.ai_agent.orchestrator import (
     APPROVED_TOOL_SCHEMAS,
     AgentOrchestrator,
+    AgentStreamEvent,
     ApprovedToolRegistry,
     AssessmentRunResult,
     DefaultMemoryBridge,
+    FindingValidationStatus,
     InvalidToolProposalError,
+    MemoryProviderAdapter,
+    MemoryProviderProtocol,
     MemorySystemInterface,
+    MockMemoryProvider,
     OrchestratorException,
     ToolCallProposal,
     ToolExecutionResult,
+    ToolExecutorProtocol,
     ToolValidationResult,
     ValidatedFindingReport,
+    is_cancellation_requested,
 )
 from backend.ai_agent.planner import (
     AssessmentPlan,
@@ -65,17 +72,24 @@ __all__ = [
     "AssessmentPlanner",
     "DEFAULT_APPROVED_TOOLS",
     "APPROVED_TOOL_SCHEMAS",
+    "FindingValidationStatus",
+    "AgentStreamEvent",
+    "ToolExecutorProtocol",
     "ToolCallProposal",
     "ToolValidationResult",
     "ToolExecutionResult",
     "ApprovedToolRegistry",
     "InvalidToolProposalError",
+    "MemoryProviderProtocol",
+    "MemoryProviderAdapter",
+    "MockMemoryProvider",
     "MemorySystemInterface",
     "DefaultMemoryBridge",
     "ValidatedFindingReport",
     "AssessmentRunResult",
     "AgentOrchestrator",
     "OrchestratorException",
+    "is_cancellation_requested",
     "GEMINI_SYSTEM_INSTRUCTION",
     "build_planning_prompt",
     "build_tool_selection_prompt",
@@ -83,4 +97,3 @@ __all__ = [
     "build_assessment_summary_prompt",
     "wrap_untrusted_evidence",
 ]
-

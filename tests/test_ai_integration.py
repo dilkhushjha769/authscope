@@ -240,8 +240,10 @@ class TestGeminiAgent:
         assert "agent_thinking" in event_types
         assert "agent_plan" in event_types
 
-    def test_generate_explanation_deterministic_fallback(self, tool_registry_fixture, memory_fixture):
+    def test_generate_explanation_deterministic_fallback(self, tool_registry_fixture, memory_fixture, monkeypatch):
         """Synthesizes grounded root-cause explanation when GEMINI_API_KEY is not configured."""
+        from backend.config import settings
+        monkeypatch.setattr(settings, "gemini_api_key", "")
         agent = GeminiAgent(tool_registry=tool_registry_fixture, memory=memory_fixture, api_key="")
         events = []
         expl = agent.generate_explanation(

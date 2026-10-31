@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Any, Union
 import json
 from datetime import datetime, timezone
 import sqlite3
+import uuid
 
 from backend.storage.database import DatabaseManager, initialize_database
 from backend.storage.models import (
@@ -427,21 +428,26 @@ class FindingRepository:
             # Insert or replace evidence artifact if present
             if finding.evidence:
                 evi = finding.evidence
+                now_iso = _dt_to_iso(evi.timestamp or datetime.now(timezone.utc))
+                role_val = str(evi.testing_role.value if hasattr(evi.testing_role, "value") else (getattr(evi, "test_role", None) or evi.testing_role or "user_b"))
+                auth_val = str(evi.authorized_role.value if hasattr(evi.authorized_role, "value") else (evi.authorized_role or "")) if evi.authorized_role else None
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO evidence_artifacts (
-                        id, finding_id, timestamp, testing_role, authorized_role,
+                        id, finding_id, timestamp, captured_at, testing_role, test_role, authorized_role,
                         request_metadata_json, request_method, request_url, request_headers_json,
                         response_status, relevant_response_headers_json, sanitized_response_body,
                         response_body, evidence_validation_status, evidence_sha256, redacted_fields_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        evi.id,
+                        evi.id or f"evi_{uuid.uuid4().hex[:8]}",
                         finding.id,
-                        _dt_to_iso(evi.timestamp),
-                        str(evi.testing_role.value if hasattr(evi.testing_role, "value") else evi.testing_role),
-                        str(evi.authorized_role.value if hasattr(evi.authorized_role, "value") else evi.authorized_role),
+                        now_iso,
+                        now_iso,
+                        role_val,
+                        role_val,
+                        auth_val,
                         json.dumps(evi.request_metadata),
                         evi.request_method,
                         evi.request_url,
@@ -534,6 +540,77 @@ class FindingRepository:
 
         return results
 
+
+    def save_evidence(self, evidence: EvidenceArtifact, finding_id: Optional[str] = None) -> str:
+        """Saves or updates an EvidenceArtifact in SQLite with explicit timestamp."""
+        f_id = finding_id or evidence.finding_id
+        if not f_id:
+            raise InvalidDataError("EvidenceArtifact must be associated with a valid finding_id.")
+
+        now_iso = _dt_to_iso(evidence.timestamp or datetime.now(timezone.utc))
+        role_val = str(evidence.testing_role.value if hasattr(evidence.testing_role, "value") else (getattr(evidence, "test_role", None) or evidence.testing_role or "user_b"))
+        auth_val = str(evidence.authorized_role.value if hasattr(evidence.authorized_role, "value") else (evidence.authorized_role or "")) if evidence.authorized_role else None
+        evi_id = evidence.id or evidence.evidence_id or f"evi_{uuid.uuid4().hex[:8]}"
+
+        with self.db.session_scope() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO evidence_artifacts (
+                    id, finding_id, timestamp, captured_at, testing_role, test_role, authorized_role,
+                    request_metadata_json, request_method, request_url, request_headers_json,
+                    response_status, relevant_response_headers_json, sanitized_response_body,
+                    response_body, evidence_validation_status, evidence_sha256, redacted_fields_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evi_id,
+                    f_id,
+                    now_iso,
+                    now_iso,
+                    role_val,
+                    role_val,
+                    auth_val,
+                    json.dumps(evidence.request_metadata),
+                    evidence.request_method,
+                    evidence.request_url,
+                    json.dumps(evidence.request_headers),
+                    evidence.response_status,
+                    json.dumps(evidence.relevant_response_headers),
+                    evidence.sanitized_response_body,
+                    evidence.response_body,
+                    evidence.evidence_validation_status,
+                    evidence.evidence_sha256,
+                    json.dumps(evidence.redacted_fields),
+                ),
+            )
+        return evi_id
+
+    def get_evidence(self, identifier: str) -> Optional[EvidenceArtifact]:
+        """Retrieves an EvidenceArtifact by its unique evidence ID or finding ID."""
+        with self.db.get_connection() as conn:
+            row = conn.execute("SELECT * FROM evidence_artifacts WHERE id = ?", (identifier,)).fetchone()
+            if not row:
+                row = conn.execute("SELECT * FROM evidence_artifacts WHERE finding_id = ?", (identifier,)).fetchone()
+            if not row:
+                return None
+            return self._row_to_evidence(row)
+
+    def get_evidence_by_finding_id(self, finding_id: str) -> Optional[EvidenceArtifact]:
+        """Retrieves an EvidenceArtifact associated with a given finding ID."""
+        with self.db.get_connection() as conn:
+            row = conn.execute("SELECT * FROM evidence_artifacts WHERE finding_id = ?", (finding_id,)).fetchone()
+            if not row:
+                return None
+            return self._row_to_evidence(row)
+
+    def get_discovered_endpoints(self, scan_id: Optional[str] = None) -> List[DiscoveredEndpointRecord]:
+        """Retrieves discovered endpoints, optionally filtered by scan_id."""
+        if scan_id:
+            return self.list_discovered_endpoints(scan_id)
+        with self.db.get_connection() as conn:
+            rows = conn.execute("SELECT * FROM discovered_endpoints ORDER BY path ASC").fetchall()
+            return [self._row_to_endpoint(r) for r in rows]
+
     def list_findings(self, scan_id: Optional[str] = None) -> List[FindingRecord]:
         """Lists findings, optionally filtered by scan_id."""
         return self.get_all_findings(scan_id=scan_id)
@@ -615,21 +692,26 @@ class FindingRepository:
             if not isinstance(new_evidence, EvidenceArtifact):
                 new_evidence = EvidenceArtifact(**new_evidence)
             with self.db.session_scope() as conn:
+                now_iso = _dt_to_iso(new_evidence.timestamp or datetime.now(timezone.utc))
+                role_val = str(new_evidence.testing_role.value if hasattr(new_evidence.testing_role, "value") else (getattr(new_evidence, "test_role", None) or new_evidence.testing_role or "user_b"))
+                auth_val = str(new_evidence.authorized_role.value if hasattr(new_evidence.authorized_role, "value") else (new_evidence.authorized_role or "")) if new_evidence.authorized_role else None
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO evidence_artifacts (
-                        id, finding_id, timestamp, testing_role, authorized_role,
+                        id, finding_id, timestamp, captured_at, testing_role, test_role, authorized_role,
                         request_metadata_json, request_method, request_url, request_headers_json,
                         response_status, relevant_response_headers_json, sanitized_response_body,
                         response_body, evidence_validation_status, evidence_sha256, redacted_fields_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        new_evidence.id,
+                        new_evidence.id or f"evi_{uuid.uuid4().hex[:8]}",
                         finding_id,
-                        _dt_to_iso(new_evidence.timestamp),
-                        str(new_evidence.testing_role.value if hasattr(new_evidence.testing_role, "value") else new_evidence.testing_role),
-                        str(new_evidence.authorized_role.value if hasattr(new_evidence.authorized_role, "value") else new_evidence.authorized_role),
+                        now_iso,
+                        now_iso,
+                        role_val,
+                        role_val,
+                        auth_val,
                         json.dumps(new_evidence.request_metadata),
                         new_evidence.request_method,
                         new_evidence.request_url,

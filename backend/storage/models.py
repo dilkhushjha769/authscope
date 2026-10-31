@@ -93,6 +93,59 @@ class EvidenceValidationStatus(str, Enum):
     UNVALIDATED = "UNVALIDATED"
 
 
+class TargetApprovalStatus(str, Enum):
+    """Approval lifecycle statuses for dynamic target profiles."""
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    REVOKED = "REVOKED"
+    EXPIRED = "EXPIRED"
+
+
+class AuthorizationBasis(str, Enum):
+    """Legal and operational authorization grounds for target assessment."""
+    ADMIN_APPROVED = "admin_approved"
+    WRITTEN_PERMISSION = "written_permission"
+    BUG_BOUNTY_SCOPE = "bug_bounty_scope"
+    DOMAIN_OWNERSHIP_CHALLENGE = "domain_ownership_challenge"
+    LOCAL_DEVELOPMENT = "local_development"
+
+
+class TargetProfileRecord(BaseModel):
+    """Persisted dynamic authorized target profile."""
+    id: str = Field(..., description="Unique target profile identifier")
+    hostname: str = Field(..., description="Exact target hostname (e.g. staging.example.com)")
+    base_url: str = Field(..., description="Canonical base URL (e.g. https://staging.example.com)")
+    allowed_schemes: List[str] = Field(default_factory=lambda: ["https"])
+    allowed_ports: List[int] = Field(default_factory=lambda: [443])
+    allowed_paths: List[str] = Field(default_factory=list, description="Optional path prefix restrictions")
+    allowed_methods: List[str] = Field(default_factory=lambda: ["GET", "HEAD"])
+    authorization_basis: str = Field(default="admin_approved")
+    permission_reference: str = Field(default="", description="Ticket ID, contract, or bug bounty link")
+    approval_status: str = Field(default="PENDING")
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    expires_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
+    revocation_reason: str = ""
+    verification_token: str = ""
+    verified_at: Optional[datetime] = None
+    is_local_test: bool = False
+    notes: str = ""
+
+    def is_active(self, now: Optional[datetime] = None) -> bool:
+        """Determines if the target profile is actively approved and unexpired."""
+        current_time = now or datetime.now(timezone.utc)
+        if self.approval_status != TargetApprovalStatus.APPROVED.value:
+            return False
+        if self.expires_at is not None and self.expires_at <= current_time:
+            return False
+        if self.revoked_at is not None:
+            return False
+        return True
+
+
 class AssessmentEvent(BaseModel):
     """Structured real-time event emitted during an assessment."""
     id: Optional[int] = None

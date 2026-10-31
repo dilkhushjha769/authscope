@@ -1,114 +1,530 @@
-"""FastAPI Application for AuthScope — Unified AI Agent & Security Assessment API Backend.
+"""FastAPI Application for AuthScope — AI Agent & Assessment API Backend.
 
-Connects the complete assessment pipeline via Dependency Injection:
-URL input
-→ ScopeGuard validation
-→ Canonical GeminiAuthScopeAgent
-→ ToolRegistryAdapter
-→ Real website security checks (AssessmentEngine)
-→ Cryptographic EvidenceValidator
-→ MemoryManager & RAG
-→ CodeMapper & ExplanationEngine
-→ Real-time SSE streaming
-→ Next.js frontend display.
+Connects:
+1. Member 1: Gemini AI Brain (`GeminiAuthScopeAgent`) & legacy `GeminiAgent` compatibility.
+2. Member 2: Approved Tool Registry (`ToolRegistry`).
+3. Member 3: Assessment Memory & RAG Knowledge Base (`AssessmentMemory`).
+4. Security Assessment Engine (7-stage deterministic execution & `EvidenceValidator`).
+
+Provides HTTP REST and Server-Sent Events (SSE) endpoints streaming structured
+agent operational telemetry, thoughts, plans, tool actions, and validated findings.
 """
 
-from __future__ import annotations
-
-import asyncio
 from datetime import datetime, timezone
 import json
-from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple, Union
 import uuid
+import asyncio
+from pathlib import Path
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from backend.api.adapters import (
-    AssessmentPipelineRequest,
-    GeminiAuthScopeAgent,
-    MemoryManager,
-    ToolRegistryAdapter,
-)
+from backend.agent.gemini_agent import GeminiAgent
+from backend.agent.memory import AssessmentMemory, KNOWLEDGE_BASE
+from backend.agent.tools import ToolRegistry
+from backend.ai_agent import GeminiAgentConfig, GeminiAuthScopeAgent
+from backend.analysis.code_mapper import CodeMapper, MappingStatus
+from backend.analysis.remediation import RemediationEngine
 from backend.config import settings
 from backend.core.assessment_engine import (
     AssessmentEngine,
     AssessmentQueryAdapter,
     CancellationToken,
-    sanitize_event_metadata,
-    sanitize_event_text,
 )
-from backend.core.scope_guard import ScopeGuard
+from backend.core.scope_guard import ScopeCheckResult, ScopeGuard
 from backend.retesting.retest_engine import RetestEngine
+from backend.api.adapters import AssessmentPipelineRequest, ToolRegistryAdapter, MemoryManager
+from backend.core.target_registry import TargetRegistry, TargetSubmissionPayload
+from backend.scanner.request_executor import RequestExecutor
+from backend.scanner.response_analyzer import AccessVerdict
+from backend.storage.database import DatabaseManager
 from backend.storage.finding_repository import FindingRepository
 from backend.storage.models import (
     AssessmentEvent,
     AssessmentStage,
+    AuthorizationBasis,
+    DiscoveredEndpointRecord,
     EventType,
+    EvidenceValidationStatus,
     FindingRecord,
     ScanSessionRecord,
+    TargetApprovalStatus,
+    TargetProfileRecord,
 )
-from backend.api.lifecycle import (
-    AssessmentStatus,
-    InvalidStateTransitionError,
-    validate_state_transition,
-    is_terminal_state,
-    is_active_state,
-)
-from backend.api.security import (
-    RequestSizeLimitMiddleware,
-    RateLimiter,
-    assessment_creation_limiter,
-    validate_target_url,
-    MAX_PAYLOAD_BYTES,
-)
+from backend.storage.target_repository import TargetRepository
+from backend.utils.helpers import redact_sensitive_text, sanitize_dict_or_list
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-
-class CleanupStreamingResponse(StreamingResponse):
-    """Closes an async body iterator when a client disconnects mid-stream."""
-
-    async def stream_response(self, send: Any) -> None:
-        try:
-            await super().stream_response(send)
-        finally:
-            close_iterator = getattr(self.body_iterator, "aclose", None)
-            if close_iterator is not None:
-                await close_iterator()
-
-
-# Active cancellation tokens indexed by assessment_id
+# Active background runners and cancellation tokens indexed by assessment_id
 active_tokens: Dict[str, CancellationToken] = {}
 
-ALL_REQUIRED_SSE_EVENTS: Set[str] = {
-    "assessment_started",
-    "agent_thinking",
-    "agent_plan",
-    "tool_started",
-    "tool_completed",
-    "tool_failed",
-    "endpoint_discovered",
-    "finding_hypothesis",
-    "finding_discovered",
-    "evidence_validated",
-    "source_location_found",
-    "explanation_generated",
-    "assessment_completed",
-    "assessment_failed",
-    "assessment_cancelled",
+# Canonical Finding Validation Statuses (Section 8)
+CANONICAL_FINDING_STATUSES = {
+    "CONFIRMED",
+    "SUSPICIOUS",
+    "NOT_CONFIRMED",
+    "INCONCLUSIVE",
+    "NOT_TESTED",
+}
+
+CATEGORY_DISPLAY_MAP: Dict[str, str] = {
+    "BOLA_IDOR": "BOLA / IDOR",
+    "IDOR": "BOLA / IDOR",
+    "BFLA": "Broken Function Level Authorization",
+    "BROKEN_FUNCTION_LEVEL_AUTHORIZATION": "Broken Function Level Authorization",
+    "HORIZONTAL_PRIVILEGE_ESCALATION": "Horizontal privilege escalation",
+    "VERTICAL_PRIVILEGE_ESCALATION": "Vertical privilege escalation",
+    "PRIVILEGE_ESCALATION": "Vertical privilege escalation",
+    "MISSING_AUTH": "Missing Authentication",
+    "MASS_ASSIGNMENT": "Mass Assignment (Property Level Authorization)",
+    "BROKEN_ACCESS_CONTROL": "Broken Access Control",
+}
+
+UNAVAILABLE_SOURCE_MESSAGE = (
+    "Server-side source code was not available. "
+    "This finding was detected through black-box HTTP testing."
+)
+
+
+class TargetProfileConfig(BaseModel):
+    """Server-side authorized target profile configuration."""
+    name: str
+    base_url: str
+    allowed_schemes: List[str] = Field(default_factory=lambda: ["http", "https"])
+    verify_tls: bool = True
+    tls_cert_valid: bool = True
+    configured: bool = True
+    source_root: Optional[str] = None
+
+
+DEFAULT_TARGET_PROFILES: Dict[str, TargetProfileConfig] = {
+    "default": TargetProfileConfig(
+        name="default",
+        base_url=settings.target_base_url,
+        allowed_schemes=(
+            list(settings.allowed_schemes)
+            if isinstance(settings.allowed_schemes, list)
+            else [str(settings.allowed_schemes)]
+        ),
+        verify_tls=True,
+        tls_cert_valid=True,
+        configured=True,
+    ),
+    "juice_shop_local": TargetProfileConfig(
+        name="juice_shop_local",
+        base_url="http://localhost:3000",
+        allowed_schemes=["http"],
+        verify_tls=True,
+        tls_cert_valid=True,
+        configured=True,
+    ),
 }
 
 
-class AssessmentTaskManager:
-    """Manages unified background execution of assessments and SSE client event broadcasting.
+def _parse_url_components(url: str) -> Tuple[str, str, int]:
+    """Extracts normalized (scheme, host, port) from a URL without altering scheme."""
+    parsed = urlparse((url or "").strip())
+    scheme = (parsed.scheme or "http").lower()
+    host = (parsed.hostname or "localhost").lower()
+    try:
+        explicit_port = parsed.port
+    except ValueError:
+        explicit_port = None
+    if explicit_port is not None:
+        port = explicit_port
+    else:
+        port = 443 if scheme == "https" else 80
+    return scheme, host, port
 
-    Supports Dependency Injection for `agent` (`GeminiAuthScopeAgent`),
-    `tool_registry` (`ToolRegistryAdapter`), and `memory_manager` (`MemoryManager`).
+
+def _get_ai_provider_info() -> Dict[str, Any]:
+    """Returns verified AI provider and model status from the backend configuration."""
+    cfg = GeminiAgentConfig.from_env()
+    configured = cfg.is_configured
+    return {
+        "provider": "Google Gemini",
+        "provider_id": "google_gemini",
+        "model": cfg.model,
+        "configured": configured,
+        "fallback_mode": not configured,
+        "mode": "gemini" if configured else "deterministic_fallback",
+    }
+
+
+def _normalize_validation_status(
+    raw_status: Optional[str],
+    confirmation_status: Optional[str] = None,
+    access_verdict: Optional[str] = None,
+) -> str:
+    """Normalizes finding status into one of the 5 required statuses.
+
+    Never promotes a SUSPICIOUS finding to CONFIRMED.
     """
+    val = (raw_status or "").strip().upper()
+    conf = (confirmation_status or "").strip().lower()
+    verdict = (access_verdict or "").strip().upper()
+
+    if val == "SUSPICIOUS" or conf == "suspected" or verdict == "SUSPICIOUS_ACCESS":
+        return "SUSPICIOUS"
+    if val in ("NOT_CONFIRMED", "REJECTED_FALSE_POSITIVE", "FALSE_POSITIVE") or conf == "false_positive" or verdict in ("CORRECTLY_DENIED", "FALSE_POSITIVE"):
+        return "NOT_CONFIRMED"
+    if val == "INCONCLUSIVE" or verdict == "INCONCLUSIVE":
+        return "INCONCLUSIVE"
+    if val in ("NOT_TESTED", "UNTESTED", "SKIPPED", "SKIPPED_MISSING_SESSION"):
+        return "NOT_TESTED"
+    if val == "CONFIRMED" and (verdict in ("CONFIRMED_UNAUTHORIZED_ACCESS", "") and conf in ("confirmed", "")):
+        return "CONFIRMED"
+    if val in CANONICAL_FINDING_STATUSES:
+        return val
+    return "SUSPICIOUS"
+
+
+def _resolve_knowledge_item(category: str, endpoint: str) -> Optional[Any]:
+    """Looks up curated OWASP API Security knowledge for a category/endpoint."""
+    cat_upper = (category or "BOLA_IDOR").upper()
+    for item in KNOWLEDGE_BASE:
+        if item.category.upper() == cat_upper:
+            return item
+    if "admin" in (endpoint or "").lower() or "BFLA" in cat_upper:
+        for item in KNOWLEDGE_BASE:
+            if item.category.upper() == "BFLA":
+                return item
+    return KNOWLEDGE_BASE[0] if KNOWLEDGE_BASE else None
+
+
+def _extract_redacted_parameter(endpoint: str, resource_id: Optional[str]) -> str:
+    """Builds a safely redacted parameter or resource identifier description."""
+    clean_ep = redact_sensitive_text(endpoint or "/")
+    if resource_id is not None and str(resource_id).strip():
+        safe_res = redact_sensitive_text(str(resource_id).strip())
+        return f"resource_id={safe_res}"
+    if "{id}" in clean_ep or ":id" in clean_ep:
+        return "Path parameter: id (redacted / template)"
+    parts = [p for p in clean_ep.split("/") if p]
+    if parts and parts[-1].isdigit():
+        return f"resource_id={parts[-1]}"
+    return "None (endpoint-level route)"
+
+
+def _serialize_detailed_finding(
+    finding: FindingRecord,
+    target_url: str,
+    source_archive_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Serializes a FindingRecord with all 6 required sections (A–F) and strict redaction."""
+    base = finding.model_dump(mode="json")
+    scheme, host, port = _parse_url_components(target_url)
+
+    endpoint_path = finding.target_endpoint or finding.endpoint or "/"
+    if endpoint_path.startswith("http://") or endpoint_path.startswith("https://"):
+        full_url = redact_sensitive_text(endpoint_path)
+        parsed_ep = urlparse(full_url)
+        endpoint_rel = parsed_ep.path or "/"
+        if parsed_ep.hostname:
+            host = parsed_ep.hostname
+        if parsed_ep.scheme:
+            scheme = parsed_ep.scheme
+        try:
+            if parsed_ep.port:
+                port = parsed_ep.port
+        except ValueError:
+            pass
+    else:
+        endpoint_rel = endpoint_path if endpoint_path.startswith("/") else f"/{endpoint_path}"
+        if finding.evidence and finding.evidence.request_url:
+            full_url = redact_sensitive_text(finding.evidence.request_url)
+        else:
+            base_clean = (target_url or "http://localhost:3000").strip().rstrip("/")
+            full_url = redact_sensitive_text(f"{base_clean}{endpoint_rel}")
+
+    raw_cat = (finding.vulnerability_category or finding.vulnerability_type or "BOLA_IDOR").upper()
+    category_display = CATEGORY_DISPLAY_MAP.get(raw_cat, raw_cat.replace("_", " "))
+
+    val_status = _normalize_validation_status(
+        finding.validation_status,
+        finding.confirmation_status or finding.status,
+        finding.access_verdict,
+    )
+
+    sev_str = (
+        finding.severity.value
+        if hasattr(finding.severity, "value")
+        else str(finding.severity or "MEDIUM")
+    ).upper()
+
+    param_or_res = _extract_redacted_parameter(endpoint_rel, finding.resource_id)
+
+    # Section C: Source-code location (ONLY when verified actual source mapping exists)
+    tech_details = finding.technical_details if isinstance(finding.technical_details, dict) else {}
+    src_loc = tech_details.get("source_location")
+    source_code_available = False
+    source_repository: Optional[str] = None
+    source_file: Optional[str] = None
+    source_line: Optional[str] = None
+    source_start_line: Optional[int] = None
+    source_end_line: Optional[int] = None
+    source_function: Optional[str] = None
+    vulnerable_snippet: Optional[str] = None
+    source_unavailable_message: Optional[str] = UNAVAILABLE_SOURCE_MESSAGE
+
+    if isinstance(src_loc, dict) and src_loc.get("verified") is True and src_loc.get("file_path") and src_loc.get("start_line"):
+        source_code_available = True
+        source_repository = str(src_loc.get("repository_name") or "target-repository")
+        source_file = str(src_loc["file_path"])
+        s_start = int(src_loc["start_line"])
+        s_end = int(src_loc.get("end_line") or s_start)
+        source_start_line = s_start
+        source_end_line = s_end
+        source_line = f"{s_start}-{s_end}" if s_end > s_start else str(s_start)
+        source_function = str(src_loc.get("function_name") or src_loc.get("route_handler") or "handler")
+        raw_snippet = src_loc.get("code_snippet") or ""
+        vulnerable_snippet = redact_sensitive_text(str(raw_snippet)) if raw_snippet else None
+        source_unavailable_message = None
+
+    # Knowledge & Remediation enrichment (Sections D & E)
+    kb_item = _resolve_knowledge_item(raw_cat, endpoint_rel)
+    roles_list = [
+        (r.value if hasattr(r, "value") else str(r))
+        for r in (finding.affected_roles or [finding.affected_role or "user_b"])
+    ]
+
+    baseline_behavior = redact_sensitive_text(
+        finding.expected_behavior
+        or (finding.evidence.expected_behavior if finding.evidence else "")
+        or f"Endpoint '{endpoint_rel}' must enforce server-side authorization and reject unauthorized callers with HTTP 401/403."
+    )
+    unauthorized_behavior = redact_sensitive_text(
+        finding.actual_behavior
+        or (finding.evidence.actual_behavior if finding.evidence else "")
+        or f"Role '{finding.affected_role}' observed an authorization discrepancy on {finding.http_method} {endpoint_rel}."
+    )
+
+    impact_summary = redact_sensitive_text(
+        finding.impact_explanation
+        or finding.description
+        or (kb_item.threat_impact if kb_item else "Potential unauthorized access to protected application resources.")
+    )
+
+    if "admin" in endpoint_rel.lower() or raw_cat in ("BFLA", "VERTICAL_PRIVILEGE_ESCALATION", "PRIVILEGE_ESCALATION"):
+        exposed_data = f"Administrative configuration or privileged function at {finding.http_method} {endpoint_rel}."
+        attacker_action = (
+            f"An unauthenticated or low-privileged caller ({', '.join(roles_list)}) can invoke "
+            f"{finding.http_method} {endpoint_rel} and read administrative responses without elevated role verification."
+        )
+    else:
+        exposed_data = f"Protected tenant/user resource records at {finding.http_method} {endpoint_rel} ({param_or_res})."
+        attacker_action = (
+            f"A caller operating as {', '.join(roles_list)} can request {finding.http_method} {endpoint_rel} "
+            f"to access another user's resource data when object ownership is not enforced."
+        )
+
+    if val_status == "CONFIRMED":
+        why_matters = (
+            f"Verified cross-role evidence confirms that {endpoint_rel} returns protected data to an unauthorized caller, "
+            "breaking tenant isolation and confidentiality."
+        )
+    elif val_status == "SUSPICIOUS":
+        why_matters = (
+            f"The endpoint {endpoint_rel} returned an HTTP 200 application payload to an unverified or unauthenticated caller. "
+            "While baseline role comparison is incomplete, unguarded exposure of this route risks unauthorized data disclosure."
+        )
+    else:
+        why_matters = f"Authorization check status for {endpoint_rel} is {val_status}."
+
+    root_cause = redact_sensitive_text(
+        str(tech_details.get("root_cause") or (kb_item.root_cause if kb_item else "Missing server-side ownership or role authorization check in the route handler."))
+    )
+    recommended_fix = redact_sensitive_text(
+        str(tech_details.get("recommended_fix") or (kb_item.remediation_guidance if kb_item else "Enforce strict server-side session and ownership validation before returning resource data."))
+    )
+    proposed_code_fix = redact_sensitive_text(
+        finding.remediation_guidance
+        or finding.remediation_recommendation
+        or (kb_item.code_pattern_secure if kb_item else "// Enforce server-side authorization check\nif (resource.ownerId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });")
+    )
+    verification_procedure = redact_sensitive_text(
+        str(tech_details.get("verification_procedure") or (kb_item.retesting_procedure if kb_item else f"Re-issue {finding.http_method} {endpoint_rel} using an unauthorized role and verify the server returns HTTP 401 or HTTP 403."))
+    )
+
+    # Section F: Sanitized Evidence summary
+    resp_status = finding.evidence.response_status if finding.evidence else 200
+    response_diff = redact_sensitive_text(
+        str(
+            tech_details.get("response_difference")
+            or f"Expected HTTP 401/403 denial ({baseline_behavior}), but observed HTTP {resp_status} ({unauthorized_behavior})."
+        )
+    )
+    evi_sha = finding.evidence.evidence_sha256 if finding.evidence else ""
+    redacted_fields = list(finding.evidence.redacted_fields) if finding.evidence else []
+
+    base.update({
+        # A. Bug identity
+        "vulnerability_name": redact_sensitive_text(finding.title),
+        "vulnerability_category": raw_cat,
+        "category_display": category_display,
+        "severity": sev_str,
+        "validation_status": val_status,
+        # B. Website location
+        "full_url": full_url,
+        "hostname": host,
+        "port": port,
+        "scheme": scheme,
+        "endpoint": endpoint_rel,
+        "target_endpoint": endpoint_rel,
+        "http_method": finding.http_method,
+        "parameter_or_resource_id": param_or_res,
+        "website_location": {
+            "full_url": full_url,
+            "hostname": host,
+            "port": port,
+            "scheme": scheme,
+            "endpoint": endpoint_rel,
+            "http_method": finding.http_method,
+            "parameter_or_resource_id": param_or_res,
+        },
+        # C. Source-code location
+        "source_code_available": source_code_available,
+        "source_repository": source_repository,
+        "source_file": source_file,
+        "source_line": source_line,
+        "source_start_line": source_start_line,
+        "source_end_line": source_end_line,
+        "source_function": source_function,
+        "vulnerable_snippet": vulnerable_snippet,
+        "source_unavailable_message": source_unavailable_message,
+        "source_location": {
+            "available": source_code_available,
+            "repository": source_repository,
+            "file_path": source_file,
+            "line_range": source_line,
+            "start_line": source_start_line,
+            "end_line": source_end_line,
+            "function_name": source_function,
+            "vulnerable_snippet": vulnerable_snippet,
+            "unavailable_message": source_unavailable_message,
+        },
+        # D. What the bug can affect
+        "exposed_data_or_functionality": redact_sensitive_text(exposed_data),
+        "affected_roles": roles_list,
+        "attacker_capabilities": redact_sensitive_text(attacker_action),
+        "why_it_matters": redact_sensitive_text(why_matters),
+        "impact_details": {
+            "summary": impact_summary,
+            "exposed_data_or_functionality": redact_sensitive_text(exposed_data),
+            "affected_roles": roles_list,
+            "attacker_capabilities": redact_sensitive_text(attacker_action),
+            "why_it_matters": redact_sensitive_text(why_matters),
+        },
+        # E. How to resolve it
+        "root_cause": root_cause,
+        "recommended_fix": recommended_fix,
+        "proposed_code_fix": proposed_code_fix,
+        "proposed_fix_label": "Proposed Fix — Not automatically applied to the website",
+        "verification_procedure": verification_procedure,
+        "resolution_details": {
+            "root_cause": root_cause,
+            "recommended_fix": recommended_fix,
+            "proposed_code_fix": proposed_code_fix,
+            "proposed_fix_label": "Proposed Fix — Not automatically applied to the website",
+            "verification_procedure": verification_procedure,
+        },
+        # F. Evidence summary
+        "baseline_behavior": baseline_behavior,
+        "unauthorized_behavior": unauthorized_behavior,
+        "response_difference": response_diff,
+        "evidence_validation_status": val_status,
+        "evidence_summary": {
+            "baseline_behavior": baseline_behavior,
+            "unauthorized_behavior": unauthorized_behavior,
+            "response_difference": response_diff,
+            "validation_status": val_status,
+            "evidence_sha256": evi_sha,
+            "redacted_fields": redacted_fields,
+        },
+    })
+    return sanitize_dict_or_list(base)
+
+
+class _SessionBoundRepository:
+    """Adapter binding AssessmentEngine persistence calls to a pre-allocated scan_id.
+
+    Also performs optional verified source-code mapping when a valid target source root
+    is provided, never inventing source files or line numbers.
+    """
+
+    def __init__(
+        self,
+        repo: FindingRepository,
+        bound_scan_id: str,
+        source_root: Optional[Path] = None,
+        repository_name: Optional[str] = None,
+    ) -> None:
+        self._repo = repo
+        self.bound_scan_id = bound_scan_id
+        self.source_root = source_root
+        self.repository_name = repository_name or "target-repo"
+        self._mapper: Optional[CodeMapper] = None
+        if source_root and source_root.exists() and source_root.is_dir():
+            self._mapper = CodeMapper(repo_root=source_root, repository_name=self.repository_name)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._repo, name)
+
+    def save_scan_session(self, session: ScanSessionRecord) -> str:
+        session.id = self.bound_scan_id
+        return self._repo.save_scan_session(session)
+
+    def save_event(self, event: AssessmentEvent) -> int:
+        event.assessment_id = self.bound_scan_id
+        return self._repo.save_event(event)
+
+    def save_discovered_endpoint(self, endpoint: DiscoveredEndpointRecord) -> str:
+        old_scan_id = endpoint.scan_id
+        endpoint.scan_id = self.bound_scan_id
+        if old_scan_id and old_scan_id != self.bound_scan_id and endpoint.id.startswith(f"ep_{old_scan_id}"):
+            endpoint.id = endpoint.id.replace(old_scan_id, self.bound_scan_id, 1)
+        return self._repo.save_discovered_endpoint(endpoint)
+
+    def save_finding(self, finding: Any, overwrite: bool = True) -> str:
+        if isinstance(finding, FindingRecord):
+            finding.scan_id = self.bound_scan_id
+            finding.target_identifier = self.bound_scan_id
+            if self._mapper is not None:
+                tech = dict(finding.technical_details or {})
+                if "source_location" not in tech:
+                    map_res = self._mapper.map_finding({
+                        "id": finding.id,
+                        "endpoint": finding.target_endpoint or finding.endpoint,
+                        "http_method": finding.http_method,
+                    })
+                    if map_res.status == MappingStatus.EXACT and map_res.location and map_res.verified:
+                        tech["source_location"] = {
+                            "verified": True,
+                            "repository_name": map_res.location.repository_name or self.repository_name,
+                            "file_path": map_res.location.file_path,
+                            "function_name": map_res.location.function_name,
+                            "start_line": map_res.location.start_line,
+                            "end_line": map_res.location.end_line,
+                            "code_snippet": map_res.location.code_snippet,
+                            "route_handler": map_res.location.route_handler,
+                        }
+                    else:
+                        tech["source_location"] = {"verified": False, "status": "UNAVAILABLE"}
+                finding.technical_details = sanitize_dict_or_list(tech)
+        elif isinstance(finding, dict):
+            finding["scan_id"] = self.bound_scan_id
+            finding["target_identifier"] = self.bound_scan_id
+        return self._repo.save_finding(finding, overwrite=overwrite)
+
+
+class AssessmentTaskManager:
+    """Manages decoupled background execution of assessments and SSE client event broadcasting."""
 
     def __init__(
         self,
@@ -116,12 +532,10 @@ class AssessmentTaskManager:
         tool_registry: Optional[Any] = None,
         memory_manager: Optional[Any] = None,
     ) -> None:
-        self._tasks: Dict[str, asyncio.Task[None]] = {}
+        self._tasks: Dict[str, asyncio.Task] = {}
         self._tokens: Dict[str, CancellationToken] = {}
-        self._subscribers: Dict[str, List[asyncio.Queue[Any]]] = {}
+        self._subscribers: Dict[str, List[asyncio.Queue]] = {}
         self._lock = asyncio.Lock()
-
-        # Injected dependencies (if None, default production adapters are instantiated per run)
         self.agent = agent
         self.tool_registry = tool_registry
         self.memory_manager = memory_manager
@@ -144,7 +558,6 @@ class AssessmentTaskManager:
         self.memory_manager = None
 
     def get_agent(self, repo: FindingRepository) -> Any:
-        """Returns the injected agent or constructs the default canonical GeminiAuthScopeAgent."""
         if self.agent is not None:
             return self.agent
         memory = self.memory_manager or MemoryManager(repository=repo)
@@ -153,6 +566,24 @@ class AssessmentTaskManager:
             tool_registry=tools,
             memory_manager=memory,
             repository=repo,
+        )
+
+    @staticmethod
+    def _coerce_event(scan_id: str, raw_item: Union[AssessmentEvent, Dict[str, Any]]) -> AssessmentEvent:
+        if isinstance(raw_item, AssessmentEvent):
+            raw_item.assessment_id = scan_id
+            return raw_item
+        data = dict(raw_item)
+        etype = str(data.get("event_type") or data.get("type") or EventType.STAGE_UPDATED.value)
+        stage = str(data.get("stage") or AssessmentStage.AUTHORIZATION_TESTING.value)
+        msg = str(data.get("message") or etype)
+        meta = dict(data.get("metadata") or {k: v for k, v in data.items() if k not in ("id", "assessment_id", "event_type", "type", "stage", "message", "timestamp")})
+        return AssessmentEvent(
+            assessment_id=scan_id,
+            event_type=etype,
+            stage=stage,
+            message=msg,
+            metadata=meta,
         )
 
     def get_token(self, scan_id: str) -> Optional[CancellationToken]:
@@ -170,10 +601,8 @@ class AssessmentTaskManager:
         token = self._tokens.get(scan_id)
         if token:
             token.cancel()
-        task = self._tasks.get(scan_id)
-        if task and not task.done():
-            task.cancel()
-        return True
+            return True
+        return False
 
     def start_assessment_task(
         self,
@@ -181,21 +610,23 @@ class AssessmentTaskManager:
         target_url: str,
         token: CancellationToken,
         repo: FindingRepository,
-        github_repo: Optional[str] = None,
         source_archive_path: Optional[str] = None,
-    ) -> Optional[asyncio.Task[None]]:
-        """Starts a managed background task for unified assessment execution."""
+        github_repo: Optional[str] = None,
+        target_profile: Optional[TargetProfileRecord] = None,
+    ) -> Optional[asyncio.Task]:
+        """Starts a managed background task for assessment execution."""
         self._tokens[scan_id] = token
         try:
             loop = asyncio.get_running_loop()
             task = loop.create_task(
                 self._run_task(
-                    scan_id=scan_id,
-                    target_url=target_url,
-                    token=token,
-                    repo=repo,
-                    github_repo=github_repo,
+                    scan_id,
+                    target_url,
+                    token,
+                    repo,
                     source_archive_path=source_archive_path,
+                    github_repo=github_repo,
+                    target_profile=target_profile,
                 ),
                 name=f"assessment_{scan_id}",
             )
@@ -205,128 +636,135 @@ class AssessmentTaskManager:
             logger.warning(f"No running event loop detected for background task {scan_id}")
             return None
 
-    @staticmethod
-    def _coerce_event(scan_id: str, raw_item: Union[AssessmentEvent, Dict[str, Any]]) -> AssessmentEvent:
-        """Normalizes an AssessmentEvent or dictionary emitted by an agent into an AssessmentEvent."""
-        if isinstance(raw_item, AssessmentEvent):
-            raw_item.assessment_id = scan_id
-            return raw_item
-        data = dict(raw_item)
-        etype = str(data.get("event_type") or data.get("type") or EventType.STAGE_UPDATED.value)
-        stage = str(data.get("stage") or AssessmentStage.AUTHORIZATION_TESTING.value)
-        msg = str(data.get("message") or etype)
-        meta = dict(data.get("metadata") or {k: v for k, v in data.items() if k not in ("id", "assessment_id", "event_type", "type", "stage", "message", "timestamp")})
-        return AssessmentEvent(
-            id=data.get("id"),
-            assessment_id=scan_id,
-            event_type=etype,
-            stage=stage,
-            message=sanitize_event_text(msg),
-            timestamp=str(data.get("timestamp") or datetime.now(timezone.utc).isoformat()),
-            metadata=sanitize_event_metadata(meta),
-        )
-
     async def _run_task(
         self,
         scan_id: str,
         target_url: str,
         token: CancellationToken,
         repo: FindingRepository,
-        github_repo: Optional[str] = None,
         source_archive_path: Optional[str] = None,
+        github_repo: Optional[str] = None,
+        target_profile: Optional[TargetProfileRecord] = None,
     ) -> None:
-        """Background worker executing the single unified assessment pipeline."""
+        """Background worker executing the unified assessment workflow decoupled from client connections."""
         logger.info(f"Background assessment task started for {scan_id} ({target_url})")
-        active_agent = self.get_agent(repo=repo)
-        pipeline_req = AssessmentPipelineRequest(
-            assessment_id=scan_id,
-            target_url=target_url,
-            github_repo=github_repo,
-            source_archive_path=source_archive_path,
+
+        source_root: Optional[Path] = None
+        if source_archive_path:
+            candidate_path = Path(source_archive_path)
+            if candidate_path.exists() and candidate_path.is_dir():
+                source_root = candidate_path
+
+        if self.agent is not None:
+            # An injected agent (e.g. MockGeminiAgent in unit tests) is configured
+            active_agent = self.agent
+            pipeline_req = AssessmentPipelineRequest(
+                assessment_id=scan_id,
+                target_url=target_url,
+                github_repo=github_repo,
+                source_archive_path=source_archive_path,
+            )
+
+            async def _execute_injected_steps() -> None:
+                await asyncio.sleep(0.05)
+                curr_sess = repo.get_scan_session(scan_id)
+                if curr_sess and curr_sess.status == "PENDING":
+                    curr_sess.status = "RUNNING"
+                    curr_sess.updated_at = datetime.now(timezone.utc)
+                    repo.save_scan_session(curr_sess)
+
+                stream_iter = active_agent.astream_assessment(pipeline_req, cancel_token=token)
+                async for raw_ev in stream_iter:
+                    event = self._coerce_event(scan_id, raw_ev)
+                    if not event.id:
+                        repo.save_event(event)
+
+                    if event.event_type == EventType.ASSESSMENT_COMPLETED.value:
+                        sess = repo.get_scan_session(scan_id)
+                        if sess and sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
+                            sess.status = "COMPLETED"
+                            sess.completed_at = datetime.now(timezone.utc)
+                            sess.updated_at = datetime.now(timezone.utc)
+                            sess.summary_text = event.message
+                            sess.confirmed_findings_count = int(
+                                event.metadata.get("confirmed_findings", sess.confirmed_findings_count or 0)
+                            )
+                            sess.suspicious_results_count = int(
+                                event.metadata.get("suspicious_results", sess.suspicious_results_count or 0)
+                            )
+                            repo.save_scan_session(sess)
+                    elif event.event_type == EventType.ASSESSMENT_FAILED.value:
+                        sess = repo.get_scan_session(scan_id)
+                        if sess and sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
+                            sess.status = "FAILED"
+                            sess.failure_reason = "ASSESSMENT_FAILED"
+                            sess.completed_at = datetime.now(timezone.utc)
+                            sess.summary_text = event.message
+                            repo.save_scan_session(sess)
+                    elif event.event_type == EventType.ASSESSMENT_CANCELLED.value:
+                        sess = repo.get_scan_session(scan_id)
+                        if sess and sess.status != "CANCELLED":
+                            sess.status = "CANCELLED"
+                            sess.completed_at = datetime.now(timezone.utc)
+                            sess.updated_at = datetime.now(timezone.utc)
+                            sess.summary_text = event.message
+                            repo.save_scan_session(sess)
+
+                    msg_chunk = _format_event_message_chunk(event, repo=repo)
+                    await self._broadcast(scan_id, ("activity", event, msg_chunk))
+                    await asyncio.sleep(0.04)
+
+            try:
+                await asyncio.wait_for(_execute_injected_steps(), timeout=settings.assessment_timeout_seconds)
+            except Exception as exc:
+                logger.error(f"Injected task error: {exc}", exc_info=True)
+                await self._broadcast(scan_id, ("error", str(exc), None))
+            finally:
+                final_session = repo.get_scan_session(scan_id)
+                done_payload = _build_done_payload(final_session, repo, target_url)
+                await self._broadcast(scan_id, ("done", done_payload, None))
+            return
+
+        bound_repo = _SessionBoundRepository(
+            repo=repo,
+            bound_scan_id=scan_id,
+            source_root=source_root,
+            repository_name=github_repo or "target-repo",
         )
+        base_guard = _get_active_scope_guard()
+        scope_guard = ScopeGuard(
+            allowed_hosts=list(base_guard.allowed_hosts),
+            allowed_ports=list(base_guard.allowed_ports),
+            allowed_schemes=list(base_guard.allowed_schemes),
+            target_registry=base_guard.target_registry,
+            enable_dynamic_registry=base_guard.enable_dynamic_registry,
+        )
+        if target_profile is not None:
+            scope_guard.bind_target_profile(target_profile)
+        else:
+            try:
+                target_reg = _get_target_registry()
+                parsed_host = urlparse(target_url).hostname
+                if parsed_host:
+                    matched = target_reg.repository.get_profile_by_hostname(parsed_host)
+                    if matched and matched.is_active():
+                        scope_guard.bind_target_profile(matched)
+            except Exception as e:
+                logger.debug(f"Target profile binding fallback failed: {e}")
+
+        engine = AssessmentEngine(repository=bound_repo, scope_guard=scope_guard)  # type: ignore[arg-type]
+        gen = engine.stream_assessment(target_url=target_url, scan_id=scan_id, cancel_token=token)
 
         async def _execute_steps() -> None:
-            # Brief yield so HTTP POST /retry caller observes initial PENDING state
-            # and SSE client can attach before execution transitions to RUNNING
-            await asyncio.sleep(0.05)
-            curr_sess = repo.get_scan_session(scan_id)
-            if curr_sess and curr_sess.status == "PENDING":
-                curr_sess.status = "RUNNING"
-                curr_sess.updated_at = datetime.now(timezone.utc)
-                repo.save_scan_session(curr_sess)
-
-            stream_iter = active_agent.astream_assessment(pipeline_req, cancel_token=token)
-            async for raw_ev in stream_iter:
-                event = self._coerce_event(scan_id, raw_ev)
-
-                # Ensure event is persisted in SQLite with a valid sequential ID for replay
-                if not event.id:
-                    repo.save_event(event)
-
-                # Update session state if custom/mock agent emitted terminal event
-                if event.event_type == EventType.ASSESSMENT_COMPLETED.value:
-                    sess = repo.get_scan_session(scan_id)
-                    if sess and sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
-                        sess.status = "COMPLETED"
-                        sess.completed_at = datetime.now(timezone.utc)
-                        sess.updated_at = datetime.now(timezone.utc)
-                        sess.summary_text = event.message
-                        sess.confirmed_findings_count = int(
-                            event.metadata.get("confirmed_findings", sess.confirmed_findings_count)
-                        )
-                        sess.suspicious_results_count = int(
-                            event.metadata.get("suspicious_results", sess.suspicious_results_count)
-                        )
-                        repo.save_scan_session(sess)
-                elif event.event_type == EventType.ASSESSMENT_CANCELLED.value:
-                    sess = repo.get_scan_session(scan_id)
-                    if sess and sess.status != "CANCELLED":
-                        sess.status = "CANCELLED"
-                        sess.completed_at = datetime.now(timezone.utc)
-                        sess.updated_at = datetime.now(timezone.utc)
-                        sess.summary_text = event.message
-                        repo.save_scan_session(sess)
-                elif event.event_type == EventType.ASSESSMENT_FAILED.value:
-                    sess = repo.get_scan_session(scan_id)
-                    if sess and sess.status != "FAILED":
-                        sess.status = "FAILED"
-                        sess.failure_reason = str(event.metadata.get("reason", "EXECUTION_ERROR"))
-                        sess.completed_at = datetime.now(timezone.utc)
-                        sess.updated_at = datetime.now(timezone.utc)
-                        sess.summary_text = event.message
-                        repo.save_scan_session(sess)
-
-                msg_chunk = _format_event_message_chunk(event, repo=repo)
-                await self._broadcast(scan_id, ("activity", event, msg_chunk))
-
-                if token.is_cancelled and event.event_type != EventType.ASSESSMENT_CANCELLED.value:
-                    cancel_sess = repo.get_scan_session(scan_id)
-                    if cancel_sess and cancel_sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
-                        cancel_sess.status = "CANCELLED"
-                        cancel_sess.completed_at = datetime.now(timezone.utc)
-                        cancel_sess.updated_at = datetime.now(timezone.utc)
-                        cancel_sess.summary_text = "Assessment cancelled safely by operator."
-                        repo.save_scan_session(cancel_sess)
-                        cancel_ev = AssessmentEvent(
-                            assessment_id=scan_id,
-                            event_type=EventType.ASSESSMENT_CANCELLED.value,
-                            stage=AssessmentStage.REPORT_PREPARATION.value,
-                            message="Assessment cancelled safely by operator.",
-                        )
-                        repo.save_event(cancel_ev)
-                        cancel_chunk = _format_event_message_chunk(cancel_ev, repo=repo)
-                        await self._broadcast(scan_id, ("activity", cancel_ev, cancel_chunk))
+            while True:
+                event = await asyncio.to_thread(lambda: next(gen, None))
+                if event is None:
                     break
 
-                await asyncio.sleep(0.02)
-
-            # Finalize session if generator completed without setting terminal status
-            final_check = repo.get_scan_session(scan_id)
-            if final_check and final_check.status in ("PENDING", "RUNNING"):
-                final_check.status = "CANCELLED" if token.is_cancelled else "COMPLETED"
-                final_check.completed_at = datetime.now(timezone.utc)
-                final_check.updated_at = datetime.now(timezone.utc)
-                repo.save_scan_session(final_check)
+                event.assessment_id = scan_id
+                msg_chunk = _format_event_message_chunk(event, repo=repo)
+                await self._broadcast(scan_id, ("activity", event, msg_chunk))
+                await asyncio.sleep(0.04)
 
         try:
             await asyncio.wait_for(_execute_steps(), timeout=settings.assessment_timeout_seconds)
@@ -340,9 +778,7 @@ class AssessmentTaskManager:
                     curr_session.failure_reason = "TIMEOUT"
                     curr_session.completed_at = datetime.now(timezone.utc)
                     curr_session.updated_at = datetime.now(timezone.utc)
-                    curr_session.summary_text = (
-                        f"Assessment exceeded timeout limit ({settings.assessment_timeout_seconds}s)."
-                    )
+                    curr_session.summary_text = f"Assessment exceeded timeout limit ({settings.assessment_timeout_seconds}s)."
                     repo.save_scan_session(curr_session)
                     timeout_ev = AssessmentEvent(
                         assessment_id=scan_id,
@@ -352,50 +788,43 @@ class AssessmentTaskManager:
                         metadata={"reason": "TIMEOUT", "timeout_seconds": settings.assessment_timeout_seconds},
                     )
                     repo.save_event(timeout_ev)
-                    await self._broadcast(scan_id, ("activity", timeout_ev, _format_event_message_chunk(timeout_ev)))
             except Exception as e:
                 logger.warning(f"Error recording timeout for {scan_id}: {e}")
-            await self._broadcast(
-                scan_id,
-                ("error", f"Assessment timed out after {settings.assessment_timeout_seconds}s", None),
-            )
+            await self._broadcast(scan_id, ("error", f"Assessment timed out after {settings.assessment_timeout_seconds}s", None))
         except Exception as exc:
             logger.error(f"Error in background assessment task {scan_id}: {exc}", exc_info=True)
+            is_persist = "database" in str(exc).lower() or "no column" in str(exc).lower() or "sqlite" in str(type(exc)).lower() or "persistence" in str(exc).lower()
+            fail_reason = "PERSISTENCE_ERROR" if is_persist else "EXECUTION_ERROR"
             try:
                 curr_session = repo.get_scan_session(scan_id)
                 if curr_session and curr_session.status not in ("COMPLETED", "CANCELLED", "FAILED"):
                     curr_session.status = "FAILED"
-                    curr_session.failure_reason = "EXECUTION_ERROR"
+                    curr_session.failure_reason = fail_reason
                     curr_session.completed_at = datetime.now(timezone.utc)
                     curr_session.updated_at = datetime.now(timezone.utc)
                     curr_session.summary_text = f"Assessment failed: {exc}"
                     repo.save_scan_session(curr_session)
-                    fail_ev = AssessmentEvent(
-                        assessment_id=scan_id,
-                        event_type=EventType.ASSESSMENT_FAILED.value,
-                        stage=AssessmentStage.REPORT_PREPARATION.value,
-                        message=f"Assessment failed: {exc}",
-                        metadata={"reason": "EXECUTION_ERROR"},
-                    )
-                    repo.save_event(fail_ev)
-                    await self._broadcast(scan_id, ("activity", fail_ev, _format_event_message_chunk(fail_ev)))
+            except Exception as e:
+                logger.error(f"Error recording failure for session {scan_id}: {e}")
+
+            fail_ev = AssessmentEvent(
+                assessment_id=scan_id,
+                event_type=EventType.ASSESSMENT_FAILED.value,
+                stage=AssessmentStage.REPORT_PREPARATION.value,
+                message=f"Assessment failed: {exc}",
+                metadata={"error": str(exc), "failure_reason": fail_reason},
+            )
+            try:
+                repo.save_event(fail_ev)
             except Exception:
                 pass
+            await self._broadcast(scan_id, ("activity", fail_ev, f"### Assessment Execution Failed\n\n**Reason:** `{fail_reason}`\n\n```\n{exc}\n```"))
             await self._broadcast(scan_id, ("error", str(exc), None))
         finally:
             final_session = repo.get_scan_session(scan_id)
-            done_payload = {
-                "status": final_session.status if final_session else "COMPLETED",
-                "summary": final_session.summary_text if final_session else "",
-                "endpoints_discovered": final_session.endpoints_discovered_count if final_session else 0,
-                "endpoints_tested": final_session.endpoints_tested_count if final_session else 0,
-                "confirmed_findings": final_session.confirmed_findings_count if final_session else 0,
-                "suspicious_results": final_session.suspicious_results_count if final_session else 0,
-            }
+            done_payload = _build_done_payload(final_session, repo, target_url)
             await self._broadcast(scan_id, ("done", done_payload, None))
-            logger.info(
-                f"Background assessment task completed for {scan_id} with status {done_payload['status']}"
-            )
+            logger.info(f"Background assessment task completed for {scan_id} with status {done_payload['status']}")
 
     async def _broadcast(self, scan_id: str, item: Any) -> None:
         queues = list(self._subscribers.get(scan_id, []))
@@ -405,22 +834,126 @@ class AssessmentTaskManager:
             except asyncio.QueueFull:
                 pass
 
-    def subscribe(self, scan_id: str) -> asyncio.Queue[Any]:
+    def subscribe(self, scan_id: str) -> asyncio.Queue:
         if scan_id not in self._subscribers:
             self._subscribers[scan_id] = []
-        q: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
+        q: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self._subscribers[scan_id].append(q)
         return q
 
-    def unsubscribe(self, scan_id: str, q: asyncio.Queue[Any]) -> None:
+    def unsubscribe(self, scan_id: str, q: asyncio.Queue) -> None:
         if scan_id in self._subscribers and q in self._subscribers[scan_id]:
             self._subscribers[scan_id].remove(q)
             if not self._subscribers[scan_id]:
                 self._subscribers.pop(scan_id, None)
 
 
+def _compute_endpoint_check_counts(
+    scan_id: str,
+    repo: FindingRepository,
+    findings: Optional[List[FindingRecord]] = None,
+) -> Dict[str, int]:
+    """Computes counts across all 5 canonical statuses from persisted findings and endpoint checks."""
+    f_list = findings if findings is not None else repo.list_findings(scan_id)
+    ep_list = repo.list_discovered_endpoints(scan_id)
+
+    confirmed = 0
+    suspicious = 0
+    not_confirmed = 0
+    inconclusive = 0
+    not_tested = 0
+
+    for f in f_list:
+        norm = _normalize_validation_status(f.validation_status, f.confirmation_status or f.status, f.access_verdict)
+        if norm == "CONFIRMED":
+            confirmed += 1
+        elif norm == "SUSPICIOUS":
+            suspicious += 1
+        elif norm == "NOT_CONFIRMED":
+            not_confirmed += 1
+        elif norm == "INCONCLUSIVE":
+            inconclusive += 1
+        elif norm == "NOT_TESTED":
+            not_tested += 1
+
+    for ep in ep_list:
+        t_stat = (ep.test_status or "").upper()
+        verdict = (ep.verdict or "").upper()
+        if t_stat in ("UNTESTED", "SKIPPED_MISSING_SESSION", "SKIPPED"):
+            not_tested += 1
+        elif verdict == "INCONCLUSIVE":
+            inconclusive += 1
+        elif verdict in ("CORRECTLY_DENIED", "FALSE_POSITIVE") and not ep.associated_finding_ids:
+            not_confirmed += 1
+
+    return {
+        "confirmed": confirmed,
+        "suspicious": suspicious,
+        "not_confirmed": not_confirmed,
+        "inconclusive": inconclusive,
+        "not_tested": not_tested,
+    }
+
+
+def _build_done_payload(
+    session: Optional[ScanSessionRecord],
+    repo: FindingRepository,
+    fallback_target_url: str = "http://localhost:3000",
+) -> Dict[str, Any]:
+    """Builds the comprehensive completion summary payload for SSE `done` events."""
+    t_url = session.target_url if session else fallback_target_url
+    scheme, host, port = _parse_url_components(t_url)
+    counts = (
+        _compute_endpoint_check_counts(session.id, repo)
+        if session
+        else {"confirmed": 0, "suspicious": 0, "not_confirmed": 0, "inconclusive": 0, "not_tested": 0}
+    )
+    conf_count = session.confirmed_findings_count if session else counts["confirmed"]
+    susp_count = session.suspicious_results_count if session else counts["suspicious"]
+    status_val = session.status if session else "COMPLETED"
+    summary_txt = session.summary_text if session else ""
+    if status_val == "COMPLETED" and conf_count == 0 and "No confirmed vulnerabilities found" not in summary_txt:
+        summary_txt = (
+            f"{summary_txt} No confirmed vulnerabilities found.".strip()
+            if summary_txt
+            else f"Assessment completed against {t_url}. No confirmed vulnerabilities found."
+        )
+
+    eps = repo.list_discovered_endpoints(session.id) if session else []
+    disc_count = (
+        session.endpoints_discovered_count
+        if (session and session.endpoints_discovered_count > 0)
+        else len(eps)
+    )
+    tested_count = (
+        session.endpoints_tested_count
+        if (session and session.endpoints_tested_count > 0)
+        else len(
+            [ep for ep in eps if (ep.test_status or "").upper() not in ("UNTESTED", "SKIPPED_MISSING_SESSION", "SKIPPED")]
+        )
+    )
+
+    return {
+        "target_url": t_url,
+        "scheme": scheme,
+        "host": host,
+        "port": port,
+        "status": status_val,
+        "summary": summary_txt,
+        "endpoints_discovered": disc_count,
+        "endpoints_tested": tested_count,
+        "confirmed_findings": conf_count,
+        "suspicious_results": susp_count,
+        "not_confirmed_checks": counts["not_confirmed"],
+        "inconclusive_checks": counts["inconclusive"],
+        "untested_checks": counts["not_tested"],
+        "no_confirmed_vulnerabilities": (status_val == "COMPLETED" and conf_count == 0),
+    }
+
+
 # Global task manager instance
 task_manager = AssessmentTaskManager()
+# Maintain active_tokens dictionary for backwards-compatible references
 active_tokens = task_manager._tokens
 
 app = FastAPI(
@@ -429,19 +962,243 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.state.scope_guard = None
+app.state.target_profiles = dict(DEFAULT_TARGET_PROFILES)
+app.state.repository = None
+
+
+def _get_repository() -> FindingRepository:
+    """Returns the active FindingRepository (supports test injection and safe SQLite column migration)."""
+    custom_repo = getattr(app.state, "repository", None)
+    if isinstance(custom_repo, FindingRepository):
+        return custom_repo
+    db = DatabaseManager(db_path=settings.database_path)
+    repo = FindingRepository(db_manager=db)
+    # Ensure columns that use CURRENT_TIMESTAMP in older SQLite files are present
+    try:
+        with repo.db.session_scope() as conn:
+            for col_name, col_type in [
+                ("created_timestamp", "TIMESTAMP"),
+                ("created_at", "TIMESTAMP"),
+                ("updated_at", "TIMESTAMP"),
+                ("last_retested_timestamp", "TIMESTAMP"),
+                ("technical_details_json", "TEXT DEFAULT '{}'"),
+                ("remediation_recommendation", "TEXT DEFAULT ''"),
+                ("impact_explanation", "TEXT DEFAULT ''"),
+                ("confirmation_status", "TEXT DEFAULT 'confirmed'"),
+                ("evidence_reference", "TEXT"),
+                ("affected_roles_json", "TEXT DEFAULT '[]'"),
+                ("affected_role", "TEXT DEFAULT 'user_b'"),
+                ("vulnerability_category", "TEXT DEFAULT 'BOLA_IDOR'"),
+                ("target_endpoint", "TEXT DEFAULT ''"),
+                ("endpoint", "TEXT DEFAULT ''"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE findings ADD COLUMN {col_name} {col_type}")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return repo
+
+
+def _get_active_scope_guard() -> ScopeGuard:
+    """Returns the active ScopeGuard instance (supports test injection via app.state.scope_guard)."""
+    custom_guard = getattr(app.state, "scope_guard", None)
+    if isinstance(custom_guard, ScopeGuard):
+        return custom_guard
+    return ScopeGuard()
+
+
+def _get_target_registry() -> TargetRegistry:
+    """Returns the active TargetRegistry instance (supports test injection via app.state.target_registry)."""
+    custom_reg = getattr(app.state, "target_registry", None)
+    if isinstance(custom_reg, TargetRegistry):
+        return custom_reg
+    return TargetRegistry()
+
+
+class TargetSubmitRequest(BaseModel):
+    """Payload to submit a target URL for authorization."""
+    target_url: str = Field(..., description="Target base URL (e.g. https://staging.example.com)")
+    authorization_basis: str = Field(
+        default=AuthorizationBasis.ADMIN_APPROVED.value,
+        description="Grounds: admin_approved, written_permission, bug_bounty_scope, domain_ownership_challenge",
+    )
+    permission_reference: str = Field(
+        default="",
+        description="Written permission reference, ticket number, or bug bounty program link",
+    )
+    allowed_paths: List[str] = Field(default_factory=list, description="Optional path prefix restrictions")
+    allowed_methods: List[str] = Field(default_factory=lambda: ["GET", "HEAD"])
+    notes: str = Field(default="", description="Operator notes")
+
+
+class TargetApproveRequest(BaseModel):
+    """Payload to approve a pending target profile."""
+    approved_by: str = Field(default="security_admin", description="Admin reviewer identifier")
+    expires_in_days: int = Field(default=30, ge=1, le=365)
+    notes: Optional[str] = None
+
+
+class TargetRevokeRequest(BaseModel):
+    """Payload to revoke authorization for a target profile."""
+    revoked_by: str = Field(default="security_admin", description="Admin identifier revoking authorization")
+    reason: str = Field(default="Authorization revoked by operator", description="Reason for revocation")
+
+
+class TargetChallengeRequest(BaseModel):
+    """Payload to verify domain ownership via challenge."""
+    challenge_type: str = Field(default="http", description="Challenge type: 'http'")
+
+
+class TargetCheckRequest(BaseModel):
+    """Payload to evaluate target authorization status."""
+    target_url: str
+
+
+def _validate_target_authorization(
+    raw_url: str,
+    target_profile: Optional[str] = None,
+) -> Tuple[str, ScopeCheckResult]:
+    """Validates target URL syntax, profile configuration, TLS rules, and ScopeGuard boundaries.
+
+    Never silently redirects or downgrades HTTPS to HTTP.
+    """
+    target_clean = (raw_url or "").strip().rstrip("/")
+    if not target_clean:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target URL must not be empty.",
+        )
+
+    # 1. Check URL syntax (must include explicit scheme and hostname)
+    parsed = urlparse(target_clean)
+    if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Invalid URL syntax: '{target_clean}'. "
+                "Please enter a full URL including scheme and host (e.g. http://localhost:3000 or https://staging.example.com)."
+            ),
+        )
+
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Scope violation: Port in '{target_clean}' is invalid or not authorized.",
+        ) from exc
+
+    # 2. Check optional target profile registry
+    profiles: Dict[str, TargetProfileConfig] = getattr(
+        app.state, "target_profiles", DEFAULT_TARGET_PROFILES
+    )
+    if target_profile:
+        prof = profiles.get(target_profile)
+        if prof is None or not prof.configured:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Scope violation: Target profile '{target_profile}' is not configured "
+                    "in the server-side target registry."
+                ),
+            )
+        if parsed.scheme.lower() == "https" and not prof.tls_cert_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Scope violation: HTTPS certificate validation failed for target profile "
+                    f"'{target_profile}' ({target_clean}). AuthScope will not downgrade HTTPS to HTTP."
+                ),
+            )
+
+    # Check if host matches any profile marked as unconfigured or failing TLS cert verification
+    for prof in profiles.values():
+        prof_parsed = urlparse(prof.base_url)
+        if prof_parsed.hostname and prof_parsed.hostname.lower() == parsed.hostname.lower():
+            if not prof.configured:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Scope violation: Target profile for '{parsed.hostname}' is not configured "
+                        "in the server-side target registry."
+                    ),
+                )
+            if parsed.scheme.lower() == "https" and not prof.tls_cert_valid:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Scope violation: HTTPS certificate validation failed for '{target_clean}'. "
+                        "AuthScope does not silently redirect HTTPS to HTTP."
+                    ),
+                )
+
+    # 3. Authoritative ScopeGuard validation
+    scope_guard = _get_active_scope_guard()
+    check_result = scope_guard.validate_request(url=target_clean, method="GET")
+    if not check_result.is_allowed:
+        reason = check_result.reason
+        if "Scheme" in reason:
+            detail_msg = (
+                f"Scope violation: Scheme '{parsed.scheme.lower()}' is not allowed for '{target_clean}'. "
+                f"{reason} (HTTPS is never silently downgraded to HTTP.)"
+            )
+        elif "Host" in reason:
+            target_reg = _get_target_registry()
+            matched_prof = target_reg.repository.get_profile_by_hostname(parsed.hostname)
+            if matched_prof:
+                if matched_prof.approval_status == TargetApprovalStatus.PENDING.value:
+                    detail_msg = (
+                        f"Scope violation: Target '{parsed.hostname}' authorization is PENDING approval. "
+                        "Please approve the target or complete domain challenge verification before starting assessment."
+                    )
+                elif matched_prof.approval_status == TargetApprovalStatus.REVOKED.value:
+                    detail_msg = (
+                        f"Scope violation: Target '{parsed.hostname}' authorization has been REVOKED: "
+                        f"{matched_prof.revocation_reason or 'No reason provided'}."
+                    )
+                elif matched_prof.approval_status == TargetApprovalStatus.EXPIRED.value:
+                    detail_msg = (
+                        f"Scope violation: Target '{parsed.hostname}' authorization has EXPIRED. "
+                        "Please request re-approval before starting assessment."
+                    )
+                elif matched_prof.approval_status == TargetApprovalStatus.REJECTED.value:
+                    detail_msg = f"Scope violation: Target '{parsed.hostname}' authorization was REJECTED."
+                else:
+                    detail_msg = f"Scope violation: Host '{parsed.hostname}' is not authorized. {reason}"
+            else:
+                detail_msg = f"Scope violation: Host '{parsed.hostname}' is not authorized. {reason}"
+        elif "Port" in reason:
+            port_val = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+            detail_msg = f"Scope violation: Port '{port_val}' is not authorized for host '{parsed.hostname}'. {reason}"
+        else:
+            detail_msg = f"Scope violation: {reason}"
+
+        logger.warning(f"Rejected out-of-scope assessment request for {target_clean}: {detail_msg}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail_msg,
+        )
+
+    return target_clean, check_result
+
 
 @app.on_event("startup")
 async def startup_recovery() -> None:
-    """Recovers orphaned running assessments from previous server executions on startup."""
-    repo = FindingRepository()
+    """Recovers orphaned running assessments and seeds default authorized targets on startup."""
+    repo = _get_repository()
     active_ids = task_manager.get_active_scan_ids()
     recovered = repo.recover_orphaned_running_sessions(active_session_ids=active_ids)
     if recovered > 0:
         logger.info(f"Startup recovery: marked {recovered} orphaned session(s) as FAILED with SERVER_RESTART")
 
-
-# Enforce request payload size limit middleware (rejects > 1MB with HTTP 413)
-app.add_middleware(RequestSizeLimitMiddleware)
+    # Seed default target profiles (e.g. localhost Juice Shop)
+    try:
+        TargetRepository().seed_default_targets()
+    except Exception as exc:
+        logger.warning(f"Failed to seed default target profiles: {exc}")
 
 
 # Enable CORS for explicit configured development origins only (never wildcard with credentials)
@@ -460,54 +1217,33 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(InvalidStateTransitionError)
-async def invalid_state_transition_handler(request: Request, exc: InvalidStateTransitionError) -> JSONResponse:
-    """Handles invalid lifecycle state transitions with HTTP 409 Conflict."""
-    logger.warning(f"Illegal state transition rejected: {exc.message}")
-    return JSONResponse(
-        status_code=status.HTTP_409_CONFLICT,
-        content={"detail": exc.message, "status_code": 409},
-    )
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Catches unhandled exceptions to prevent leaking raw tracebacks or secrets."""
-    if isinstance(exc, HTTPException):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail, "status_code": exc.status_code},
-            headers=getattr(exc, "headers", None),
-        )
-    logger.error(f"Unhandled error processing {request.method} {request.url.path}: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "An internal server error occurred.", "status_code": 500},
-    )
-
-
 class CreateAssessmentRequest(BaseModel):
     """Payload for launching a new security assessment."""
-
     target_url: str = Field(
         default="http://localhost:3000",
-        description="Target base URL to test (must be an explicitly allowlisted scope target).",
+        description="Target base URL to test (must be an explicitly allowlisted HTTP or HTTPS scope target).",
+    )
+    target_profile: Optional[str] = Field(
+        default=None,
+        description="Optional server-side target profile identifier.",
     )
     github_repo: Optional[str] = Field(
         default=None,
-        description="Optional repository URL or path for source code mapping.",
+        description="Optional repository URL or identifier for source code mapping.",
     )
     source_archive_path: Optional[str] = Field(
         default=None,
-        description="Optional archive file path for static analysis.",
+        description="Optional local directory or archive path for static source verification.",
     )
 
 
 class CreateAssessmentResponse(BaseModel):
     """Response returned when an assessment is successfully accepted."""
-
     assessment_id: str
     target_url: str
+    scheme: str = "http"
+    host: str = "localhost"
+    port: int = 3000
     status: str
     created_at: str
     message: str
@@ -515,9 +1251,11 @@ class CreateAssessmentResponse(BaseModel):
 
 class AssessmentSummaryResponse(BaseModel):
     """Response for assessment state query."""
-
     id: str
     target_url: str
+    scheme: str = "http"
+    host: str = "localhost"
+    port: int = 3000
     status: str
     started_at: str
     updated_at: Optional[str] = None
@@ -527,11 +1265,18 @@ class AssessmentSummaryResponse(BaseModel):
     endpoints_tested_count: int
     confirmed_findings_count: int
     suspicious_results_count: int
+    not_confirmed_count: int = 0
+    inconclusive_count: int = 0
+    not_tested_count: int = 0
+    no_confirmed_vulnerabilities: bool = False
+    no_confirmed_message: str = ""
     summary_text: str
     markdown_content: str
     stages: Dict[str, Any]
     events: List[Dict[str, Any]]
     findings: List[Dict[str, Any]]
+    discovered_endpoints: List[Dict[str, Any]] = Field(default_factory=list)
+    ai_provider: Dict[str, Any] = Field(default_factory=_get_ai_provider_info)
 
 
 def _format_event_message_chunk(
@@ -547,14 +1292,18 @@ def _format_event_message_chunk(
     etype = event.event_type
 
     if etype == EventType.SCOPE_VALIDATION_COMPLETED.value:
+        host = event.metadata.get("host", "localhost")
+        port = event.metadata.get("port", 3000)
+        scheme = event.metadata.get("scheme", "http")
         return (
-            "I've verified the target scope against **ScopeGuard** allowlist rules. "
-            "Target host, port, and method (`GET`) are strictly authorized for testing.\n\n"
+            f"I've verified the target scope (`{scheme}://{host}:{port}`) against **ScopeGuard** allowlist rules. "
+            "Target scheme, host, port, and method (`GET`) are strictly authorized for testing.\n\n"
         )
     elif etype == EventType.CONNECTION_COMPLETED.value:
+        code = event.metadata.get("status_code", 200)
         return (
             "Successfully connected to the target application. "
-            "The homepage is reachable and responded with HTTP 200 OK.\n\n"
+            f"The homepage is reachable and responded with HTTP {code} OK.\n\n"
         )
     elif etype == EventType.ENDPOINT_DISCOVERY_COMPLETED.value:
         discovered = event.metadata.get("endpoints_discovered", 0)
@@ -569,7 +1318,7 @@ def _format_event_message_chunk(
         if "user_a" not in auth_roles or "user_b" not in auth_roles:
             msg += (
                 "_Note: Multi-role test account tokens are unconfigured in `.env`. "
-                "Parameter-specific object comparisons on `/rest/basket/{id}` will be safely skipped "
+                "Parameter-specific object comparisons on `/rest/basket/{id}` will be safely marked as `NOT_TESTED` "
                 "to maintain zero false-positive integrity._\n\n"
             )
         else:
@@ -578,7 +1327,7 @@ def _format_event_message_chunk(
     elif etype == EventType.SUSPICIOUS_BEHAVIOR_DETECTED.value:
         finding_id = event.metadata.get("finding_id")
         if finding is None and finding_id and repo:
-            finding = repo.get_finding(str(finding_id))
+            finding = repo.get_finding(finding_id)
 
         ep = finding.target_endpoint if finding else event.metadata.get("endpoint", "")
         code = event.metadata.get("status_code", 200)
@@ -587,32 +1336,23 @@ def _format_event_message_chunk(
         actual = (
             finding.actual_behavior
             if finding and finding.actual_behavior
-            else event.metadata.get(
-                "actual_behavior",
-                f"Unauthenticated request to `{ep}` returned HTTP {code} with application data.",
-            )
+            else event.metadata.get("actual_behavior", f"Unauthenticated request to `{ep}` returned HTTP {code} with application data.")
         )
         expected = (
             finding.expected_behavior
             if finding and finding.expected_behavior
-            else event.metadata.get(
-                "expected_behavior",
-                f"Access to `{ep}` should require valid authentication and authorization.",
-            )
+            else event.metadata.get("expected_behavior", f"Access to `{ep}` should require valid authentication and authorization.")
         )
         title = finding.title if finding else event.metadata.get("title", f"Suspicious Access Pattern: `{ep}`")
         sha = (
             finding.evidence.evidence_sha256[:16]
             if finding and finding.evidence and finding.evidence.evidence_sha256
-            else str(event.metadata.get("sha256", ""))[:16]
+            else event.metadata.get("sha256", "")[:16]
         )
         rem = (
             finding.remediation_guidance
             if finding and finding.remediation_guidance
-            else event.metadata.get(
-                "remediation",
-                "// Enforce authentication and role verification middleware\napp.use(verifyAuthSession);",
-            )
+            else event.metadata.get("remediation", "// Enforce authentication and role verification middleware\napp.use(verifyAuthSession);")
         )
 
         sha_text = f" (Evidence SHA-256: `{sha}...`)" if sha else ""
@@ -624,13 +1364,13 @@ def _format_event_message_chunk(
             f"- **Expected Behavior:** {expected}\n"
             f"- **Why Flagged as Suspicious:** Comparative multi-role session baselines were unverified or incomplete. "
             f"Rather than speculating or asserting a confirmed bypass, this was classified as `{verdict}` pending operator verification.\n"
-            f"- **Precautionary Mitigation:**\n"
+            f"- **Precautionary Mitigation (Proposed Fix):**\n"
             f"```javascript\n{rem}\n```\n\n"
         )
     elif etype == EventType.FINDING_CONFIRMED.value:
         finding_id = event.metadata.get("finding_id")
         if finding is None and finding_id and repo:
-            finding = repo.get_finding(str(finding_id))
+            finding = repo.get_finding(finding_id)
 
         ep = finding.target_endpoint if finding else event.metadata.get("endpoint", "")
         sev = (
@@ -641,13 +1381,9 @@ def _format_event_message_chunk(
         sha = (
             finding.evidence.evidence_sha256[:16]
             if finding and finding.evidence and finding.evidence.evidence_sha256
-            else str(event.metadata.get("sha256", ""))[:16]
+            else event.metadata.get("sha256", "")[:16]
         )
-        title = (
-            finding.title
-            if finding
-            else event.metadata.get("title", "Confirmed Broken Object Level Authorization (IDOR)")
-        )
+        title = finding.title if finding else event.metadata.get("title", "Confirmed Broken Object Level Authorization (IDOR)")
         category = (
             (finding.vulnerability_category or finding.vulnerability_type)
             if finding
@@ -656,18 +1392,12 @@ def _format_event_message_chunk(
         actual = (
             finding.actual_behavior
             if finding and finding.actual_behavior
-            else event.metadata.get(
-                "actual_behavior",
-                "Authorized test persona was able to access a private resource belonging to another tenant.",
-            )
+            else event.metadata.get("actual_behavior", "Authorized test persona was able to access a private resource belonging to another tenant.")
         )
         expected = (
             finding.expected_behavior
             if finding and finding.expected_behavior
-            else event.metadata.get(
-                "expected_behavior",
-                "Cross-account access should be strictly rejected with HTTP 403 Forbidden.",
-            )
+            else event.metadata.get("expected_behavior", "Cross-account access should be strictly rejected with HTTP 403 Forbidden.")
         )
         impact = (
             finding.impact_explanation or finding.description
@@ -677,10 +1407,7 @@ def _format_event_message_chunk(
         rem = (
             finding.remediation_guidance or finding.remediation_recommendation
             if finding
-            else event.metadata.get(
-                "remediation",
-                "// Verify session identity matches resource owner\nif (req.user.id !== resource.UserId) return res.status(403);",
-            )
+            else event.metadata.get("remediation", "// Verify session identity matches resource owner\nif (req.user.id !== resource.UserId) return res.status(403);")
         )
         verdict = finding.access_verdict if finding else "CONFIRMED_UNAUTHORIZED_ACCESS"
         val_status = finding.validation_status if finding else "CONFIRMED"
@@ -694,7 +1421,7 @@ def _format_event_message_chunk(
             f"- **Observed Behavior:** {actual}\n"
             f"- **Expected Security Control:** {expected}\n"
             f"- **Impact Assessment:** {impact}\n"
-            f"- **Recommended Technical Fix:**\n"
+            f"- **Recommended Technical Fix (Proposed Fix):**\n"
             f"```javascript\n{rem}\n```\n\n"
         )
     elif etype == EventType.ASSESSMENT_COMPLETED.value:
@@ -702,11 +1429,12 @@ def _format_event_message_chunk(
         tested = event.metadata.get("endpoints_tested", 0)
         conf = event.metadata.get("confirmed_findings", 0)
         susp = event.metadata.get("suspicious_results", 0)
+        no_conf_line = "\n- **Result:** `No confirmed vulnerabilities found`\n" if conf == 0 else ""
         return (
             f"### 🏁 Assessment Complete\n\n"
             f"The security testing agent evaluated **{tested}** of **{disc}** discovered endpoints.\n"
             f"- **Confirmed vulnerabilities:** `{conf}`\n"
-            f"- **Suspicious results:** `{susp}`\n\n"
+            f"- **Suspicious results:** `{susp}`{no_conf_line}\n"
             "All findings and cryptographic evidence artifacts are persisted in the local SQLite database."
         )
     elif etype == EventType.ASSESSMENT_FAILED.value:
@@ -720,58 +1448,31 @@ def _format_event_message_chunk(
 def _map_event_to_agent_sse(
     event: AssessmentEvent,
     assessment_id: str,
+    agent: Optional[Any] = None,
     repo: Optional[FindingRepository] = None,
 ) -> List[Tuple[str, Dict[str, Any]]]:
-    """Maps unified pipeline AssessmentEvents to the 15 structured SSE event types.
-
-    Supports all 15 required SSE event types:
-    - assessment_started
-    - agent_thinking
-    - agent_plan
-    - tool_started
-    - tool_completed
-    - tool_failed
-    - endpoint_discovered
-    - finding_hypothesis
-    - finding_discovered
-    - evidence_validated
-    - source_location_found
-    - explanation_generated
-    - assessment_completed
-    - assessment_failed
-    - assessment_cancelled
-    """
+    """Maps internal assessment events to all 15 structured SSE agent events."""
     etype = event.event_type
     results: List[Tuple[str, Dict[str, Any]]] = []
     meta = event.metadata or {}
 
     if etype == EventType.ASSESSMENT_STARTED.value:
-        target_url = meta.get("target_url", "http://localhost:3000")
-        results.append(
-            (
-                "assessment_started",
-                {
-                    "type": "assessment_started",
-                    "message": event.message or f"Assessment initialized for {target_url}",
-                    "assessment_id": assessment_id,
-                    "target_url": target_url,
-                },
-            )
-        )
+        target_url = meta.get("target_url", "")
+        results.append(("assessment_started", {
+            "type": "assessment_started",
+            "message": event.message or f"Assessment initialized for {target_url}",
+            "assessment_id": assessment_id,
+            "target_url": target_url,
+        }))
         thinking_msg = meta.get(
             "thinking_message",
-            f"Formulating authorization testing strategy for {target_url}.",
+            f"Formulating authorization testing strategy for {target_url}." if target_url else "Formulating authorization testing strategy.",
         )
-        results.append(
-            (
-                "agent_thinking",
-                {
-                    "type": "agent_thinking",
-                    "message": thinking_msg,
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        results.append(("agent_thinking", {
+            "type": "agent_thinking",
+            "message": thinking_msg,
+            "assessment_id": assessment_id,
+        }))
         plan_steps = meta.get(
             "plan_steps",
             [
@@ -785,115 +1486,92 @@ def _map_event_to_agent_sse(
             ],
         )
         plan_summary = meta.get("plan_summary", "7-stage authorization evaluation plan initialized.")
-        results.append(
-            (
-                "agent_plan",
-                {
-                    "type": "agent_plan",
-                    "message": plan_summary,
-                    "steps": plan_steps,
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        results.append(("agent_plan", {
+            "type": "agent_plan",
+            "message": plan_summary,
+            "steps": plan_steps,
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.SCOPE_VALIDATION_STARTED.value:
-        results.append(
-            (
-                "tool_started",
-                {
-                    "type": "tool_started",
-                    "tool": "check_scope",
-                    "message": "Validating target against ScopeGuard allowlist",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        results.append(("tool_started", {
+            "type": "tool_started",
+            "tool": "check_scope",
+            "message": "Validating target against ScopeGuard allowlist",
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.SCOPE_VALIDATION_COMPLETED.value:
-        results.append(
-            (
-                "tool_completed",
-                {
-                    "type": "tool_completed",
-                    "tool": "check_scope",
-                    "message": "Target verified within authorized scope (localhost:3000)",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        host = meta.get("host", "localhost")
+        port = meta.get("port", 3000)
+        scheme = meta.get("scheme", "http")
+        results.append(("tool_completed", {
+            "type": "tool_completed",
+            "tool": "check_scope",
+            "message": f"Target verified within authorized scope ({scheme}://{host}:{port})",
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.CONNECTION_COMPLETED.value:
-        results.append(
-            (
-                "agent_thinking",
-                {
-                    "type": "agent_thinking",
-                    "message": "Target application connection verified; mapping attack surface routes",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
-        results.append(
-            (
-                "tool_started",
-                {
-                    "type": "tool_started",
-                    "tool": "discover_routes",
-                    "message": "Discovering application endpoints and parameterized routes",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        results.append(("agent_thinking", {
+            "type": "agent_thinking",
+            "message": "Target application connection verified; mapping attack surface routes",
+            "assessment_id": assessment_id,
+        }))
+        results.append(("tool_started", {
+            "type": "tool_started",
+            "tool": "discover_routes",
+            "message": "Discovering application endpoints and parameterized routes",
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.ENDPOINT_DISCOVERED.value:
-        results.append(
-            (
-                "endpoint_discovered",
-                {
-                    "type": "endpoint_discovered",
-                    "endpoint": meta.get("path") or meta.get("endpoint") or event.message,
-                    "method": meta.get("method", "GET"),
-                    "category": meta.get("category", "API"),
-                    "message": event.message,
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        path = meta.get("path") or meta.get("endpoint") or event.message
+        method = meta.get("method", "GET")
+        cat = meta.get("category", "API")
+        results.append(("endpoint_discovered", {
+            "type": "endpoint_discovered",
+            "endpoint": path,
+            "path": path,
+            "method": method,
+            "category": cat,
+            "message": f"Discovered endpoint: {method} {path} [{cat}]",
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.ENDPOINT_DISCOVERY_COMPLETED.value:
         count = meta.get("endpoints_discovered", 0)
-        results.append(
-            (
-                "tool_completed",
-                {
-                    "type": "tool_completed",
-                    "tool": "discover_routes",
-                    "message": f"Discovered {count} attack surface routes",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        results.append(("tool_completed", {
+            "type": "tool_completed",
+            "tool": "discover_routes",
+            "message": f"Discovered {count} attack surface routes",
+            "assessment_id": assessment_id,
+        }))
+    elif etype == EventType.SESSION_VALIDATION_STARTED.value:
+        results.append(("tool_started", {
+            "type": "tool_started",
+            "tool": "verify_sessions",
+            "message": "Verifying configured authentication sessions across test personas",
+            "assessment_id": assessment_id,
+        }))
+    elif etype == EventType.SESSION_VALIDATION_COMPLETED.value:
+        roles = meta.get("authenticated_roles", [])
+        results.append(("tool_completed", {
+            "type": "tool_completed",
+            "tool": "verify_sessions",
+            "message": f"Session verification complete (authenticated roles: {roles or ['anonymous']})",
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.AUTHORIZATION_TEST_STARTED.value:
-        results.append(
-            (
-                "tool_started",
-                {
-                    "type": "tool_started",
-                    "tool": "compare_access",
-                    "message": "Executing authorization differential testing across discovered endpoints",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        results.append(("tool_started", {
+            "type": "tool_started",
+            "tool": "compare_access",
+            "message": "Executing authorization differential testing across discovered endpoints",
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.AUTHORIZATION_TEST_COMPLETED.value:
         tested = meta.get("tested_count", 0)
-        results.append(
-            (
-                "tool_completed",
-                {
-                    "type": "tool_completed",
-                    "tool": "compare_access",
-                    "message": f"Completed authorization differential analysis across {tested} endpoints",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        results.append(("tool_completed", {
+            "type": "tool_completed",
+            "tool": "compare_access",
+            "message": f"Completed authorization differential analysis across {tested} endpoints",
+            "assessment_id": assessment_id,
+        }))
     elif etype in (EventType.SUSPICIOUS_BEHAVIOR_DETECTED.value, EventType.FINDING_CONFIRMED.value):
         is_confirmed = etype == EventType.FINDING_CONFIRMED.value
         finding_id = meta.get("finding_id")
@@ -908,25 +1586,21 @@ def _map_event_to_agent_sse(
         cat = (
             (finding.vulnerability_category or finding.vulnerability_type)
             if finding
-            else str(meta.get("vulnerability_candidate", "BOLA_IDOR" if is_confirmed else "BFLA"))
+            else str(meta.get("vulnerability_candidate") or meta.get("category", "BOLA_IDOR" if is_confirmed else "BFLA"))
         )
         val_status = "CONFIRMED" if is_confirmed else "SUSPICIOUS"
 
-        # 1. Emit finding_hypothesis first
-        results.append(
-            (
-                "finding_hypothesis",
-                {
-                    "type": "finding_hypothesis",
-                    "endpoint": ep,
-                    "category": cat,
-                    "severity": sev,
-                    "status": val_status,
-                    "message": f"Hypothesis: potential {cat} authorization discrepancy on {ep}",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        # 1. Emit finding_hypothesis
+        results.append(("finding_hypothesis", {
+            "type": "finding_hypothesis",
+            "endpoint": ep,
+            "category": cat,
+            "severity": sev,
+            "status": val_status,
+            "validation_status": val_status,
+            "message": f"Hypothesis: potential {cat} authorization discrepancy on {ep}",
+            "assessment_id": assessment_id,
+        }))
 
         # 2. If confirmed, emit evidence_validated BEFORE finding_discovered
         if is_confirmed:
@@ -935,70 +1609,75 @@ def _map_event_to_agent_sse(
                 if (finding and finding.evidence and finding.evidence.evidence_sha256)
                 else str(meta.get("sha256", ""))
             )
-            results.append(
-                (
-                    "evidence_validated",
-                    {
-                        "type": "evidence_validated",
-                        "endpoint": ep,
-                        "finding_id": finding.id if finding else finding_id,
-                        "validation_status": "CONFIRMED",
-                        "evidence_sha256": sha,
-                        "message": f"Cryptographic evidence validated for {ep} (SHA-256)",
-                        "assessment_id": assessment_id,
-                    },
-                )
-            )
+            results.append(("evidence_validated", {
+                "type": "evidence_validated",
+                "endpoint": ep,
+                "finding_id": finding.id if finding else finding_id,
+                "validation_status": "CONFIRMED",
+                "evidence_sha256": sha,
+                "message": f"Cryptographic evidence validated for {ep} (SHA-256)",
+                "assessment_id": assessment_id,
+            }))
 
         # 3. Emit finding_discovered
-        results.append(
-            (
-                "finding_discovered",
-                {
-                    "type": "finding_discovered",
-                    "finding_id": finding.id if finding else finding_id,
-                    "endpoint": ep,
-                    "category": cat,
-                    "severity": sev,
-                    "status": val_status,
-                    "validation_status": val_status,
-                    "message": f"Authorization discrepancy ({val_status}) identified on {ep}",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        results.append(("finding_discovered", {
+            "type": "finding_discovered",
+            "finding_id": finding.id if finding else finding_id,
+            "endpoint": ep,
+            "category": cat,
+            "severity": sev,
+            "status": val_status,
+            "validation_status": val_status,
+            "message": (
+                f"Confirmed vulnerability identified on {ep}"
+                if is_confirmed
+                else f"Authorization discrepancy ({val_status}) identified on {ep}"
+            ),
+            "assessment_id": assessment_id,
+        }))
 
         # 4. Emit source_location_found
         src_info = meta.get("source_info") or {}
-        src_file = src_info.get("source_file") or (
-            finding.technical_details.get("source_file") if finding else None
+        src_loc = (
+            finding.technical_details.get("source_location")
+            if (finding and isinstance(finding.technical_details, dict))
+            else meta.get("source_location")
+        ) or {}
+        src_file = (
+            src_info.get("source_file")
+            or (src_loc.get("file_path") if isinstance(src_loc, dict) else None)
+            or (finding.technical_details.get("source_file") if (finding and isinstance(finding.technical_details, dict)) else None)
         )
-        line_nums = src_info.get("line_numbers") or (
-            finding.technical_details.get("line_numbers") if finding else None
+        line_nums = (
+            src_info.get("line_numbers")
+            or (f"{src_loc.get('start_line')}-{src_loc.get('end_line')}" if (isinstance(src_loc, dict) and src_loc.get("start_line")) else None)
+            or (finding.technical_details.get("line_numbers") if (finding and isinstance(finding.technical_details, dict)) else None)
         )
-        func_name = src_info.get("function_name") or (
-            finding.technical_details.get("function_name") if finding else None
+        func_name = (
+            src_info.get("function_name")
+            or (src_loc.get("function_name") if isinstance(src_loc, dict) else None)
+            or (finding.technical_details.get("function_name") if (finding and isinstance(finding.technical_details, dict)) else None)
         )
-        black_box = not bool(src_file)
-        results.append(
-            (
-                "source_location_found",
-                {
-                    "type": "source_location_found",
-                    "endpoint": ep,
-                    "source_file": src_file,
-                    "function_name": func_name,
-                    "line_numbers": line_nums,
-                    "black_box_only": black_box,
-                    "message": (
-                        f"Mapped {ep} to {src_file}:{line_nums}"
-                        if src_file
-                        else f"Black-box assessment only for {ep} — no source code repository provided."
-                    ),
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        black_box = False if (src_info.get("black_box_only") is False or (isinstance(src_loc, dict) and src_loc.get("verified") is True)) else not bool(src_file)
+
+        results.append(("source_location_found", {
+            "type": "source_location_found",
+            "endpoint": ep,
+            "source_file": src_file,
+            "file_path": src_file,
+            "function_name": func_name,
+            "line_numbers": line_nums,
+            "start_line": src_loc.get("start_line") if isinstance(src_loc, dict) else None,
+            "end_line": src_loc.get("end_line") if isinstance(src_loc, dict) else None,
+            "black_box_only": black_box,
+            "verified": not black_box,
+            "message": (
+                f"Mapped {ep} to {src_file}:{line_nums}"
+                if src_file
+                else f"Black-box assessment only for {ep} — no source code repository provided."
+            ),
+            "assessment_id": assessment_id,
+        }))
 
         # 5. Emit explanation_generated
         explanation_text = (
@@ -1011,145 +1690,285 @@ def _map_event_to_agent_sse(
             or (finding.remediation_guidance or finding.remediation_recommendation if finding else None)
             or ""
         )
-        results.append(
-            (
-                "explanation_generated",
-                {
-                    "type": "explanation_generated",
-                    "endpoint": ep,
-                    "category": cat,
-                    "explanation": explanation_text,
-                    "remediation_code": remediation_code,
-                    "message": f"Generated security explanation and remediation for {ep}",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+        if not explanation_text and agent is not None and hasattr(agent, "generate_explanation"):
+            try:
+                expl_data = agent.generate_explanation(
+                    endpoint=ep,
+                    vulnerability_category=cat,
+                    validation_status=val_status,
+                    evidence_summary=event.message,
+                )
+                explanation_text = expl_data.get("explanation", explanation_text)
+                remediation_code = expl_data.get("remediation_code", remediation_code)
+            except Exception:
+                pass
+
+        results.append(("explanation_generated", {
+            "type": "explanation_generated",
+            "endpoint": ep,
+            "category": cat,
+            "validation_status": val_status,
+            "explanation": explanation_text or f"Security analysis for {ep}",
+            "remediation_code": remediation_code,
+            "message": f"Generated security explanation and remediation for {ep}",
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.EVIDENCE_VALIDATION_COMPLETED.value:
-        results.append(
-            (
-                "evidence_validated",
-                {
-                    "type": "evidence_validated",
-                    "message": "Cryptographic evidence artifacts signed and verified (SHA-256)",
-                    "assessment_id": assessment_id,
-                    "confirmed_count": meta.get("confirmed_count", 0),
-                    "suspicious_count": meta.get("suspicious_count", 0),
-                },
-            )
-        )
+        results.append(("evidence_validated", {
+            "type": "evidence_validated",
+            "message": "Cryptographic evidence artifacts signed and verified (SHA-256)",
+            "assessment_id": assessment_id,
+            "confirmed_count": meta.get("confirmed_count", 0),
+            "suspicious_count": meta.get("suspicious_count", 0),
+        }))
     elif etype == EventType.ASSESSMENT_COMPLETED.value:
-        results.append(
-            (
-                "assessment_completed",
-                {
-                    "type": "assessment_completed",
-                    "message": event.message or "Assessment concluded successfully",
-                    "assessment_id": assessment_id,
-                    "confirmed_findings": meta.get("confirmed_findings", 0),
-                    "suspicious_results": meta.get("suspicious_results", 0),
-                },
-            )
-        )
+        results.append(("assessment_completed", {
+            "type": "assessment_completed",
+            "message": event.message or "Assessment concluded successfully",
+            "assessment_id": assessment_id,
+            "confirmed_findings": meta.get("confirmed_findings", 0),
+            "suspicious_results": meta.get("suspicious_results", 0),
+        }))
     elif etype == EventType.ASSESSMENT_FAILED.value:
         if event.stage in (
-            AssessmentStage.SCOPE_VALIDATION.value,
             AssessmentStage.TARGET_CONNECTION.value,
-            AssessmentStage.ENDPOINT_DISCOVERY.value,
+            AssessmentStage.SCOPE_VALIDATION.value,
             AssessmentStage.AUTHORIZATION_TESTING.value,
+            AssessmentStage.ENDPOINT_DISCOVERY.value,
         ):
-            results.append(
-                (
-                    "tool_failed",
-                    {
-                        "type": "tool_failed",
-                        "tool": meta.get("tool", event.stage),
-                        "message": event.message,
-                        "assessment_id": assessment_id,
-                    },
-                )
-            )
-        results.append(
-            (
-                "assessment_failed",
-                {
-                    "type": "assessment_failed",
-                    "message": event.message,
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
+            results.append(("tool_failed", {
+                "type": "tool_failed",
+                "tool": meta.get("tool", event.stage),
+                "error": event.message,
+                "message": f"Tool execution halted in {event.stage}: {event.message}",
+                "assessment_id": assessment_id,
+            }))
+        results.append(("assessment_failed", {
+            "type": "assessment_failed",
+            "message": event.message,
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.ASSESSMENT_CANCELLED.value:
-        results.append(
-            (
-                "assessment_cancelled",
-                {
-                    "type": "assessment_cancelled",
-                    "message": event.message or "Assessment cancelled by operator.",
-                    "assessment_id": assessment_id,
-                },
-            )
-        )
-    elif etype in ALL_REQUIRED_SSE_EVENTS:
-        # Direct pass-through for structured events emitted directly by mock or custom agents
-        payload = dict(meta)
-        payload.setdefault("type", etype)
-        payload.setdefault("message", event.message)
-        payload.setdefault("assessment_id", assessment_id)
-        results.append((etype, payload))
+        results.append(("assessment_cancelled", {
+            "type": "assessment_cancelled",
+            "message": event.message or "Assessment cancelled by operator.",
+            "assessment_id": assessment_id,
+        }))
+    elif etype in {
+        "agent_thinking",
+        "agent_plan",
+        "tool_started",
+        "tool_completed",
+        "tool_failed",
+        "endpoint_discovered",
+        "finding_hypothesis",
+        "finding_discovered",
+        "evidence_validated",
+        "source_location_found",
+        "explanation_generated",
+        "assessment_completed",
+        "assessment_failed",
+        "assessment_cancelled",
+    }:
+        results.append((etype, {
+            "type": etype,
+            "message": event.message,
+            "assessment_id": assessment_id,
+            **meta,
+        }))
 
     return results
 
 
+# ==============================================================================
+# Dynamic Server-Side Authorized Target Registry Endpoints
+# ==============================================================================
+
+@app.get("/api/targets")
+async def list_targets(
+    status_filter: Optional[str] = Query(None, description="Optional status filter: PENDING, APPROVED, etc."),
+    limit: int = Query(50, ge=1, le=200),
+) -> Dict[str, Any]:
+    """Lists registered target authorization profiles."""
+    reg = _get_target_registry()
+    profiles = reg.repository.list_target_profiles(status_filter=status_filter, limit=limit)
+    return {
+        "count": len(profiles),
+        "targets": [p.model_dump(mode="json") for p in profiles],
+    }
+
+
+@app.post("/api/targets", status_code=status.HTTP_201_CREATED)
+async def submit_target(req: TargetSubmitRequest) -> Dict[str, Any]:
+    """Submits a target website for authorization and approval."""
+    reg = _get_target_registry()
+    payload = TargetSubmissionPayload(
+        target_url=req.target_url,
+        authorization_basis=req.authorization_basis,
+        permission_reference=req.permission_reference,
+        allowed_paths=req.allowed_paths,
+        allowed_methods=req.allowed_methods,
+        notes=req.notes,
+    )
+    ok, msg, profile = reg.submit_target_for_authorization(payload)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=msg,
+        )
+    return {
+        "status": "ok",
+        "message": msg,
+        "target": profile.model_dump(mode="json") if profile else None,
+    }
+
+
+@app.get("/api/targets/{target_id}")
+async def get_target(target_id: str) -> Dict[str, Any]:
+    """Retrieves a specific target profile by ID."""
+    reg = _get_target_registry()
+    profile = reg.repository.get_target_profile(target_id)
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Target profile '{target_id}' not found.",
+        )
+    return profile.model_dump(mode="json")
+
+
+@app.post("/api/targets/{target_id}/approve")
+async def approve_target(target_id: str, req: TargetApproveRequest) -> Dict[str, Any]:
+    """Approves a pending target profile with administrator credentials."""
+    reg = _get_target_registry()
+    ok, msg, profile = reg.approve_target(
+        profile_id=target_id,
+        approved_by=req.approved_by,
+        expires_in_days=req.expires_in_days,
+        notes=req.notes,
+    )
+    if not ok:
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+    return {
+        "status": "APPROVED",
+        "message": msg,
+        "target": profile.model_dump(mode="json") if profile else None,
+    }
+
+
+@app.post("/api/targets/{target_id}/revoke")
+async def revoke_target(target_id: str, req: TargetRevokeRequest) -> Dict[str, Any]:
+    """Revokes authorization for an approved target profile."""
+    reg = _get_target_registry()
+    ok, msg, profile = reg.revoke_target(
+        profile_id=target_id,
+        revoked_by=req.revoked_by,
+        reason=req.reason,
+    )
+    if not ok:
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+    return {
+        "status": "REVOKED",
+        "message": msg,
+        "target": profile.model_dump(mode="json") if profile else None,
+    }
+
+
+@app.post("/api/targets/{target_id}/verify-challenge")
+async def verify_target_challenge(target_id: str, req: TargetChallengeRequest) -> Dict[str, Any]:
+    """Verifies domain ownership challenge for a pending target."""
+    reg = _get_target_registry()
+    ok, msg, profile = reg.verify_domain_challenge(
+        profile_id=target_id,
+        challenge_type=req.challenge_type,
+    )
+    if not ok:
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
+        return {
+            "success": False,
+            "message": msg,
+            "target": profile.model_dump(mode="json") if profile else None,
+        }
+    return {
+        "success": True,
+        "message": msg,
+        "target": profile.model_dump(mode="json") if profile else None,
+    }
+
+
+@app.post("/api/targets/check")
+async def check_target_status(req: TargetCheckRequest) -> Dict[str, Any]:
+    """Checks whether a target URL is currently authorized to be assessed."""
+    raw_url = (req.target_url or "").strip()
+    if not raw_url:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_url is required.")
+
+    reg = _get_target_registry()
+    parsed = urlparse(raw_url)
+    hostname = (parsed.hostname or "").lower()
+
+    profile = reg.repository.get_profile_by_hostname(hostname) if hostname else None
+    scope_guard = _get_active_scope_guard()
+    check_result = scope_guard.validate_request(raw_url, method="GET")
+
+    is_authorized = check_result.is_allowed
+    status_label = "UNREGISTERED"
+    if profile:
+        status_label = profile.approval_status
+    elif is_authorized:
+        status_label = "APPROVED"
+
+    return {
+        "target_url": raw_url,
+        "hostname": hostname,
+        "is_authorized": is_authorized,
+        "status": status_label,
+        "reason": check_result.reason,
+        "profile": profile.model_dump(mode="json") if profile else None,
+    }
+
+
 @app.get("/api/health")
 def health_check() -> Dict[str, Any]:
-    """Health check endpoint."""
+    """Health check endpoint exposing server scope and verified AI provider status."""
+    scope_guard = _get_active_scope_guard()
     return {
         "status": "healthy",
         "service": "AuthScope API",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "allowed_target": "http://localhost:3000",
+        "allowed_target": settings.target_base_url,
+        "allowed_hosts": sorted(scope_guard.allowed_hosts),
+        "allowed_ports": sorted(scope_guard.allowed_ports),
+        "allowed_schemes": sorted(scope_guard.allowed_schemes),
+        "ai_provider": _get_ai_provider_info(),
     }
 
 
 @app.post("/api/assessments", response_model=CreateAssessmentResponse, status_code=status.HTTP_201_CREATED)
-async def create_assessment(req: CreateAssessmentRequest, request: Request) -> CreateAssessmentResponse:
+async def create_assessment(req: CreateAssessmentRequest) -> CreateAssessmentResponse:
     """Validates the target URL with ScopeGuard, creates session, and launches background task."""
-    # 1. Rate limiter check per client IP
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    is_allowed, remaining, retry_after = assessment_creation_limiter.is_allowed(client_ip)
-    if not is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
-            headers={"Retry-After": str(int(retry_after))},
-        )
+    target_clean, check_result = _validate_target_authorization(
+        raw_url=req.target_url,
+        target_profile=req.target_profile,
+    )
 
-    # 2. Strict URL structure and ScopeGuard validation
-    target_clean, check_result = validate_target_url(req.target_url)
-    if not check_result.is_allowed:
-        logger.warning(f"Rejected out-of-scope assessment request for {target_clean}: {check_result.reason}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Scope violation: {check_result.reason}",
-        )
+    scheme = check_result.normalized_scheme or "http"
+    host = check_result.normalized_host or "localhost"
+    port = check_result.normalized_port or (443 if scheme == "https" else 80)
 
-    repo = FindingRepository()
+    # Resolve target profile if dynamic registry matched or registered
+    target_reg = _get_target_registry()
+    matched_profile: Optional[TargetProfileRecord] = None
+    if check_result.matched_profile_id:
+        matched_profile = target_reg.repository.get_target_profile(check_result.matched_profile_id)
+    if matched_profile is None and host:
+        matched_profile = target_reg.repository.get_profile_by_hostname(host)
 
-    # 3. Prevent duplicate active scans on identical target URL
-    for active_id in task_manager.get_active_scan_ids():
-        existing_sess = repo.get_scan_session(active_id)
-        if existing_sess and existing_sess.target_url == target_clean and is_active_state(existing_sess.status):
-            logger.info(f"Returning existing active assessment {active_id} for target {target_clean}")
-            return CreateAssessmentResponse(
-                assessment_id=existing_sess.id,
-                target_url=existing_sess.target_url,
-                status=existing_sess.status,
-                created_at=existing_sess.started_at.isoformat(),
-                message="Assessment already running for this target. Connect to SSE stream to observe.",
-            )
-
-    # 4. Initialize ScanSessionRecord with PENDING state
+    repo = _get_repository()
     scan_id = f"scan_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     stages = AssessmentEngine._init_stages()
     session = ScanSessionRecord(
@@ -1159,13 +1978,16 @@ async def create_assessment(req: CreateAssessmentRequest, request: Request) -> C
         started_at=datetime.now(timezone.utc),
         stages=stages,
         config={
+            "target_profile": req.target_profile or (matched_profile.id if matched_profile else None),
             "github_repo": req.github_repo,
             "source_archive_path": req.source_archive_path,
+            "scheme": scheme,
+            "host": host,
+            "port": port,
         },
     )
     repo.save_scan_session(session)
 
-    # 5. Create cancellation token and launch managed background execution task
     token = CancellationToken()
     active_tokens[scan_id] = token
     task_manager.start_assessment_task(
@@ -1173,14 +1995,18 @@ async def create_assessment(req: CreateAssessmentRequest, request: Request) -> C
         target_url=target_clean,
         token=token,
         repo=repo,
-        github_repo=req.github_repo,
         source_archive_path=req.source_archive_path,
+        github_repo=req.github_repo,
+        target_profile=matched_profile,
     )
 
     logger.info(f"Initialized assessment session {scan_id} for target {target_clean}")
     return CreateAssessmentResponse(
         assessment_id=scan_id,
         target_url=target_clean,
+        scheme=scheme,
+        host=host,
+        port=port,
         status="PENDING",
         created_at=session.started_at.isoformat(),
         message="Assessment accepted and running in background. Connect to SSE stream to observe.",
@@ -1190,11 +2016,11 @@ async def create_assessment(req: CreateAssessmentRequest, request: Request) -> C
 @app.get("/api/assessments/{assessment_id}/stream")
 async def stream_assessment(
     assessment_id: str,
-    request: Request = None,  # type: ignore[assignment]
+    request: Request = None,
     last_event_id: Optional[str] = Query(default=None),
 ) -> StreamingResponse:
-    """Server-Sent Events (SSE) endpoint streaming real operational events, thoughts, plans, and findings."""
-    repo = FindingRepository()
+    """Server-Sent Events (SSE) endpoint streaming real operational events, thoughts, plans, and markdown."""
+    repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
         raise HTTPException(
@@ -1202,7 +2028,6 @@ async def stream_assessment(
             detail=f"Assessment {assessment_id} not found.",
         )
 
-    # Determine cursor for incremental replay (Last-Event-ID header or query param)
     cursor_str = (request.headers.get("last-event-id") if request else None) or last_event_id
     after_id: Optional[int] = None
     if cursor_str:
@@ -1212,98 +2037,88 @@ async def stream_assessment(
         except ValueError:
             pass
 
+    memory = AssessmentMemory(assessment_id=session.id, target_url=session.target_url, repository=repo)
+    scope_guard = _get_active_scope_guard()
+    executor = RequestExecutor(scope_guard=scope_guard)
+    tools = ToolRegistry(scope_guard=scope_guard, executor=executor, memory=memory)
+    agent = GeminiAgent(tool_registry=tools, memory=memory, scope_guard=scope_guard)
+    gemini_brain = GeminiAuthScopeAgent(
+        tool_executor=tools,
+        memory_provider=memory,
+        scope_guard=scope_guard,
+        executor=executor,
+    )
+
     async def sse_generator() -> AsyncGenerator[str, None]:
         last_sent_id = after_id or 0
-        # A cursor means this is a reconnect; do not replay the synthetic startup plan.
-        emitted_initial_started = after_id is not None
-        last_heartbeat = asyncio.get_running_loop().time()
 
-        # Subscribe to live queue BEFORE replaying stored events so zero events are missed
+        # Emit initial AI Agent plan events on fresh stream connection (when not resuming from cursor)
+        if after_id is None:
+            yield (
+                f"event: assessment_started\n"
+                f"data: {json.dumps({'type': 'assessment_started', 'message': f'Assessment initialized for {session.target_url}', 'assessment_id': assessment_id, 'target_url': session.target_url, 'ai_provider': gemini_brain.get_status()})}\n\n"
+            )
+            yield (
+                f"event: agent_thinking\n"
+                f"data: {json.dumps({'type': 'agent_thinking', 'message': f'Formulating authorization testing strategy for {session.target_url}.', 'assessment_id': assessment_id})}\n\n"
+            )
+            plan_res = agent.plan_assessment(session.target_url)
+            yield (
+                f"event: agent_plan\n"
+                f"data: {json.dumps({'type': 'agent_plan', 'message': plan_res['plan_summary'], 'steps': plan_res['steps'], 'assessment_id': assessment_id})}\n\n"
+            )
+
+        # 1. Replay stored events from repository (deduplicated by ID)
+        stored_events = repo.list_events(assessment_id, after_id=after_id)
+        for ev in stored_events:
+            ev_id = ev.id or 0
+            if ev_id > last_sent_id:
+                last_sent_id = ev_id
+
+            yield f"id: {ev_id}\nevent: activity\ndata: {ev.model_dump_json()}\n\n"
+            msg_chunk = _format_event_message_chunk(ev, repo=repo)
+            if msg_chunk:
+                yield f"id: msg_{ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
+
+            agent_events = _map_event_to_agent_sse(ev, assessment_id, agent, repo=repo)
+            for event_type, payload in agent_events:
+                if event_type == "assessment_started" and after_id is None:
+                    continue
+                yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+        # 2. Check if the assessment is already completed or cancelled
+        current_session = repo.get_scan_session(assessment_id) or session
+        is_active = task_manager.is_running(assessment_id)
+
+        if not is_active and current_session.status in ("COMPLETED", "FAILED", "CANCELLED"):
+            done_payload = _build_done_payload(current_session, repo, session.target_url)
+            yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+            return
+
+        # Ensure active task is running in task_manager
+        if not is_active and current_session.status in ("PENDING", "RUNNING"):
+            token = active_tokens.get(assessment_id) or CancellationToken()
+            active_tokens[assessment_id] = token
+            cfg = current_session.config or {}
+            task_manager.start_assessment_task(
+                scan_id=assessment_id,
+                target_url=session.target_url,
+                token=token,
+                repo=repo,
+                source_archive_path=cfg.get("source_archive_path"),
+                github_repo=cfg.get("github_repo"),
+            )
+
+        # 3. Subscribe to live background broadcast queue
         queue = task_manager.subscribe(assessment_id)
         try:
-            # 1. Replay stored events from repository (deduplicated by ID)
-            stored_events = repo.list_events(assessment_id, after_id=after_id)
-            for ev in stored_events:
-                ev_id = ev.id or 0
-                if ev_id > last_sent_id:
-                    last_sent_id = ev_id
-
-                yield f"id: {ev_id}\nevent: activity\ndata: {ev.model_dump_json()}\n\n"
-                msg_chunk = _format_event_message_chunk(ev, repo=repo)
-                if msg_chunk:
-                    yield f"id: msg_{ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
-
-                agent_events = _map_event_to_agent_sse(ev, assessment_id, repo=repo)
-                for event_type, payload in agent_events:
-                    if after_id is not None and event_type in {"assessment_started", "agent_thinking", "agent_plan"}:
-                        continue
-                    if event_type == "assessment_started":
-                        emitted_initial_started = True
-                    yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
-
-            # 2. Check if the assessment is already completed, failed, or cancelled
-            current_session = repo.get_scan_session(assessment_id) or session
-            is_active = task_manager.is_running(assessment_id)
-
-            if not is_active and current_session.status in ("COMPLETED", "FAILED", "CANCELLED"):
-                # Drain any remaining items in queue before closing
-                while not queue.empty():
-                    item = queue.get_nowait()
-                    if item[0] == "activity":
-                        _, ev, msg_chunk = item
-                        ev_id = ev.id or 0
-                        if ev_id > 0 and ev_id <= last_sent_id:
-                            continue
-                        if ev_id > 0:
-                            last_sent_id = max(last_sent_id, ev_id)
-                        yield f"id: {ev_id}\nevent: activity\ndata: {ev.model_dump_json()}\n\n"
-                        if msg_chunk:
-                            yield f"id: msg_{ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
-                        for event_type, payload in _map_event_to_agent_sse(ev, assessment_id, repo=repo):
-                            if after_id is not None and event_type in {"assessment_started", "agent_thinking", "agent_plan"}:
-                                continue
-                            yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
-
-                done_payload = {
-                    "status": current_session.status,
-                    "summary": current_session.summary_text,
-                    "endpoints_discovered": current_session.endpoints_discovered_count,
-                    "endpoints_tested": current_session.endpoints_tested_count,
-                    "confirmed_findings": current_session.confirmed_findings_count,
-                    "suspicious_results": current_session.suspicious_results_count,
-                }
-                yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
-                return
-
-            # Ensure active task is running in task_manager if session is still PENDING/RUNNING
-            if not is_active and current_session.status in ("PENDING", "RUNNING"):
-                token = active_tokens.get(assessment_id) or CancellationToken()
-                active_tokens[assessment_id] = token
-                cfg = current_session.config or {}
-                task_manager.start_assessment_task(
-                    scan_id=assessment_id,
-                    target_url=session.target_url,
-                    token=token,
-                    repo=repo,
-                    github_repo=cfg.get("github_repo"),
-                    source_archive_path=cfg.get("source_archive_path"),
-                )
-
-            # 3. Stream live events from the unified background task queue
             while True:
-                # Heartbeats keep idle SSE connections alive while work continues.
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    last_heartbeat = asyncio.get_running_loop().time()
-                    yield f": heartbeat {datetime.now(timezone.utc).isoformat()}\n\n"
-                    continue
+                item = await queue.get()
                 kind = item[0]
 
                 if kind == "activity":
                     _, ev, msg_chunk = item
-                    ev_id = ev.id or (last_sent_id + 1)
-                    # Deduplicate against events already sent during replay
+                    ev_id = ev.id or 0
                     if ev_id > 0 and ev_id <= last_sent_id:
                         continue
                     if ev_id > 0:
@@ -1311,17 +2126,13 @@ async def stream_assessment(
 
                     yield f"id: {ev_id}\nevent: activity\ndata: {ev.model_dump_json()}\n\n"
                     if msg_chunk:
-                        yield f"id: {ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
+                        yield f"id: msg_{ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
 
-                    agent_events = _map_event_to_agent_sse(ev, assessment_id, repo=repo)
+                    agent_events = _map_event_to_agent_sse(ev, assessment_id, agent, repo=repo)
                     for event_type, payload in agent_events:
-                        if after_id is not None and event_type in {"assessment_started", "agent_thinking", "agent_plan"}:
-                            continue
-                        if event_type == "assessment_started" and emitted_initial_started:
-                            continue
                         if event_type == "assessment_started":
-                            emitted_initial_started = True
-                        yield f"id: {ev_id}\nevent: {event_type}\ndata: {json.dumps(payload)}\n\n"
+                            continue
+                        yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
                 elif kind == "done":
                     _, done_payload, _ = item
@@ -1345,15 +2156,13 @@ async def stream_assessment(
             raise
         except Exception as exc:
             logger.error(f"Error streaming live SSE events for {assessment_id}: {exc}")
-            err_data = json.dumps(
-                {"type": "assessment_failed", "error": str(exc), "message": str(exc), "assessment_id": assessment_id}
-            )
+            err_data = json.dumps({"type": "assessment_failed", "error": str(exc), "assessment_id": assessment_id})
             yield f"event: assessment_failed\ndata: {err_data}\n\n"
             yield f"event: error\ndata: {err_data}\n\n"
         finally:
             task_manager.unsubscribe(assessment_id, queue)
 
-    return CleanupStreamingResponse(
+    return StreamingResponse(
         sse_generator(),
         media_type="text/event-stream",
         headers={
@@ -1367,55 +2176,23 @@ async def stream_assessment(
 @app.post("/api/assessments/{assessment_id}/stop")
 def stop_assessment(assessment_id: str) -> Dict[str, Any]:
     """Signals an in-progress assessment to safely cancel execution."""
-    repo = FindingRepository()
-    session = repo.get_scan_session(assessment_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Assessment {assessment_id} not found.")
-
-    if is_terminal_state(session.status):
-        return {"status": session.status, "message": f"Assessment is already in terminal state {session.status}."}
-
-    # Signal cancellation to token and task manager
     token = active_tokens.get(assessment_id) or task_manager.get_token(assessment_id)
     if token:
         token.cancel()
-    task_manager.cancel(assessment_id)
+        task_manager.cancel(assessment_id)
+        return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
 
-    # Persist CANCELLED status
-    session.status = AssessmentStatus.CANCELLED.value
-    session.completed_at = datetime.now(timezone.utc)
-    session.updated_at = datetime.now(timezone.utc)
-    session.summary_text = "Assessment was safely cancelled by operator."
-    repo.save_scan_session(session)
-
-    # Record cancellation event
-    cancel_ev = AssessmentEvent(
-        assessment_id=assessment_id,
-        event_type=EventType.ASSESSMENT_CANCELLED.value,
-        stage=AssessmentStage.REPORT_PREPARATION.value,
-        message="Assessment was safely stopped by the operator.",
-        metadata={"cancelled_by": "operator"},
-    )
-    repo.save_event(cancel_ev)
-
-    return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
-
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Assessment {assessment_id} not found.")
+    return {"status": session.status, "message": "Assessment was not actively running."}
 
 
 @app.post("/api/assessments/{assessment_id}/retry", response_model=CreateAssessmentResponse)
-async def retry_assessment(assessment_id: str, request: Request) -> CreateAssessmentResponse:
+async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
     """Retries an interrupted, failed, or cancelled assessment."""
-    # 1. Rate limiter check per client IP
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    is_allowed, remaining, retry_after = assessment_creation_limiter.is_allowed(client_ip)
-    if not is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
-            headers={"Retry-After": str(int(retry_after))},
-        )
-
-    repo = FindingRepository()
+    repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
         raise HTTPException(
@@ -1423,28 +2200,16 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
             detail=f"Assessment {assessment_id} not found.",
         )
 
-    if is_active_state(session.status):
+    if task_manager.is_running(assessment_id):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Assessment {assessment_id} is already actively running.",
         )
 
-    # If the prior task is winding down, cancel and clean up its reference
-    old_task = task_manager._tasks.get(assessment_id)
-    if old_task and not old_task.done():
-        old_task.cancel()
-        try:
-            await asyncio.sleep(0.05)
-        except Exception:
-            pass
-
-    # Validate scope for target url
-    clean_target, check = validate_target_url(session.target_url)
-    if not check.is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Scope violation: {check.reason}",
-        )
+    _, check = _validate_target_authorization(session.target_url)
+    scheme = check.normalized_scheme or "http"
+    host = check.normalized_host or "localhost"
+    port = check.normalized_port or (443 if scheme == "https" else 80)
 
     now = datetime.now(timezone.utc)
     session.status = "PENDING"
@@ -1468,46 +2233,17 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
         target_url=session.target_url,
         token=token,
         repo=repo,
-        github_repo=cfg.get("github_repo"),
         source_archive_path=cfg.get("source_archive_path"),
+        github_repo=cfg.get("github_repo"),
     )
 
     logger.info(f"Retried assessment session {assessment_id} for target {session.target_url}")
     return CreateAssessmentResponse(
         assessment_id=assessment_id,
         target_url=session.target_url,
-        status="PENDING",
-        created_at=session.started_at.isoformat(),
-        message="Assessment retried and running in background. Connect to SSE stream to observe.",
-    )
-    now = datetime.now(timezone.utc)
-    session.status = "PENDING"
-    session.failure_reason = ""
-    session.started_at = now
-    session.updated_at = now
-    session.completed_at = None
-    session.stages = AssessmentEngine._init_stages()
-    session.endpoints_discovered_count = 0
-    session.endpoints_tested_count = 0
-    session.confirmed_findings_count = 0
-    session.suspicious_results_count = 0
-    session.summary_text = ""
-    repo.save_scan_session(session)
-
-    # Launch background task
-    token = CancellationToken()
-    active_tokens[assessment_id] = token
-    task_manager.start_assessment_task(
-        scan_id=assessment_id,
-        target_url=session.target_url,
-        token=token,
-        repo=repo,
-    )
-
-    logger.info(f"Retried assessment session {assessment_id} for target {session.target_url}")
-    return CreateAssessmentResponse(
-        assessment_id=assessment_id,
-        target_url=session.target_url,
+        scheme=scheme,
+        host=host,
+        port=port,
         status="PENDING",
         created_at=session.started_at.isoformat(),
         message="Assessment retried and running in background. Connect to SSE stream to observe.",
@@ -1517,7 +2253,7 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
 @app.post("/api/assessments/{assessment_id}/retest")
 async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
     """Re-verifies findings for a given assessment session using RetestEngine."""
-    repo = FindingRepository()
+    repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
         raise HTTPException(
@@ -1525,7 +2261,7 @@ async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
             detail=f"Assessment {assessment_id} not found.",
         )
 
-    scope_guard = ScopeGuard()
+    scope_guard = _get_active_scope_guard()
     check = scope_guard.validate_request(url=session.target_url, method="GET")
     if not check.is_allowed:
         raise HTTPException(
@@ -1538,6 +2274,7 @@ async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
     retest_results = []
     for f in findings:
         log_rec = retest_engine.retest_finding(f.id)
+        log_rec.id = f"retest_{f.id}_{uuid.uuid4().hex[:8]}"
         repo.save_retest_result(log_rec)
         retest_results.append(log_rec.model_dump(mode="json"))
 
@@ -1552,7 +2289,7 @@ async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
 @app.get("/api/assessments/{assessment_id}/findings")
 def get_assessment_findings(assessment_id: str) -> List[Dict[str, Any]]:
     """Retrieves all validated and suspicious findings for a specific assessment."""
-    repo = FindingRepository()
+    repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
         raise HTTPException(
@@ -1565,8 +2302,8 @@ def get_assessment_findings(assessment_id: str) -> List[Dict[str, Any]]:
 
 @app.get("/api/assessments/{assessment_id}", response_model=AssessmentSummaryResponse)
 def get_assessment(assessment_id: str) -> AssessmentSummaryResponse:
-    """Retrieves full assessment status, events, discovered endpoints, and findings."""
-    repo = FindingRepository()
+    """Retrieves full assessment status, events, discovered endpoints, and enriched findings."""
+    repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
         raise HTTPException(
@@ -1576,33 +2313,87 @@ def get_assessment(assessment_id: str) -> AssessmentSummaryResponse:
 
     events = repo.list_events(assessment_id)
     findings = repo.list_findings(assessment_id)
+    discovered_eps = repo.list_discovered_endpoints(assessment_id)
     adapter = AssessmentQueryAdapter(repository=repo)
     markdown_content = adapter.export_report_markdown(assessment_id)
+
+    scheme, host, port = _parse_url_components(session.target_url)
+    cfg = session.config or {}
+    source_archive_path = cfg.get("source_archive_path")
+
+    serialized_findings = [
+        _serialize_detailed_finding(f, session.target_url, source_archive_path=source_archive_path)
+        for f in findings
+    ]
+    counts = _compute_endpoint_check_counts(assessment_id, repo, findings=findings)
+
+    conf_count = max(session.confirmed_findings_count, counts["confirmed"])
+    susp_count = max(session.suspicious_results_count, counts["suspicious"])
+    no_confirmed = session.status == "COMPLETED" and conf_count == 0
+    no_confirmed_msg = "No confirmed vulnerabilities found" if no_confirmed else ""
+
+    serialized_endpoints: List[Dict[str, Any]] = []
+    for ep in discovered_eps:
+        ep_dict = ep.model_dump(mode="json")
+        t_stat = (ep.test_status or "").upper()
+        verdict = (ep.verdict or "").upper()
+        if verdict == "CONFIRMED_UNAUTHORIZED_ACCESS":
+            ep_dict["finding_status"] = "CONFIRMED"
+        elif verdict == "SUSPICIOUS_ACCESS":
+            ep_dict["finding_status"] = "SUSPICIOUS"
+        elif t_stat in ("UNTESTED", "SKIPPED_MISSING_SESSION", "SKIPPED"):
+            ep_dict["finding_status"] = "NOT_TESTED"
+        elif verdict == "INCONCLUSIVE":
+            ep_dict["finding_status"] = "INCONCLUSIVE"
+        else:
+            ep_dict["finding_status"] = "NOT_CONFIRMED"
+        serialized_endpoints.append(ep_dict)
+
+    disc_count = (
+        session.endpoints_discovered_count
+        if session.endpoints_discovered_count > 0
+        else len(discovered_eps)
+    )
+    tested_count = (
+        session.endpoints_tested_count
+        if session.endpoints_tested_count > 0
+        else len([ep for ep in discovered_eps if (ep.test_status or "").upper() not in ("UNTESTED", "SKIPPED_MISSING_SESSION", "SKIPPED")])
+    )
 
     return AssessmentSummaryResponse(
         id=session.id,
         target_url=session.target_url,
+        scheme=scheme,
+        host=host,
+        port=port,
         status=session.status,
         started_at=session.started_at.isoformat(),
         updated_at=session.updated_at.isoformat() if session.updated_at else None,
         completed_at=session.completed_at.isoformat() if session.completed_at else None,
         failure_reason=session.failure_reason,
-        endpoints_discovered_count=session.endpoints_discovered_count,
-        endpoints_tested_count=session.endpoints_tested_count,
-        confirmed_findings_count=session.confirmed_findings_count,
-        suspicious_results_count=session.suspicious_results_count,
+        endpoints_discovered_count=disc_count,
+        endpoints_tested_count=tested_count,
+        confirmed_findings_count=conf_count,
+        suspicious_results_count=susp_count,
+        not_confirmed_count=counts["not_confirmed"],
+        inconclusive_count=counts["inconclusive"],
+        not_tested_count=counts["not_tested"],
+        no_confirmed_vulnerabilities=no_confirmed,
+        no_confirmed_message=no_confirmed_msg,
         summary_text=session.summary_text,
         markdown_content=markdown_content,
         stages={k: v.model_dump(mode="json") for k, v in session.stages.items()},
         events=[e.model_dump(mode="json") for e in events],
-        findings=[f.model_dump(mode="json") for f in findings],
+        findings=serialized_findings,
+        discovered_endpoints=serialized_endpoints,
+        ai_provider=_get_ai_provider_info(),
     )
 
 
 @app.get("/api/assessments")
 def list_assessments(limit: int = Query(default=10, ge=1, le=50)) -> List[Dict[str, Any]]:
     """Lists recent assessments for browser session recovery."""
-    repo = FindingRepository()
+    repo = _get_repository()
     sessions = repo.list_scan_sessions(limit=limit)
     return [s.model_dump(mode="json") for s in sessions]
 

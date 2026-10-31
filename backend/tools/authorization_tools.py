@@ -21,6 +21,8 @@ from backend.tools.schemas import (
     RoleComparisonResult,
     TestAccessControlInput,
     TestAccessControlOutput,
+    TestBflaInput,
+    TestBflaOutput,
     ToolExecutionContext,
 )
 from backend.utils.helpers import InvalidDataError, InvalidTargetURLError
@@ -152,12 +154,11 @@ class AuthorizationTools:
     ) -> DetectIdorOutput:
         """Specialized test verifying if an attacker role can access a victim-owned resource."""
         attacker = self._parse_role(payload.attacker_role)
-        diff_res = self.tester.test_resource_access(
+        diff_res = self.tester.test_bola_idor(
             endpoint=payload.endpoint_template,
-            owner_role=Role.USER_A,
-            test_roles=[attacker],
             resource_id=payload.victim_resource_id,
-            method="GET",
+            owner_role=Role.USER_A,
+            attacker_role=attacker,
             human_approved=context.human_approved if context else False
         )
 
@@ -168,7 +169,7 @@ class AuthorizationTools:
         vulnerability_title = "Broken Object Level Authorization (BOLA/IDOR)" if is_idor else None
         summary = (
             f"Tested resource '{payload.victim_resource_id}' with attacker '{payload.attacker_role}'. "
-            f"IDOR detected: {is_idor}."
+            f"IDOR detected: {is_idor}. Status: {diff_res.overall_verdict.value}."
         )
 
         return DetectIdorOutput(
@@ -177,4 +178,35 @@ class AuthorizationTools:
             attacker_role=payload.attacker_role,
             evidence_summary=summary,
             vulnerability_title=vulnerability_title
+        )
+
+    def test_bfla(
+        self,
+        payload: TestBflaInput,
+        context: Optional[ToolExecutionContext] = None
+    ) -> TestBflaOutput:
+        """Tests Broken Function Level Authorization against an administrative/privileged route."""
+        admin_role = self._parse_role(payload.admin_role)
+        test_roles = [self._parse_role(r) for r in payload.test_roles]
+
+        diff_res = self.tester.test_bfla(
+            endpoint=payload.endpoint,
+            admin_role=admin_role,
+            test_roles=test_roles,
+            human_approved=context.human_approved if context else False
+        )
+
+        is_bfla = diff_res.is_discrepancy_detected and (
+            diff_res.is_confirmed or diff_res.overall_verdict == AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
+        )
+        title = "Broken Function Level Authorization (BFLA)" if is_bfla else None
+
+        return TestBflaOutput(
+            endpoint=payload.endpoint,
+            is_bfla_detected=diff_res.is_discrepancy_detected,
+            is_confirmed=diff_res.is_confirmed,
+            tested_roles=[r.value for r in test_roles],
+            verdict=diff_res.overall_verdict.value,
+            evidence_summary=diff_res.summary,
+            vulnerability_title=title,
         )

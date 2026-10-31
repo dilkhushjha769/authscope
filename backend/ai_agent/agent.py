@@ -1,9 +1,8 @@
-"""High-Level Gemini AI Brain & Agent Facade for AuthScope.
+"""High-Level Gemini AI Brain & Autonomous Agent Facade for AuthScope.
 
-Unifies the official Google GenAI client (`GeminiClient`), bounded assessment
-planner (`AssessmentPlanner`), approved tool registry (`ApprovedToolRegistry`),
-Member 3 memory bridge (`MemorySystemInterface`), bounded execution orchestrator
-(`AgentOrchestrator`), and the 8-step finding analysis pipeline.
+Exposes `GeminiAuthScopeAgent` with dependency-injected `tool_executor`,
+`memory_provider`, and `config`, plus `astream_assessment(request, cancel_token=None)`
+returning an asynchronous stream of structured event dictionaries.
 """
 
 from typing import Any, AsyncGenerator, Dict, Generator, List, Optional, Union
@@ -23,12 +22,18 @@ from backend.ai_agent.config import GeminiAgentConfig
 from backend.ai_agent.gemini_client import GeminiClient
 from backend.ai_agent.orchestrator import (
     AgentOrchestrator,
+    AgentStreamEvent,
     ApprovedToolRegistry,
     AssessmentRunResult,
     DefaultMemoryBridge,
+    FindingValidationStatus,
+    MemoryProviderAdapter,
+    MemoryProviderProtocol,
     MemorySystemInterface,
+    MockMemoryProvider,
     ToolCallProposal,
     ToolExecutionResult,
+    ToolExecutorProtocol,
     ToolValidationResult,
 )
 from backend.ai_agent.planner import (
@@ -41,7 +46,6 @@ from backend.analysis.remediation import DetailedRemediationPlan, RemediationEng
 from backend.analysis.severity_engine import DeterministicSeverityResult, SeverityEngine
 from backend.core.scope_guard import ScopeGuard
 from backend.scanner.request_executor import RequestExecutor
-from backend.storage.models import AssessmentEvent
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -51,16 +55,19 @@ class GeminiAuthScopeAgent:
     """Central Gemini-powered AI Brain for AuthScope.
 
     Respects all architectural boundaries:
+    - Dependency injection for `tool_executor`, `memory_provider`, and `config`.
     - Never bypasses `ScopeGuard` or `RequestExecutor`.
     - Never executes arbitrary shell commands, dynamic code, or unapproved tools.
     - Enforces bounded iteration (`max_iterations`) and tool call (`max_tool_calls`) limits.
-    - Requires independent evidence validation (`EvidenceValidator`) before confirming findings.
-    - Integrates with existing `FindingAnalyzer`, `SeverityEngine`, and `RemediationEngine`.
+    - Requires independent security-engine evidence validation before confirming findings.
+    - Clearly reports deterministic fallback mode when `GEMINI_API_KEY` is absent.
     """
 
     def __init__(
         self,
-        config: Optional[GeminiAgentConfig] = None,
+        tool_executor: Optional[Any] = None,
+        memory_provider: Optional[Any] = None,
+        config: Optional[Union[GeminiAgentConfig, Dict[str, Any]]] = None,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
         max_iterations: Optional[int] = None,
@@ -73,17 +80,50 @@ class GeminiAuthScopeAgent:
         sdk_client: Optional[Any] = None,
         scope_guard: Optional[ScopeGuard] = None,
         executor: Optional[RequestExecutor] = None,
-        tool_registry: Optional[ApprovedToolRegistry] = None,
+        tool_registry: Optional[Any] = None,
         planner: Optional[AssessmentPlanner] = None,
-        memory: Optional[MemorySystemInterface] = None,
+        memory: Optional[Any] = None,
         orchestrator: Optional[AgentOrchestrator] = None,
         evidence_validator: Optional[EvidenceValidator] = None,
         finding_analyzer: Optional[FindingAnalyzer] = None,
         severity_engine: Optional[SeverityEngine] = None,
         remediation_engine: Optional[RemediationEngine] = None,
     ) -> None:
-        if config is not None:
-            self.config = config
+        # Handle case where a caller passes GeminiAgentConfig as the first positional arg
+        if isinstance(tool_executor, GeminiAgentConfig) and config is None:
+            config = tool_executor
+            tool_executor = None
+
+        if isinstance(config, GeminiAgentConfig):
+            base_cfg = config.model_copy(deep=True)
+            if api_key is not None:
+                base_cfg.api_key = api_key
+            if model is not None:
+                base_cfg.model = model
+            if max_iterations is not None:
+                base_cfg.max_iterations = max_iterations
+            if max_tool_calls is not None:
+                base_cfg.max_tool_calls = max_tool_calls
+            if temperature is not None:
+                base_cfg.temperature = temperature
+            if timeout is not None:
+                base_cfg.timeout = timeout
+            if max_retries is not None:
+                base_cfg.max_retries = max_retries
+            if retry_delay is not None:
+                base_cfg.retry_delay = retry_delay
+            self.config = base_cfg
+        elif isinstance(config, dict):
+            self.config = GeminiAgentConfig.from_env(
+                api_key=api_key or config.get("api_key"),
+                model=model or config.get("model"),
+                max_iterations=max_iterations or config.get("max_iterations"),
+                max_tool_calls=max_tool_calls or config.get("max_tool_calls"),
+                temperature=temperature if temperature is not None else config.get("temperature"),
+                timeout=timeout if timeout is not None else config.get("timeout"),
+                max_retries=max_retries or config.get("max_retries"),
+                retry_delay=retry_delay if retry_delay is not None else config.get("retry_delay"),
+            )
         else:
             self.config = GeminiAgentConfig.from_env(
                 api_key=api_key,
@@ -99,19 +139,30 @@ class GeminiAuthScopeAgent:
         self.scope_guard = scope_guard or ScopeGuard()
         self.executor = executor
         self.evidence_validator = evidence_validator or EvidenceValidator()
-        self.memory: MemorySystemInterface = memory or DefaultMemoryBridge()
+
+        resolved_memory = memory_provider if memory_provider is not None else memory
+        self.memory_provider: Any = resolved_memory if resolved_memory is not None else DefaultMemoryBridge()
+        self.memory_adapter = MemoryProviderAdapter(self.memory_provider)
+        self.memory: Any = self.memory_adapter
 
         self.gemini_client = gemini_client or GeminiClient(
             config=self.config,
             sdk_client=sdk_client,
         )
 
-        self.tool_registry = tool_registry or ApprovedToolRegistry(
-            scope_guard=self.scope_guard,
-            executor=self.executor,
-            evidence_validator=self.evidence_validator,
-            memory=self.memory,
-        )
+        resolved_tools = tool_executor if tool_executor is not None else tool_registry
+        if isinstance(resolved_tools, ApprovedToolRegistry):
+            self.tool_registry = resolved_tools
+            self.tool_executor: Any = resolved_tools
+        else:
+            self.tool_registry = ApprovedToolRegistry(
+                scope_guard=self.scope_guard,
+                executor=self.executor,
+                evidence_validator=self.evidence_validator,
+                memory=self.memory_adapter,
+                external_tool_executor=resolved_tools,
+            )
+            self.tool_executor = resolved_tools if resolved_tools is not None else self.tool_registry
 
         self.planner = planner or AssessmentPlanner(
             scope_guard=self.scope_guard,
@@ -131,7 +182,7 @@ class GeminiAuthScopeAgent:
             scope_guard=self.scope_guard,
             tool_registry=self.tool_registry,
             planner=self.planner,
-            memory=self.memory,
+            memory=self.memory_adapter,
             evidence_validator=self.evidence_validator,
             severity_engine=self.severity_engine,
             remediation_engine=self.remediation_engine,
@@ -142,10 +193,22 @@ class GeminiAuthScopeAgent:
         """Returns True if Gemini client has a valid API key or injected SDK client."""
         return self.gemini_client.is_configured
 
+    @property
+    def fallback_mode(self) -> bool:
+        """Returns True when operating in deterministic fallback mode (no Gemini API key)."""
+        return not self.is_configured
+
+    @property
+    def mode(self) -> str:
+        """Returns 'gemini' when configured with an API key, else 'deterministic_fallback'."""
+        return "gemini" if self.is_configured else "deterministic_fallback"
+
     def get_status(self) -> Dict[str, Any]:
         """Returns a safe status dictionary without exposing any API keys."""
         status = self.config.to_safe_dict()
         status["configured"] = self.is_configured
+        status["fallback_mode"] = self.fallback_mode
+        status["mode"] = self.mode
         status["approved_tools"] = self.tool_registry.approved_tool_names
         status["total_calls"] = self.gemini_client.total_calls
         status["total_tokens_used"] = self.gemini_client.total_tokens_used
@@ -156,6 +219,7 @@ class GeminiAuthScopeAgent:
         return (
             f"GeminiAuthScopeAgent(model='{self.config.model}', "
             f"configured={self.is_configured}, "
+            f"mode='{self.mode}', "
             f"max_iterations={self.config.max_iterations}, "
             f"max_tool_calls={self.config.max_tool_calls}, "
             f"temperature={self.config.temperature})"
@@ -178,7 +242,8 @@ class GeminiAuthScopeAgent:
             if isinstance(request, AssessmentRequest)
             else AssessmentRequest.model_validate(request)
         )
-        knowledge = self.memory.retrieve_security_knowledge(query=req.objective)
+        knowledge = self.memory_adapter.search_knowledge(query=req.objective, limit=5)
+        self.planner.approved_tools = self.tool_registry.approved_tool_names
         return self.planner.create_plan(request=req, security_knowledge=knowledge)
 
     async def acreate_plan(
@@ -191,7 +256,9 @@ class GeminiAuthScopeAgent:
             if isinstance(request, AssessmentRequest)
             else AssessmentRequest.model_validate(request)
         )
-        knowledge = self.memory.retrieve_security_knowledge(query=req.objective)
+        await self.tool_registry.async_refresh_schemas()
+        knowledge = await self.memory_adapter.asearch_knowledge(query=req.objective, limit=5)
+        self.planner.approved_tools = self.tool_registry.approved_tool_names
         return await self.planner.acreate_plan(request=req, security_knowledge=knowledge)
 
     def validate_tool_proposal(
@@ -231,48 +298,68 @@ class GeminiAuthScopeAgent:
         )
 
     # --------------------------------------------------------------------------
-    # Bounded Assessment Execution & Streaming
+    # Bounded Assessment Execution & Streaming (Section D & H)
     # --------------------------------------------------------------------------
 
     def run_assessment(
         self,
         request: Union[AssessmentRequest, Dict[str, Any]],
         auto_validate_evidence: bool = True,
+        cancel_token: Optional[Any] = None,
     ) -> AssessmentRunResult:
-        """Executes the bounded 11-step assessment loop synchronously."""
+        """Executes the bounded 12-step assessment loop synchronously."""
         return self.orchestrator.run_assessment(
             request=request,
             auto_validate_evidence=auto_validate_evidence,
+            cancel_token=cancel_token,
         )
 
     async def arun_assessment(
         self,
         request: Union[AssessmentRequest, Dict[str, Any]],
         auto_validate_evidence: bool = True,
+        cancel_token: Optional[Any] = None,
     ) -> AssessmentRunResult:
-        """Executes the bounded 11-step assessment loop asynchronously."""
+        """Executes the bounded 12-step assessment loop asynchronously."""
         return await self.orchestrator.arun_assessment(
             request=request,
             auto_validate_evidence=auto_validate_evidence,
+            cancel_token=cancel_token,
         )
 
     def stream_assessment(
         self,
         request: Union[AssessmentRequest, Dict[str, Any]],
         auto_validate_evidence: bool = True,
-    ) -> Generator[AssessmentEvent, None, AssessmentRunResult]:
-        """Streams real-time AssessmentEvent items during the bounded assessment loop."""
+        cancel_token: Optional[Any] = None,
+    ) -> Generator[AgentStreamEvent, None, AssessmentRunResult]:
+        """Streams real-time structured event dictionaries during the bounded assessment loop."""
         return self.orchestrator.stream_assessment(
             request=request,
             auto_validate_evidence=auto_validate_evidence,
+            cancel_token=cancel_token,
         )
 
     async def astream_assessment(
         self,
         request: Union[AssessmentRequest, Dict[str, Any]],
-    ) -> AsyncGenerator[AssessmentEvent, None]:
-        """Asynchronously streams real-time AssessmentEvent items for FastAPI SSE."""
-        async for ev in self.orchestrator.astream_assessment(request=request):
+        cancel_token: Optional[Any] = None,
+    ) -> AsyncGenerator[AgentStreamEvent, None]:
+        """Asynchronously streams structured event dictionaries for the assessment run.
+
+        Example yielded dictionary:
+        {
+            "type": "agent_plan",
+            "assessment_id": "...",
+            "timestamp": "...",
+            "message": "Authorization assessment plan created",
+            "data": {}
+        }
+        """
+        async for ev in self.orchestrator.astream_assessment(
+            request=request,
+            cancel_token=cancel_token,
+        ):
             yield ev
 
     # --------------------------------------------------------------------------
@@ -361,4 +448,3 @@ class GeminiAuthScopeAgent:
 
 # Convenient alias
 GeminiAgent = GeminiAuthScopeAgent
-

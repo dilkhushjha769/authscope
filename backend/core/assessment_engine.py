@@ -27,6 +27,7 @@ from backend.scanner.endpoint_discovery import (
 from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict, ResponseAnalyzer
 from backend.scanner.authorization_tester import AuthorizationTester
+from backend.scanner.security_inspector import SecurityInspector
 from backend.analysis.evidence_validator import (
     BEARER_REGEX,
     EvidenceArtifact,
@@ -133,6 +134,24 @@ class AssessmentEngine:
         self.severity_engine = SeverityEngine()
         self.remediation_engine = RemediationEngine()
 
+    def run_extended_security_checks(
+        self,
+        target_url: str,
+        assessment_id: Optional[str] = None,
+        cancel_token: Optional[CancellationToken] = None,
+    ) -> Dict[str, Any]:
+        """Runs Sprint 2 extended security checks (Auth, Session, Headers, CORS, Transport)."""
+        inspector = SecurityInspector(
+            executor=self.executor,
+            scope_guard=self.scope_guard,
+            session_manager=self.session_manager,
+            cancel_token=cancel_token,
+        )
+        return inspector.run_comprehensive_inspection(
+            endpoint=target_url,
+            assessment_id=assessment_id or f"extended_sec_{uuid.uuid4().hex[:8]}",
+        )
+
     def validate_target_url(self, target_url: str) -> ScopeCheckResult:
         """Pre-validates a user-supplied target URL via ScopeGuard without opening sockets."""
         return self.scope_guard.validate_request(url=target_url, method="GET")
@@ -222,6 +241,7 @@ class AssessmentEngine:
     def stream_assessment(
         self,
         target_url: str,
+        scan_id: Optional[str] = None,
         cancel_token: Optional[CancellationToken] = None,
         should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Generator[AssessmentEvent, None, ScanSessionRecord]:
@@ -231,7 +251,7 @@ class AssessmentEngine:
         backend step executed against the target or validated by the security engine.
         """
         normalized_target = (target_url or "").strip().rstrip("/")
-        scan_id = f"scan_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        scan_id = scan_id or f"scan_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
         session = ScanSessionRecord(
             id=scan_id,
@@ -450,6 +470,7 @@ class AssessmentEngine:
                 )
 
             session.endpoints_discovered_count = len(discovered_routes)
+            self.repository.save_scan_session(session)
             self._complete_stage(
                 session,
                 AssessmentStage.ENDPOINT_DISCOVERY,
@@ -751,21 +772,54 @@ class AssessmentEngine:
                         tested_endpoints_count += 1
                         insp = self.analyzer.inspect_response(anon_resp)
 
-                        if (
+                        is_admin_candidate = (
                             route.category == EndpointCategory.ADMIN_FUNCTION
+                            or "/admin/" in route.path.lower()
+                        )
+                        if (
+                            is_admin_candidate
                             and insp.is_http_success
                             and not insp.is_empty_payload
                             and not insp.is_spa_html_fallback
                         ):
-                            # Unauthenticated caller received 200 OK non-empty JSON on an ADMIN_FUNCTION endpoint!
-                            # Because Admin baseline session was not available to compare, mark as SUSPICIOUS_ACCESS.
-                            ep_rec.test_status = "PARTIAL_UNAUTH_ONLY"
-                            ep_rec.verdict = AccessVerdict.SUSPICIOUS_ACCESS.value
-                            ep_rec.summary = (
-                                f"Unauthenticated GET request to administrative route {route.path} returned "
-                                f"HTTP {anon_resp.status_code} with {anon_resp.content_length} bytes of JSON data. "
-                                f"Marked SUSPICIOUS_ACCESS because Admin session baseline was unavailable for comparison."
+                            # Inspect response content: does it disclose privileged administrative controls/secrets or public UI configuration?
+                            resp_text = (anon_resp.body if hasattr(anon_resp, 'body') else getattr(anon_resp, 'text', '')) or ''
+                            has_priv_secrets = any(
+                                k in resp_text.lower()
+                                for k in ["private_key", "admin_password", "jwt_secret", "api_secret", "root_password", "database_url"]
                             )
+                            has_admin_actions = any(
+                                k in resp_text.lower()
+                                for k in ["deleteuser", "updaterole", "grantadmin", "systemshutdown", "exec_cmd"]
+                            )
+
+                            if has_priv_secrets or has_admin_actions:
+                                fnd_val_status = EvidenceValidationStatus.CONFIRMED
+                                fnd_access_verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
+                                fnd_status_str = "confirmed"
+                                fnd_sev = SeverityLevel.HIGH
+                                fnd_title_str = f"Confirmed Broken Function Level Authorization on {route.path}"
+                                fnd_summary = (
+                                    f"Administrative route {route.path} returned HTTP {anon_resp.status_code} and exposes "
+                                    f"privileged controls or administrative secrets to unauthenticated callers."
+                                )
+                            else:
+                                fnd_val_status = EvidenceValidationStatus.SUSPICIOUS
+                                fnd_access_verdict = AccessVerdict.SUSPICIOUS_ACCESS
+                                fnd_status_str = "suspected"
+                                fnd_sev = SeverityLevel.LOW
+                                fnd_title_str = f"Suspicious Unauthenticated Access to Admin Route {route.path} (Public UI Config)"
+                                fnd_summary = (
+                                    f"Unauthenticated GET request to administrative route {route.path} returned HTTP {anon_resp.status_code} "
+                                    f"({anon_resp.content_length} bytes). Content inspection indicates public client/application configuration "
+                                    f"(e.g. application branding, theme, challenge display settings) rather than privileged administrative controls or credentials. "
+                                    f"Classified as SUSPICIOUS / Informational rather than a confirmed BFLA vulnerability pending baseline review."
+                                )
+
+                            ep_rec.test_status = "PARTIAL_UNAUTH_ONLY"
+                            ep_rec.verdict = fnd_access_verdict.value
+                            ep_rec.summary = fnd_summary
+
                             rem_preview = self.remediation_engine.generate_patch("BFLA")
                             yield self._emit_event(
                                 session,
@@ -775,10 +829,10 @@ class AssessmentEngine:
                                 {
                                     "endpoint": route.path,
                                     "status_code": anon_resp.status_code,
-                                    "verdict": AccessVerdict.SUSPICIOUS_ACCESS.value,
-                                    "actual_behavior": f"Anonymous request received HTTP {anon_resp.status_code} response ({anon_resp.content_length} bytes, sensitive fields: {insp.sensitive_fields_found}).",
+                                    "verdict": fnd_access_verdict.value,
+                                    "actual_behavior": f"Anonymous request received HTTP {anon_resp.status_code} response ({anon_resp.content_length} bytes).",
                                     "expected_behavior": f"Administrative route '{route.path}' should restrict unauthenticated access (HTTP 401/403).",
-                                    "validation_status": "SUSPICIOUS",
+                                    "validation_status": fnd_val_status.value,
                                     "remediation": rem_preview,
                                 },
                             )
@@ -797,26 +851,26 @@ class AssessmentEngine:
                                 ),
                                 actual_behavior=(
                                     f"Anonymous request received HTTP {anon_resp.status_code} JSON response "
-                                    f"({anon_resp.content_length} bytes, sensitive fields: {insp.sensitive_fields_found})."
+                                    f"({anon_resp.content_length} bytes)."
                                 ),
-                                validation_status=EvidenceValidationStatus.SUSPICIOUS,
+                                validation_status=fnd_val_status,
                             )
                             rem = self.remediation_engine.generate_patch("BFLA")
                             fnd = FindingRecord(
                                 id=evi.finding_id,
-                                scan_id=scan_id,
-                                title=f"Suspicious Unauthenticated Access to Admin Route {route.path}",
+                                scan_id=session.id,
+                                title=fnd_title_str,
                                 vulnerability_type="BFLA",
-                                severity=SeverityLevel.MEDIUM,
-                                status="suspected",
-                                validation_status=EvidenceValidationStatus.SUSPICIOUS.value,
-                                access_verdict=AccessVerdict.SUSPICIOUS_ACCESS.value,
+                                severity=fnd_sev,
+                                status=fnd_status_str,
+                                validation_status=fnd_val_status.value,
+                                access_verdict=fnd_access_verdict.value,
                                 target_endpoint=route.path,
                                 http_method=route.method,
                                 resource_id=None,
                                 expected_behavior=evi.expected_behavior,
                                 actual_behavior=evi.actual_behavior,
-                                description=ep_rec.summary,
+                                description=fnd_summary,
                                 remediation_guidance=rem,
                                 evidence=evi,
                             )
@@ -843,6 +897,7 @@ class AssessmentEngine:
                         self.repository.save_discovered_endpoint(ep_rec)
 
             session.endpoints_tested_count = tested_endpoints_count
+            self.repository.save_scan_session(session)
             self._complete_stage(
                 session,
                 AssessmentStage.AUTHORIZATION_TESTING,
@@ -991,19 +1046,25 @@ class AssessmentEngine:
             self.repository.save_scan_session(session)
             return session
 
-        except AuthScopeException as exc:
+        except Exception as exc:
+            logger.error(f"Assessment halted due to error: {exc}", exc_info=True)
             session.status = "FAILED"
             session.completed_at = datetime.now(timezone.utc)
-            session.summary_text = f"Assessment halted due to security engine error: {exc}"
+            is_persist = "database" in str(exc).lower() or "no column" in str(exc).lower() or "sqlite" in str(type(exc)).lower() or "persistence" in str(exc).lower()
+            session.failure_reason = "PERSISTENCE_ERROR" if is_persist else "EXECUTION_ERROR"
+            session.summary_text = f"Assessment halted due to error: {exc}"
             self._skip_remaining_stages(session, f"Halted: {exc}")
             yield self._emit_event(
                 session,
                 EventType.ASSESSMENT_FAILED,
                 AssessmentStage.REPORT_PREPARATION,
                 f"Assessment failed: {exc}",
-                {"error": str(exc)},
+                {"error": str(exc), "failure_reason": session.failure_reason},
             )
-            self.repository.save_scan_session(session)
+            try:
+                self.repository.save_scan_session(session)
+            except Exception as save_err:
+                logger.error(f"Failed to record session failure state: {save_err}")
             return session
         finally:
             if owns_executor:
@@ -1243,6 +1304,11 @@ class AssessmentQueryAdapter:
         ]
         suspicious = [f for f in findings if f not in confirmed]
 
+        disc_count = session.endpoints_discovered_count or len(endpoints)
+        probed_count = session.endpoints_tested_count or len([ep for ep in endpoints if (ep.test_status or "").upper() not in ("UNTESTED", "SKIPPED_MISSING_SESSION", "SKIPPED")])
+        conf_count = session.confirmed_findings_count or len(confirmed)
+        susp_count = session.suspicious_results_count or len(suspicious)
+
         md = [
             f"# AuthScope Security Assessment Report — `{session.id}`",
             "",
@@ -1250,10 +1316,10 @@ class AssessmentQueryAdapter:
             f"- **Status:** `{session.status}`",
             f"- **Started At:** `{session.started_at.isoformat()}`",
             f"- **Completed At:** `{session.completed_at.isoformat() if session.completed_at else 'N/A'}`",
-            f"- **Routes Discovered:** `{session.endpoints_discovered_count}`",
-            f"- **Routes Probed:** `{session.endpoints_tested_count}`",
-            f"- **Confirmed Vulnerabilities:** `{len(confirmed)}`",
-            f"- **Suspicious Results:** `{len(suspicious)}`",
+            f"- **Routes Discovered:** `{disc_count}`",
+            f"- **Routes Probed:** `{probed_count}`",
+            f"- **Confirmed Vulnerabilities:** `{conf_count}`",
+            f"- **Suspicious Results:** `{susp_count}`",
             "",
             "## 1. Stage Timeline",
             "",
