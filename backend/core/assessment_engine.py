@@ -939,6 +939,13 @@ class AssessmentEngine:
                 AssessmentStage.EVIDENCE_VALIDATION,
                 "Validating cryptographic SHA-256 signatures and completeness of candidate findings.",
             )
+            yield self._emit_event(
+                session,
+                EventType.EVIDENCE_VALIDATION_STARTED,
+                AssessmentStage.EVIDENCE_VALIDATION,
+                "Checking finding evidence integrity and validation status.",
+                {"candidate_count": len(candidate_findings)},
+            )
 
             confirmed_count = 0
             suspicious_count = 0

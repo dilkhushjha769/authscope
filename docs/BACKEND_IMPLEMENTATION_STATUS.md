@@ -10,6 +10,10 @@ The audit found that endpoint discovery returned only a curated Juice Shop list,
 
 ## Completed
 
+- Added an evidence-gated, Pydantic-validated AI finding review service with redacted structured context, conservative failure handling, and advisory-only verdicts. The API task runner and Gemini agent adapter invoke it after engine validation; the finding status and access verdict remain under deterministic engine control.
+- Added SSE events for finding detection, evidence validation boundaries, AI review progress/completion, and fix recommendations. Added `docs/AI_FINDING_REVIEW.md` and mocked-provider coverage.
+- The production review provider is intentionally unconfigured. Sending finding evidence to Gemini would violate the repository's current outbound allowlist. The injectable provider interface is testable but an approved model egress path is still required for live AI review.
+
 - `EndpointDiscovery.discover_from_openapi()` now fetches target API descriptions through the existing scoped `RequestExecutor`, accepts GET operations only, validates each discovered route, and caps discovery at 100 routes. It falls back to the existing curated Juice Shop routes when no usable in-scope OpenAPI document is exposed.
 - User IDs and resource ownership are no longer inferred from role names or token presence. `authenticate_role()` no longer manufactures a session token. IDOR checks with a supplied ID require explicit owner registration before any request is sent.
 - Confirmation now requires verified cross-role evidence tied to the registered resource or a shared sensitive value from the privileged baseline. HTTP 200, response shape, generic sensitive field names, and keyword presence alone cannot confirm a finding.
@@ -32,7 +36,11 @@ The audit found that endpoint discovery returned only a curated Juice Shop list,
 ## Files Modified
 
 - `backend/analysis/evidence_validator.py`
+- `backend/analysis/finding_review.py`
 - `backend/api/app.py`
+- `backend/api/adapters.py`
+- `backend/core/assessment_engine.py`
+- `backend/storage/models.py`
 - `backend/core/assessment_engine.py`
 - `backend/core/session_manager.py`
 - `backend/scanner/authorization_tester.py`
@@ -48,6 +56,7 @@ The audit found that endpoint discovery returned only a curated Juice Shop list,
 - `tests/test_security_detection/test_bola_idor_detection.py`
 - `tests/test_security_detection/test_request_safety_and_scope.py`
 - `tests/test_task_recovery_and_multi_role.py`
+- `tests/test_finding_review.py`
 
 ## APIs and Events
 
@@ -55,7 +64,7 @@ The audit found that endpoint discovery returned only a curated Juice Shop list,
 - API endpoint paths and response schemas: unchanged.
 - AssessmentEvent persisted schema: unchanged.
 - Python interface addition: `EndpointDiscovery.discover_from_openapi(spec_url=None, executor=None, max_endpoints=100)`.
-- SSE event names and payload schema: unchanged. The stream emits an SSE comment heartbeat during idle periods.
+- SSE uses the existing serialized event envelope and now includes finding review lifecycle events. The stream also emits an SSE comment heartbeat during idle periods.
 
 ## Verification
 
@@ -78,6 +87,14 @@ $env:PYTHONPATH='.'; .venv/Scripts/pytest.exe -q tests/test_assessment_engine.py
 Result: `7 passed`. The test suite's requests were limited to `http://localhost:3000`; the target was reachable. The assessment fell back to the configured route list because no supported OpenAPI document was available.
 
 Warnings are Pydantic configuration/encoder deprecations and FastAPI `on_event` deprecation; no unexpected failures were observed.
+
+Finding-review focused verification:
+
+```powershell
+$env:PYTHONPATH='.'; .venv/Scripts/pytest.exe tests/test_finding_review.py -q
+```
+
+Result: `10 passed`. The broader relevant backend/API regression selection completed with `92 passed, 2 warnings`. Full suite after these changes: `582 passed, 5 warnings`.
 
 ## Run the Backend
 

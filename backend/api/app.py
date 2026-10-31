@@ -29,6 +29,7 @@ from backend.agent.tools import ToolRegistry
 from backend.ai_agent import GeminiAgentConfig, GeminiAuthScopeAgent
 from backend.analysis.code_mapper import CodeMapper, MappingStatus
 from backend.analysis.remediation import RemediationEngine
+from backend.analysis.finding_review import FindingReviewService, ReviewProvider
 from backend.config import settings
 from backend.core.assessment_engine import (
     AssessmentEngine,
@@ -540,23 +541,27 @@ class AssessmentTaskManager:
         self.agent = agent
         self.tool_registry = tool_registry
         self.memory_manager = memory_manager
+        self.finding_review_provider: Optional[ReviewProvider] = None
 
     def configure_dependencies(
         self,
         agent: Optional[Any] = None,
         tool_registry: Optional[Any] = None,
         memory_manager: Optional[Any] = None,
+        finding_review_provider: Optional[ReviewProvider] = None,
     ) -> None:
         """Configures injected components for the unified pipeline (or mock adapters in tests)."""
         self.agent = agent
         self.tool_registry = tool_registry
         self.memory_manager = memory_manager
+        self.finding_review_provider = finding_review_provider
 
     def reset_dependencies(self) -> None:
         """Resets injected dependencies back to production defaults."""
         self.agent = None
         self.tool_registry = None
         self.memory_manager = None
+        self.finding_review_provider = None
 
     def get_agent(self, repo: FindingRepository) -> Any:
         if self.agent is not None:
@@ -767,6 +772,50 @@ class AssessmentTaskManager:
                     break
 
                 event.assessment_id = scan_id
+                if event.event_type == EventType.FINDING_CONFIRMED.value:
+                    finding_id = event.metadata.get("finding_id")
+                    finding = repo.get_finding(str(finding_id)) if finding_id else None
+                    if finding is not None:
+                        review_service = FindingReviewService(
+                            provider=self.finding_review_provider,
+                            scope_guard=scope_guard,
+                        )
+                        await self._broadcast(scan_id, ("activity", AssessmentEvent(
+                            assessment_id=scan_id,
+                            event_type="ai_review_started",
+                            stage="AI_REVIEW",
+                            message="Reviewing validated finding evidence.",
+                            metadata={"finding_id": finding.id},
+                        ), None))
+                        await self._broadcast(scan_id, ("activity", AssessmentEvent(
+                            assessment_id=scan_id,
+                            event_type="ai_review_progress",
+                            stage="AI_REVIEW",
+                            message="Preparing redacted evidence context for review.",
+                            metadata={"finding_id": finding.id},
+                        ), None))
+                        review = await asyncio.to_thread(
+                            review_service.review,
+                            finding,
+                            finding.technical_details.get("source_mapping"),
+                        )
+                        review_data = review.model_dump(mode="json")
+                        event.metadata["ai_review"] = review_data
+                        finding.technical_details["ai_review"] = review_data
+                        repo.update_finding(finding)
+                        for event_name, event_message, event_metadata in (
+                            ("ai_review_completed", "Advisory AI review completed.", {"finding_id": finding.id, "ai_review": review_data}),
+                            ("fix_recommendation_generated", "Advisory fix recommendation generated.", {"finding_id": finding.id, "fix_recommendation": review.fix_recommendation}),
+                        ):
+                            review_event = AssessmentEvent(
+                                assessment_id=scan_id,
+                                event_type=event_name,
+                                stage="AI_REVIEW",
+                                message=event_message,
+                                metadata=event_metadata,
+                            )
+                            repo.save_event(review_event)
+                            await self._broadcast(scan_id, ("activity", review_event, None))
                 msg_chunk = _format_event_message_chunk(event, repo=repo)
                 await self._broadcast(scan_id, ("activity", event, msg_chunk))
                 await asyncio.sleep(0.04)
@@ -1609,6 +1658,16 @@ def _map_event_to_agent_sse(
         )
         val_status = "CONFIRMED" if is_confirmed else "SUSPICIOUS"
 
+        results.append(("finding_detected", {
+            "type": "finding_detected",
+            "finding_id": finding.id if finding else finding_id,
+            "endpoint": ep,
+            "category": cat,
+            "severity": sev,
+            "validation_status": val_status,
+            "assessment_id": assessment_id,
+        }))
+
         # 1. Emit finding_hypothesis
         results.append(("finding_hypothesis", {
             "type": "finding_hypothesis",
@@ -1733,6 +1792,12 @@ def _map_event_to_agent_sse(
             "assessment_id": assessment_id,
         }))
     elif etype == EventType.EVIDENCE_VALIDATION_COMPLETED.value:
+        results.append(("evidence_validation_completed", {
+            "type": "evidence_validation_completed",
+            "message": event.message,
+            "assessment_id": assessment_id,
+            **meta,
+        }))
         results.append(("evidence_validated", {
             "type": "evidence_validated",
             "message": "Cryptographic evidence artifacts signed and verified (SHA-256)",
@@ -1785,6 +1850,13 @@ def _map_event_to_agent_sse(
         "evidence_validated",
         "source_location_found",
         "explanation_generated",
+        "finding_detected",
+        "evidence_validation_started",
+        "evidence_validation_completed",
+        "ai_review_started",
+        "ai_review_progress",
+        "ai_review_completed",
+        "fix_recommendation_generated",
         "assessment_completed",
         "assessment_failed",
         "assessment_cancelled",
