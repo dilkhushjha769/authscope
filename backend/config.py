@@ -38,16 +38,21 @@ class Settings(BaseSettings):
     admin_token: str = Field(default="", alias="ADMIN_TOKEN")
 
     # AI Configuration (Gemini & Claude)
-    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_MODEL")
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-3-5-sonnet-20241022", alias="ANTHROPIC_MODEL")
     anthropic_max_tokens: int = Field(default=2048, alias="ANTHROPIC_MAX_TOKENS")
     anthropic_timeout: float = Field(default=30.0, alias="ANTHROPIC_TIMEOUT")
 
-    # AI Configuration (Google Gemini Brain & Agent Loop)
+    # AI Configuration (Google Gemini Brain & Dual API Configuration)
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
     gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    # Gemini API #1: Text generation and interactive bug Q&A
+    gemini_qa_api_key: str = Field(default="", alias="GEMINI_QA_API_KEY")
+    gemini_qa_model: str = Field(default="", alias="GEMINI_QA_MODEL")
+    # Gemini API #2: Bug impact, remediation, and secure code generation
+    gemini_code_api_key: str = Field(default="", alias="GEMINI_CODE_API_KEY")
+    gemini_code_model: str = Field(default="", alias="GEMINI_CODE_MODEL")
+
     gemini_max_tokens: int = Field(default=2048, alias="GEMINI_MAX_TOKENS")
     gemini_timeout: float = Field(default=30.0, alias="GEMINI_TIMEOUT")
     agent_max_iterations: int = Field(default=8, alias="AGENT_MAX_ITERATIONS")

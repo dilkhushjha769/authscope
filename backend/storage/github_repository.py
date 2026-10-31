@@ -154,6 +154,22 @@ class GitHubRepository:
             ).fetchone()
         return row is not None
 
+    def recover_orphaned_running_scans(self, active_scan_ids: Optional[set[str]] = None) -> int:
+        """Marks orphaned RUNNING GitHub source scans as FAILED on server startup or before new scans."""
+        active = active_scan_ids or set()
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.session_scope() as conn:
+            rows = conn.execute(
+                "SELECT id FROM github_scans WHERE status = 'RUNNING'"
+            ).fetchall()
+            orphaned_ids = [str(r[0]) for r in rows if str(r[0]) not in active]
+            for sid in orphaned_ids:
+                conn.execute(
+                    "UPDATE github_scans SET status = 'FAILED', error_code = 'SCAN_INTERRUPTED', completed_at = ? WHERE id = ?",
+                    (now, sid),
+                )
+        return len(orphaned_ids)
+
     def update_scan(
         self,
         scan_id: str,

@@ -6,11 +6,14 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
+  Copy,
   Download,
   GitBranch,
+  Loader2,
   Lock,
   Plus,
   Shield,
+  Sparkles,
   Square,
   Sun,
   Moon,
@@ -31,7 +34,11 @@ import {
   FindingItem,
   TargetCheckResponse,
 } from "@/types/assessment";
-import { GitHubCodeScanPanel } from "@/components/GitHubCodeScanPanel";
+import {
+  GitHubCodeScanPanel,
+  GitHubFinding,
+  GitHubScan,
+} from "@/components/GitHubCodeScanPanel";
 
 const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
@@ -63,6 +70,15 @@ interface WorkStep {
   subtitle: string;
   duration: string;
   done: boolean;
+}
+
+interface BugAIEnrichment {
+  what_bug_can_do: string;
+  root_cause: string;
+  how_to_resolve: string[];
+  secure_code_fix: string;
+  verification_steps: string[];
+  model?: string;
 }
 
 /**
@@ -147,10 +163,6 @@ export function validateWebsiteUrlSyntax(rawInput: string): {
   };
 }
 
-/**
- * Helper to coerce bare website names (e.g., "localhost:3000" or "google.xcom")
- * when entered in the start screen input box.
- */
 function normalizeUserWebsiteInput(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";
@@ -191,6 +203,51 @@ const PRESET_PAST_SCANS: PastScanItem[] = [
   },
 ];
 
+const INITIAL_PROGRESSIVE_STEPS: Omit<WorkStep, "done">[] = [
+  {
+    id: "step-1",
+    kind: "think",
+    title: "Making a safe plan for this scan.",
+    subtitle: "Planning: website map",
+    duration: "2.4s",
+  },
+  {
+    id: "step-2",
+    kind: "act",
+    title: "Opening the sign-in page to see how it works.",
+    subtitle: "Reading: /login page",
+    duration: "3.2s",
+  },
+  {
+    id: "step-3",
+    kind: "saw",
+    title: "The page accepts an email address and password.",
+    subtitle: "Reading: sign-in form",
+    duration: "1.8s",
+  },
+  {
+    id: "step-4",
+    kind: "act",
+    title: "Looking for files that may have been left open.",
+    subtitle: "Reading: /ftp folder",
+    duration: "4.6s",
+  },
+  {
+    id: "step-5",
+    kind: "think",
+    title: "Checking whether the login trusts unusual text.",
+    subtitle: "Planning: safe login test",
+    duration: "2.1s",
+  },
+  {
+    id: "step-6",
+    kind: "act",
+    title: "Trying a tricky email on the login page to see if it lets me in.",
+    subtitle: "Testing: /rest/user/login",
+    duration: "6.3s",
+  },
+];
+
 const DEMO_FINDINGS: FindingItem[] = [
   {
     id: "demo-1",
@@ -199,6 +256,7 @@ const DEMO_FINDINGS: FindingItem[] = [
     vulnerability_name: "SQL injection",
     endpoint: "/rest/user/login",
     target_endpoint: "/rest/user/login",
+    full_url: "http://localhost:3000/rest/user/login",
     http_method: "POST",
     vulnerability_category: "SQL injection",
     vulnerability_type: "SQL Injection / Authentication Bypass",
@@ -214,7 +272,8 @@ const DEMO_FINDINGS: FindingItem[] = [
     impact_explanation: "An attacker can enter the administrator account or any user account without knowing the password.",
     description: "the login trusts what people type instead of treating it as plain text.",
     remediation_recommendation: "Use parameterized queries for sign-in checks.\nNever build SQL statements by joining raw user text.",
-    remediation_guidance: "Use prepared statements with bound parameters.",
+    remediation_guidance: "const [user] = await sequelize.query('SELECT * FROM Users WHERE email = :email AND password = :password', { replacements: { email, password: hash(password) } });",
+    proposed_code_fix: "const [user] = await sequelize.query(\n  'SELECT * FROM Users WHERE email = :email AND password = :password AND deletedAt IS NULL',\n  { replacements: { email: req.body.email, password: security.hash(req.body.password) } }\n);",
     beginner_explanation: {
       simple_title: "Someone can sign in without a password",
       technical_name: "SQL injection",
@@ -229,11 +288,20 @@ const DEMO_FINDINGS: FindingItem[] = [
         "Use parameterized database queries (prepared statements) for login lookups.",
         "Reject unexpected characters and validate email format before querying.",
       ],
+      secure_code_example: "const [user] = await sequelize.query(\n  'SELECT * FROM Users WHERE email = :email AND password = :password AND deletedAt IS NULL',\n  { replacements: { email: req.body.email, password: security.hash(req.body.password) } }\n);",
       how_to_verify_fix: ["Retest POST /rest/user/login with `' OR 1=1--` and verify HTTP 401 is returned."],
       additional_recommendations: [],
       evidence_summary: [],
       what_is_not_yet_proven: [],
     },
+    source_code_available: true,
+    source_repository: "juice-shop/juice-shop",
+    source_file: "routes/login.ts",
+    source_start_line: 34,
+    source_end_line: 49,
+    source_function: "login()",
+    line_numbers: "34-49",
+    vulnerable_snippet: `models.sequelize.query(\`SELECT * FROM Users WHERE email = '\${req.body.email || ''}' AND password = '\${security.hash(req.body.password || '')}' AND deletedAt IS NULL\`, { model: UserModel, plain: true })`,
     evidence: {
       id: "ev-demo-1",
       finding_id: "demo-1",
@@ -260,6 +328,7 @@ const DEMO_FINDINGS: FindingItem[] = [
     vulnerability_name: "Broken access control (BOLA / IDOR)",
     endpoint: "/rest/basket/1",
     target_endpoint: "/rest/basket/1",
+    full_url: "http://localhost:3000/rest/basket/1",
     http_method: "GET",
     vulnerability_category: "Broken access control",
     vulnerability_type: "BOLA / IDOR",
@@ -276,6 +345,7 @@ const DEMO_FINDINGS: FindingItem[] = [
     description: "the server checks that someone is signed in, but does not check whether the basket belongs to them.",
     remediation_recommendation: "Verify that the requested basket ID belongs to the currently authenticated user.\nReturn HTTP 403 when ownership does not match.",
     remediation_guidance: "Enforce object-level ownership checks.",
+    proposed_code_fix: "const basket = await BasketModel.findOne({ where: { id: req.params.id, UserId: req.user.id } });\nif (!basket) {\n  return res.status(403).json({ error: 'Forbidden: basket does not belong to current user' });\n}",
     beginner_explanation: {
       simple_title: "Anyone can read another customer's shopping basket",
       technical_name: "Broken access control",
@@ -290,11 +360,20 @@ const DEMO_FINDINGS: FindingItem[] = [
         "Check that the basket's userId matches the signed-in user before returning data.",
         "Scope database queries by the authenticated session's user ID.",
       ],
+      secure_code_example: "const basket = await BasketModel.findOne({ where: { id: req.params.id, UserId: req.user.id } });\nif (!basket) {\n  return res.status(403).json({ error: 'Forbidden: basket does not belong to current user' });\n}",
       how_to_verify_fix: ["Request /rest/basket/1 as a secondary user and verify HTTP 403 Forbidden."],
       additional_recommendations: [],
       evidence_summary: [],
       what_is_not_yet_proven: [],
     },
+    source_code_available: true,
+    source_repository: "juice-shop/juice-shop",
+    source_file: "routes/basket.ts",
+    source_start_line: 18,
+    source_end_line: 31,
+    source_function: "retrieveBasket()",
+    line_numbers: "18-31",
+    vulnerable_snippet: `BasketModel.findOne({ where: { id: req.params.id }, include: [{ model: ProductModel, paranoid: false, as: 'Products' }] })`,
     evidence: {
       id: "ev-demo-2",
       finding_id: "demo-2",
@@ -321,6 +400,7 @@ const DEMO_FINDINGS: FindingItem[] = [
     vulnerability_name: "Public file listing",
     endpoint: "/ftp",
     target_endpoint: "/ftp",
+    full_url: "http://localhost:3000/ftp",
     http_method: "GET",
     vulnerability_category: "Public file listing",
     vulnerability_type: "Sensitive Directory Exposure",
@@ -337,6 +417,7 @@ const DEMO_FINDINGS: FindingItem[] = [
     description: "anyone can open the /ftp address and browse files without signing in.",
     remediation_recommendation: "Disable directory listing on the web server.\nRemove sensitive backup and internal files from public static folders.",
     remediation_guidance: "Restrict access to /ftp.",
+    proposed_code_fix: "app.use('/ftp', requireAdminAuth, express.static('ftp', { index: false, dotfiles: 'deny' }));",
     beginner_explanation: {
       simple_title: "Internal files folder is open to the public",
       technical_name: "Public file listing",
@@ -351,11 +432,20 @@ const DEMO_FINDINGS: FindingItem[] = [
         "Turn off automatic folder listing for /ftp.",
         "Move private documents outside the public web root and require sign-in.",
       ],
+      secure_code_example: "app.use('/ftp', requireAdminAuth, express.static('ftp', { index: false, dotfiles: 'deny' }));",
       how_to_verify_fix: ["Request GET /ftp without a session and verify HTTP 403 or 404."],
       additional_recommendations: [],
       evidence_summary: [],
       what_is_not_yet_proven: [],
     },
+    source_code_available: true,
+    source_repository: "juice-shop/juice-shop",
+    source_file: "server.ts",
+    source_start_line: 214,
+    source_end_line: 221,
+    source_function: "servePublicFtp()",
+    line_numbers: "214-221",
+    vulnerable_snippet: `app.use('/ftp', serveIndexMiddleware, serveIndex('ftp', { icons: true }))`,
     evidence: {
       id: "ev-demo-3",
       finding_id: "demo-3",
@@ -382,6 +472,7 @@ const DEMO_FINDINGS: FindingItem[] = [
     vulnerability_name: "Unvalidated redirect",
     endpoint: "/redirect?to=https://example.test",
     target_endpoint: "/redirect?to=https://example.test",
+    full_url: "http://localhost:3000/redirect?to=https://example.test",
     http_method: "GET",
     vulnerability_category: "Unvalidated redirect",
     vulnerability_type: "Open Redirect",
@@ -398,6 +489,7 @@ const DEMO_FINDINGS: FindingItem[] = [
     description: "the redirect address accepts outside websites without checking whether they are trusted.",
     remediation_recommendation: "Only allow links to a short list of trusted websites.\nShow a clear warning before someone leaves the website.",
     remediation_guidance: "Validate redirect targets against an explicit allowlist.",
+    proposed_code_fix: "const ALLOWED_REDIRECTS = new Set(['/basket', '/profile']);\nif (!ALLOWED_REDIRECTS.has(req.query.to)) {\n  return res.status(400).json({ error: 'Unapproved redirect destination' });\n}\nres.redirect(req.query.to);",
     beginner_explanation: {
       simple_title: "Links can silently send people to another website",
       technical_name: "Unvalidated redirect",
@@ -412,11 +504,20 @@ const DEMO_FINDINGS: FindingItem[] = [
         "Only allow links to a short list of trusted websites.",
         "Show a clear warning before someone leaves the website.",
       ],
+      secure_code_example: "const ALLOWED_REDIRECTS = new Set(['/basket', '/profile']);\nif (!ALLOWED_REDIRECTS.has(req.query.to)) {\n  return res.status(400).json({ error: 'Unapproved redirect destination' });\n}\nres.redirect(req.query.to);",
       how_to_verify_fix: ["Request GET /redirect?to=https://example.test and verify HTTP 400 or 403."],
       additional_recommendations: [],
       evidence_summary: [],
       what_is_not_yet_proven: [],
     },
+    source_code_available: true,
+    source_repository: "juice-shop/juice-shop",
+    source_file: "routes/redirect.ts",
+    source_start_line: 19,
+    source_end_line: 33,
+    source_function: "performRedirect()",
+    line_numbers: "19-33",
+    vulnerable_snippet: `const toUrl: string = req.query.to as string;\nres.redirect(toUrl);`,
     evidence: {
       id: "ev-demo-4",
       finding_id: "demo-4",
@@ -476,11 +577,23 @@ export default function Home() {
   const [summaryData, setSummaryData] = useState<AssessmentSummaryResponse | null>(null);
   const [, setAiProvider] = useState<AIProviderInfo | null>(null);
 
-  // Report UI controls
+  // Progressive step-by-step reveal state
+  const [visibleStepCount, setVisibleStepCount] = useState<number>(1);
   const [hideWork, setHideWork] = useState<boolean>(false);
   const [severityFilter, setSeverityFilter] = useState<string>("ALL");
   const [showHowAiFound, setShowHowAiFound] = useState<boolean>(false);
-  const [elapsedSeconds, setElapsedSeconds] = useState<number>(16);
+  const [elapsedSeconds, setElapsedSeconds] = useState<number>(1);
+
+  // Per-bug Q&A (Gemini API #1) and Code/Fix Enrichment (Gemini API #2)
+  const [bugQuestions, setBugQuestions] = useState<Record<string, string>>({});
+  const [bugChatHistory, setBugChatHistory] = useState<
+    Record<string, { role: "user" | "assistant"; content: string; model?: string }[]>
+  >({});
+  const [bugChatLoading, setBugChatLoading] = useState<Record<string, boolean>>({});
+  const [bugChatError, setBugChatError] = useState<Record<string, string>>({});
+  const [bugAiEnrichment, setBugAiEnrichment] = useState<Record<string, BugAIEnrichment>>({});
+  const [bugAiLoading, setBugAiLoading] = useState<Record<string, boolean>>({});
+  const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
 
   // Reconnection tracking
   const [reconnectAttempts, setReconnectAttempts] = useState<number>(0);
@@ -490,6 +603,285 @@ export default function Home() {
   // Refs
   const eventSourceRef = useRef<EventSource | null>(null);
   const connectSSERef = useRef<((scanId: string) => void) | null>(null);
+  const githubEventSourceRef = useRef<EventSource | null>(null);
+
+  /**
+   * Maps a GitHubFinding (from AST + Gemini source code scanner) into the unified FindingItem
+   * so GitHub branch scans render directly on the main dashboard report with full file/line location,
+   * proof, Gemini API #2 code fixes, Gemini API #1 Q&A, and PDF export.
+   */
+  const mapGitHubFindingToDashboard = useCallback(
+    (gf: GitHubFinding, scanId: string): FindingItem => {
+      const review = gf.ai_review;
+      const categoryClean = (gf.vulnerability_category || "SECURITY_ISSUE").replaceAll("_", " ");
+      const fileLoc = `${gf.file_path}:${gf.start_line}-${gf.end_line}`;
+      const ghUrl =
+        gf.github_url ||
+        `https://github.com/${gf.repository}/blob/${gf.commit_sha}/${gf.file_path}#L${gf.start_line}-L${gf.end_line}`;
+      const simpleTitle =
+        review?.simple_title ||
+        `${categoryClean} in ${gf.file_path} (lines ${gf.start_line}-${gf.end_line})`;
+      const whatProblem =
+        review?.what_is_the_problem || gf.detection_explanation;
+      const whatAttackerCanDo =
+        review?.what_attacker_can_do ||
+        `An attacker or untrusted caller could exploit this ${categoryClean.toLowerCase()} vulnerability in ${fileLoc}.`;
+      const howToFixArr =
+        review?.how_to_fix && review.how_to_fix.length > 0
+          ? review.how_to_fix
+          : [gf.remediation_hint || "Enforce strict input validation and server-side security checks."];
+
+      return {
+        id: gf.finding_id,
+        scan_id: scanId,
+        title: simpleTitle,
+        vulnerability_name: categoryClean,
+        endpoint: fileLoc,
+        target_endpoint: fileLoc,
+        affected_endpoint: fileLoc,
+        full_url: ghUrl,
+        http_method: "SOURCE",
+        vulnerability_category: categoryClean,
+        vulnerability_type: gf.vulnerability_category,
+        affected_role: "source_code",
+        affected_roles: ["repository_branch"],
+        expected_behavior: `Safe implementation in ${gf.file_path} (lines ${gf.start_line}-${gf.end_line}).`,
+        actual_behavior: gf.code_snippet,
+        confirmation_status: "SUSPICIOUS",
+        status: "suspected",
+        validation_status: "SUSPICIOUS",
+        access_verdict: gf.classification || "POTENTIAL_VULNERABILITY",
+        severity: String(gf.severity || "HIGH").toUpperCase(),
+        impact_explanation: whatAttackerCanDo,
+        description: whatProblem,
+        remediation_recommendation: howToFixArr.join("\n"),
+        remediation_guidance: gf.remediation_hint || "",
+        proposed_code_fix: review?.recommended_code_change || "",
+        source_code_available: true,
+        source_repository: `${gf.repository} (${gf.branch})`,
+        source_file: gf.file_path,
+        source_line: `${gf.start_line}-${gf.end_line}`,
+        source_start_line: gf.start_line,
+        source_end_line: gf.end_line,
+        source_function: gf.function_name || undefined,
+        function_name: gf.function_name || undefined,
+        line_numbers: `${gf.start_line}-${gf.end_line}`,
+        vulnerable_snippet: gf.code_snippet,
+        vulnerable_code: gf.code_snippet,
+        beginner_explanation: {
+          simple_title: simpleTitle,
+          technical_name: `${categoryClean} (${gf.language})`,
+          risk_level: String(gf.severity || "HIGH").toUpperCase(),
+          risk_description: whatProblem,
+          confirmation_status: "SUSPICIOUS",
+          what_is_the_problem: whatProblem,
+          what_attacker_can_do: whatAttackerCanDo,
+          real_world_impact:
+            review?.affected_data_or_users ||
+            `Impacts ${gf.repository} branch '${gf.branch}' at ${fileLoc}.`,
+          why_it_matters: review?.why_it_happens || gf.detection_explanation,
+          how_to_fix: howToFixArr,
+          secure_code_example: review?.recommended_code_change || null,
+          how_to_verify_fix: review?.tests_to_add || [],
+          additional_recommendations: review?.additional_recommendations || [],
+          evidence_summary: [],
+          what_is_not_yet_proven: review?.limitations || [],
+        },
+        evidence: {
+          id: `ev-${gf.finding_id}`,
+          finding_id: gf.finding_id,
+          endpoint: fileLoc,
+          http_method: "SOURCE",
+          testing_role: gf.branch,
+          expected_behavior: gf.remediation_hint,
+          actual_behavior: gf.detection_explanation,
+          validation_status: "SUSPICIOUS",
+          request_method: "SOURCE",
+          request_url: ghUrl,
+          request_headers: {
+            Repository: gf.repository,
+            Branch: gf.branch,
+            File: `${gf.file_path}:${gf.start_line}-${gf.end_line}`,
+          },
+          response_status: 200,
+          relevant_response_headers: { Language: gf.language },
+          sanitized_response_body: gf.code_snippet,
+          evidence_sha256: gf.commit_sha || "",
+          redacted_fields: [],
+        },
+      };
+    },
+    []
+  );
+
+  const loadCompletedGitHubScanIntoDashboard = useCallback(
+    (scan: GitHubScan) => {
+      const repoLabel = `https://github.com/${scan.owner}/${scan.repository}/tree/${scan.branch}`;
+      const mapped = (scan.findings || []).map((gf) =>
+        mapGitHubFindingToDashboard(gf, scan.id)
+      );
+      setAssessmentId(scan.id);
+      setTargetUrl(repoLabel);
+      setFindings(mapped);
+      setSummaryData({
+        id: scan.id,
+        target_url: repoLabel,
+        status: scan.status,
+        started_at: scan.created_at,
+        completed_at: scan.completed_at || new Date().toISOString(),
+        endpoints_discovered_count: Object.values(scan.languages || {}).reduce(
+          (a, b) => a + Number(b || 0),
+          0
+        ),
+        endpoints_tested_count: Object.values(scan.languages || {}).reduce(
+          (a, b) => a + Number(b || 0),
+          0
+        ),
+        confirmed_findings_count: mapped.length,
+        suspicious_results_count: 0,
+        summary_text: `Found ${mapped.length} security issues in ${scan.owner}/${scan.repository} (${scan.branch}).`,
+        markdown_content: "",
+        findings: mapped,
+        stages: {},
+        events: [],
+      });
+      setVisibleStepCount(12);
+      setStatus(scan.status === "FAILED" ? "failed" : "completed");
+      setShowGitHubModal(false);
+
+      setPastScans((prev) => {
+        const label = `${scan.repository} (${scan.branch})`;
+        const filtered = prev.filter(
+          (p) => p.id !== scan.id && p.label.toLowerCase() !== label.toLowerCase()
+        );
+        return [
+          {
+            id: scan.id,
+            label,
+            target_url: repoLabel,
+            status: scan.status,
+            started_at: scan.created_at,
+          },
+          ...filtered,
+        ].slice(0, 5);
+      });
+      setActivePastScanId(scan.id);
+    },
+    [mapGitHubFindingToDashboard]
+  );
+
+  const startGitHubDashboardScan = useCallback(
+    (info: {
+      scanId: string;
+      owner: string;
+      repository: string;
+      branch: string;
+      commitSha?: string;
+    }) => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+      if (githubEventSourceRef.current) {
+        githubEventSourceRef.current.close();
+      }
+
+      const repoUrl = `https://github.com/${info.owner}/${info.repository}/tree/${info.branch}`;
+      setShowGitHubModal(false);
+      setAssessmentId(info.scanId);
+      setActivePastScanId(info.scanId);
+      setTargetUrl(repoUrl);
+      setError(null);
+      setElapsedSeconds(1);
+      setVisibleStepCount(1);
+      setStatus("running");
+      setStages({});
+      setFindings([]);
+      setSummaryData(null);
+      setSeverityFilter("ALL");
+      setActivityEvents([
+        {
+          id: 1,
+          assessment_id: info.scanId,
+          event_type: "agent_thinking",
+          stage: "github_branch_checkout",
+          message: `Connecting to GitHub repository ${info.owner}/${info.repository} (branch: ${info.branch})...`,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+
+      const stream = new EventSource(
+        `${API_BASE_URL}/api/github/scans/${info.scanId}/stream`,
+        { withCredentials: true }
+      );
+      githubEventSourceRef.current = stream;
+
+      stream.addEventListener("activity", (msg) => {
+        try {
+          const ev = JSON.parse((msg as MessageEvent).data) as {
+            id: number;
+            stage: string;
+            message: string;
+            timestamp: string;
+          };
+          setActivityEvents((prev) => {
+            if (prev.some((p) => p.message === ev.message)) return prev;
+            return [
+              ...prev,
+              {
+                id: ev.id,
+                assessment_id: info.scanId,
+                event_type:
+                  ev.stage === "ai_review"
+                    ? "agent_thinking"
+                    : ev.stage === "language_detection"
+                    ? "endpoint_discovered"
+                    : "tool_started",
+                stage: ev.stage || "branch_file_analysis",
+                message: ev.message,
+                timestamp: ev.timestamp || new Date().toISOString(),
+              },
+            ];
+          });
+        } catch {
+          // ignore
+        }
+      });
+
+      stream.addEventListener("done", () => {
+        stream.close();
+        void (async () => {
+          try {
+            const res = await fetch(
+              `${API_BASE_URL}/api/github/scans/${info.scanId}`,
+              { credentials: "include", cache: "no-store" }
+            );
+            if (res.ok) {
+              const scanData = (await res.json()) as GitHubScan;
+              loadCompletedGitHubScanIntoDashboard(scanData);
+            } else {
+              setStatus("completed");
+            }
+          } catch {
+            setStatus("completed");
+          }
+        })();
+      });
+
+      stream.addEventListener("error", (msg) => {
+        if (msg instanceof MessageEvent && msg.data) {
+          try {
+            const errData = JSON.parse(msg.data) as { message?: string };
+            setError(errData.message || "GitHub repository scan failed.");
+          } catch {
+            setError("GitHub repository scan failed.");
+          }
+          stream.close();
+          setStatus("failed");
+        }
+      });
+    },
+    [loadCompletedGitHubScanIntoDashboard]
+  );
 
   const isRunningState =
     status === "connecting" ||
@@ -508,56 +900,92 @@ export default function Home() {
     }
   }, []);
 
-  // Live timer while scanning
+  // Live timer + step-by-step one-by-one reveal while scanning
   useEffect(() => {
     if (!isRunningState) return;
-    const interval = setInterval(() => {
+    const timerInterval = setInterval(() => {
       setElapsedSeconds((prev) => prev + 1);
     }, 1000);
-    return () => clearInterval(interval);
+
+    // Reveal one new step every 2.0 seconds so steps appear strictly one by one
+    const stepInterval = setInterval(() => {
+      setVisibleStepCount((prev) => prev + 1);
+    }, 2000);
+
+    return () => {
+      clearInterval(timerInterval);
+      clearInterval(stepInterval);
+    };
   }, [isRunningState]);
 
+  /**
+   * Deduplicates past scans by label, filters out unit-test dummy *.example domains,
+   * and caps the sidebar list to a clean maximum of 5 items.
+   */
   const mapPastScansPayload = useCallback((data: unknown): PastScanItem[] | null => {
-    if (!Array.isArray(data) || data.length === 0) return null;
-    const mapped: PastScanItem[] = data.map(
-      (item: { id: string; target_url: string; status: string; started_at?: string }) => {
-        let label = item.target_url;
-        try {
-          const u = new URL(item.target_url);
-          if (u.hostname === "localhost" && u.port === "3000") {
-            label = "OWASP Juice Shop";
-          } else {
-            label = u.hostname;
-          }
-        } catch {
-          // keep raw
+    if (!Array.isArray(data)) return null;
+
+    const seenLabels = new Set<string>();
+    const deduplicated: PastScanItem[] = [];
+
+    for (const item of data as { id: string; target_url: string; status: string; started_at?: string }[]) {
+      if (!item || !item.target_url) continue;
+      let label = item.target_url;
+      let hostLower = "";
+      try {
+        const u = new URL(item.target_url);
+        hostLower = u.hostname.toLowerCase();
+        if (hostLower === "localhost" && u.port === "3000") {
+          label = "OWASP Juice Shop";
+        } else {
+          label = u.hostname;
         }
-        return {
-          id: item.id,
-          label,
-          target_url: item.target_url,
-          status: item.status,
-          started_at: item.started_at,
-        };
+      } catch {
+        // keep raw
       }
-    );
-    const combined = [...mapped];
+
+      // Skip automated test suite dummy domains so navbar stays clean
+      if (
+        hostLower.endsWith(".example") ||
+        hostLower.endsWith(".example.com") ||
+        hostLower === "example.com"
+      ) {
+        continue;
+      }
+
+      const normKey = label.toLowerCase();
+      if (seenLabels.has(normKey)) continue;
+      seenLabels.add(normKey);
+
+      deduplicated.push({
+        id: item.id,
+        label,
+        target_url: item.target_url,
+        status: item.status,
+        started_at: item.started_at,
+      });
+
+      if (deduplicated.length >= 3) break;
+    }
+
     for (const preset of PRESET_PAST_SCANS) {
-      if (!combined.some((c) => c.label.toLowerCase() === preset.label.toLowerCase())) {
-        combined.push(preset);
+      const normKey = preset.label.toLowerCase();
+      if (!seenLabels.has(normKey) && deduplicated.length < 5) {
+        seenLabels.add(normKey);
+        deduplicated.push(preset);
       }
     }
-    return combined;
+
+    return deduplicated.slice(0, 5);
   }, []);
 
-  // Fetch backend health & past assessments
   const loadPastScans = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/api/assessments?limit=12`);
+      const res = await fetch(`${API_BASE_URL}/api/assessments?limit=15`);
       if (!res.ok) return;
       const data = await res.json();
       const combined = mapPastScansPayload(data);
-      if (combined) {
+      if (combined && combined.length > 0) {
         setPastScans(combined);
       }
     } catch {
@@ -575,20 +1003,18 @@ export default function Home() {
       })
       .catch(() => {});
 
-    fetch(`${API_BASE_URL}/api/assessments?limit=12`)
+    fetch(`${API_BASE_URL}/api/assessments?limit=15`)
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         const combined = mapPastScansPayload(data);
-        if (combined) {
+        if (combined && combined.length > 0) {
           setPastScans(combined);
+          setActivePastScanId(combined[0].id);
         }
       })
       .catch(() => {});
   }, [mapPastScansPayload]);
 
-  /**
-   * Evaluates server-side target authorization status via ScopeGuard & TargetRegistry.
-   */
   const checkTargetAuth = useCallback(async (candidateUrl: string) => {
     const normalizedCandidate = normalizeUserWebsiteInput(candidateUrl);
     if (!normalizedCandidate) {
@@ -790,7 +1216,12 @@ export default function Home() {
       es.addEventListener("activity", (e: MessageEvent) => {
         try {
           const eventItem: AssessmentEventItem = JSON.parse(e.data);
-          setActivityEvents((prev) => [...prev, eventItem]);
+          setActivityEvents((prev) => {
+            const exists = prev.some(
+              (p) => p.event_type === eventItem.event_type && p.message === eventItem.message
+            );
+            return exists ? prev : [...prev, eventItem];
+          });
 
           const etype = eventItem.event_type;
           const stage = eventItem.stage;
@@ -951,6 +1382,7 @@ export default function Home() {
     setTargetUrl(finalUrl);
     setError(null);
     setElapsedSeconds(1);
+    setVisibleStepCount(1);
     setStatus("connecting");
     setStages({});
     setActivityEvents([]);
@@ -997,7 +1429,10 @@ export default function Home() {
   };
 
   const stopAssessment = async () => {
-    if (!assessmentId) {
+    if (githubEventSourceRef.current) {
+      githubEventSourceRef.current.close();
+    }
+    if (!assessmentId || assessmentId.startsWith("gscan_")) {
       setStatus("cancelled");
       return;
     }
@@ -1052,6 +1487,9 @@ export default function Home() {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
     }
+    if (githubEventSourceRef.current) {
+      githubEventSourceRef.current.close();
+    }
     localStorage.removeItem("authscope_last_assessment_id");
     setAssessmentId(null);
     setStatus("ready");
@@ -1061,6 +1499,7 @@ export default function Home() {
     setDiscoveredEndpoints([]);
     setSummaryData(null);
     setError(null);
+    setVisibleStepCount(1);
     setSeverityFilter("ALL");
     setReconnectAttempts(0);
     reconnectAttemptsRef.current = 0;
@@ -1071,8 +1510,23 @@ export default function Home() {
     setError(null);
     setSeverityFilter("ALL");
 
+    if (item.id.startsWith("gscan_")) {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/github/scans/${item.id}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (res.ok) {
+          const scanData = (await res.json()) as GitHubScan;
+          loadCompletedGitHubScanIntoDashboard(scanData);
+        }
+      } catch {
+        // ignore
+      }
+      return;
+    }
+
     if (item.isPreset) {
-      // Check if there is a real backend scan matching this URL first
       const matchingReal = pastScans.find(
         (s) => !s.isPreset && s.target_url === item.target_url
       );
@@ -1080,7 +1534,6 @@ export default function Home() {
         await selectPastScan(matchingReal);
         return;
       }
-      // Show the rich completed report view from the design prototype
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
       }
@@ -1088,6 +1541,7 @@ export default function Home() {
       setTargetUrl(item.target_url);
       setFindings(DEMO_FINDINGS);
       setElapsedSeconds(42);
+      setVisibleStepCount(6);
       setSummaryData({
         id: item.id,
         target_url: item.target_url,
@@ -1122,12 +1576,14 @@ export default function Home() {
 
       const bStatus = String(data.status).toLowerCase();
       if (bStatus === "completed") {
+        setVisibleStepCount(Math.max(6, (data.events || []).length));
         setStatus("completed");
       } else if (bStatus === "failed") {
         setStatus("failed");
       } else if (bStatus === "cancelled") {
         setStatus("cancelled");
       } else {
+        setVisibleStepCount(1);
         setStatus("running");
         connectSSE(data.id);
       }
@@ -1136,112 +1592,88 @@ export default function Home() {
     }
   };
 
-  // Convert live activityEvents into plain-language `think` / `act` / `saw` steps
+  /**
+   * Builds the step-by-step work log and reveals items ONE BY ONE based on `visibleStepCount`.
+   * Only the newest visible step while scanning has `done: false` (`○`), and all previous steps have `done: true` (`✓`).
+   */
   const workSteps: WorkStep[] = useMemo(() => {
-    if (activityEvents.length === 0) {
-      const baseSteps: WorkStep[] = [
-        {
-          id: "step-1",
-          kind: "think",
-          title: "Making a safe plan for this scan.",
-          subtitle: "Planning: website map",
-          duration: "2.4s",
-          done: true,
-        },
-        {
-          id: "step-2",
-          kind: "act",
-          title: "Opening the sign-in page to see how it works.",
-          subtitle: "Reading: /login page",
-          duration: "3.2s",
-          done: true,
-        },
-        {
-          id: "step-3",
-          kind: "saw",
-          title: "The page accepts an email address and password.",
-          subtitle: "Reading: sign-in form",
-          duration: "1.8s",
-          done: true,
-        },
-        {
-          id: "step-4",
-          kind: "act",
-          title: "Looking for files that may have been left open.",
-          subtitle: "Reading: /ftp folder",
-          duration: "4.6s",
-          done: elapsedSeconds > 18 || !isRunningState,
-        },
-      ];
-      if (elapsedSeconds > 18 || !isRunningState) {
-        baseSteps.push(
-          {
-            id: "step-5",
-            kind: "think",
-            title: "Checking whether the login trusts unusual text.",
-            subtitle: "Planning: safe login test",
-            duration: "2.1s",
-            done: true,
-          },
-          {
-            id: "step-6",
-            kind: "act",
-            title: "Trying a tricky email on the login page to see if it lets me in.",
-            subtitle: "Testing: /rest/user/login",
-            duration: "6.3s",
-            done: !isRunningState,
-          }
-        );
-      }
-      return baseSteps;
-    }
+    const rawPool: Omit<WorkStep, "done">[] =
+      activityEvents.length === 0
+        ? INITIAL_PROGRESSIVE_STEPS
+        : activityEvents.map((ev, idx) => {
+            const etype = (ev.event_type || "").toLowerCase();
+            let kind: "think" | "act" | "saw" = "act";
+            if (
+              etype.includes("think") ||
+              etype.includes("plan") ||
+              etype.includes("hypothesis") ||
+              ev.stage === "scope_validation"
+            ) {
+              kind = "think";
+            } else if (
+              etype.includes("discovered") ||
+              etype.includes("completed") ||
+              etype.includes("validated") ||
+              etype.includes("confirmed")
+            ) {
+              kind = "saw";
+            }
 
-    return activityEvents.map((ev, idx) => {
-      const etype = (ev.event_type || "").toLowerCase();
-      let kind: "think" | "act" | "saw" = "act";
-      if (
-        etype.includes("think") ||
-        etype.includes("plan") ||
-        etype.includes("hypothesis") ||
-        ev.stage === "scope_validation"
-      ) {
-        kind = "think";
-      } else if (
-        etype.includes("discovered") ||
-        etype.includes("completed") ||
-        etype.includes("validated") ||
-        etype.includes("confirmed")
-      ) {
-        kind = "saw";
-      }
+            const subtitle = ev.stage
+              ? `${
+                  kind === "think"
+                    ? "Planning"
+                    : kind === "saw"
+                    ? "Reading"
+                    : "Testing"
+                }: ${ev.stage.replace(/_/g, " ")}`
+              : "Reading: target response";
+            const seededDurations = [
+              "2.4s",
+              "3.2s",
+              "1.8s",
+              "4.6s",
+              "2.1s",
+              "6.3s",
+              "1.5s",
+              "2.9s",
+            ];
+            return {
+              id: `${ev.id || idx}-${ev.timestamp}`,
+              kind,
+              title: ev.message,
+              subtitle,
+              duration: seededDurations[idx % seededDurations.length],
+            };
+          });
 
-      const subtitle = ev.stage
-        ? `${kind === "think" ? "Planning" : kind === "saw" ? "Observed" : "Testing"}: ${ev.stage.replace(/_/g, " ")}`
-        : "Reading: target response";
-      const seededDurations = ["2.4s", "3.2s", "1.8s", "4.6s", "2.1s", "6.3s", "1.5s", "2.9s"];
-      const isLast = idx === activityEvents.length - 1;
+    // Gate by visibleStepCount while running so steps appear one by one!
+    const countToShow = isRunningState
+      ? Math.max(1, Math.min(visibleStepCount, rawPool.length))
+      : rawPool.length;
 
+    const sliced = rawPool.slice(0, countToShow);
+    return sliced.map((step, idx) => {
+      const isNewestVisible = idx === sliced.length - 1;
       return {
-        id: `${ev.id || idx}-${ev.timestamp}`,
-        kind,
-        title: ev.message,
-        subtitle,
-        duration: seededDurations[idx % seededDurations.length],
-        done: !isRunningState || !isLast,
+        ...step,
+        done: !isRunningState || !isNewestVisible,
       };
     });
-  }, [activityEvents, elapsedSeconds, isRunningState]);
+  }, [activityEvents, isRunningState, visibleStepCount]);
 
   const currentStageLabel = useMemo(() => {
-    if (elapsedSeconds > 18 || status === "analyzing" || status === "findings_discovered") {
+    if (visibleStepCount >= 5 || status === "analyzing" || status === "findings_discovered") {
       return "Verify stage";
     }
     return "Explore stage";
-  }, [elapsedSeconds, status]);
+  }, [visibleStepCount, status]);
 
   const currentLiveHeadline = useMemo(() => {
-    const activeStep = [...workSteps].reverse().find((s) => !s.done) || workSteps[workSteps.length - 1];
-    return activeStep?.title || "Looking for files that may have been left open.";
+    const activeStep =
+      [...workSteps].reverse().find((s) => !s.done) ||
+      workSteps[workSteps.length - 1];
+    return activeStep?.title || "Making a safe plan for this scan.";
   }, [workSteps]);
 
   const formatTimer = (sec: number) => {
@@ -1253,7 +1685,13 @@ export default function Home() {
   // Report findings and metrics
   const displayFindings = useMemo(() => {
     const raw = summaryData?.findings?.length ? summaryData.findings : findings;
-    const sevOrder: Record<string, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, INFO: 0 };
+    const sevOrder: Record<string, number> = {
+      CRITICAL: 4,
+      HIGH: 3,
+      MEDIUM: 2,
+      LOW: 1,
+      INFO: 0,
+    };
     return [...raw].sort(
       (a, b) =>
         (sevOrder[String(b.severity).toUpperCase()] ?? 0) -
@@ -1339,6 +1777,14 @@ export default function Home() {
   const formatRequestProof = (f: FindingItem): string => {
     const ev = f.evidence;
     const method = ev?.request_method || f.http_method || "GET";
+    if (method === "SOURCE") {
+      const repoLine = f.source_repository ? `Repository: ${f.source_repository}` : "";
+      const fileLine = `File: ${f.source_file || f.target_endpoint || "/"}`;
+      const linesLine = f.line_numbers || f.source_line ? `Lines: ${f.line_numbers || f.source_line}` : "";
+      const fnLine = f.source_function || f.function_name ? `Function: ${f.source_function || f.function_name}` : "";
+      const ghLine = f.full_url ? `GitHub: ${f.full_url}` : "";
+      return [repoLine, fileLine, linesLine, fnLine, ghLine].filter(Boolean).join("\n");
+    }
     const path = f.target_endpoint || f.endpoint || ev?.endpoint || "/";
     if (path === "/rest/user/login" && method === "POST") {
       return `POST /rest/user/login\nContent-Type: application/json\n\n{"email":"' OR 1=1--","password":"[hidden]"}`;
@@ -1349,16 +1795,21 @@ export default function Home() {
           .map(([k, v]) => `${k}: ${v}`)
           .join("\n")
       : "";
-    return [
-      `${method} ${path}`,
-      headersLines,
-    ]
-      .filter(Boolean)
-      .join("\n");
+    return [`${method} ${path}`, headersLines].filter(Boolean).join("\n");
   };
 
   const formatResponseProof = (f: FindingItem): string => {
     const ev = f.evidence;
+    const method = ev?.request_method || f.http_method || "GET";
+    if (method === "SOURCE") {
+      return (
+        f.vulnerable_snippet ||
+        f.vulnerable_code ||
+        ev?.sanitized_response_body ||
+        f.actual_behavior ||
+        "// Vulnerable source code excerpt"
+      );
+    }
     const statusNum = ev?.response_status || 200;
     const statusLabel =
       statusNum === 200
@@ -1377,7 +1828,10 @@ export default function Home() {
     return `HTTP/1.1 ${statusLabel}\n\n${body}`;
   };
 
-  const extractFixBullets = (f: FindingItem): string[] => {
+  const extractFixBullets = (f: FindingItem, enriched?: BugAIEnrichment): string[] => {
+    if (enriched?.how_to_resolve?.length) {
+      return enriched.how_to_resolve;
+    }
     if (f.beginner_explanation?.how_to_fix?.length) {
       return f.beginner_explanation.how_to_fix;
     }
@@ -1394,10 +1848,405 @@ export default function Home() {
         ];
   };
 
+  const resolveFullUrlFound = (f: FindingItem): string => {
+    if (f.website_location?.full_url) return f.website_location.full_url;
+    if (f.full_url) return f.full_url;
+    if (f.evidence?.request_url) return f.evidence.request_url;
+    const base = (summaryData?.target_url || targetUrl || "http://localhost:3000").replace(/\/$/, "");
+    const path = f.target_endpoint || f.endpoint || "/";
+    return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+  };
+
+  const resolveBugSourceLocationLabel = (f: FindingItem): string => {
+    const file = f.source_file || f.source_location?.file_path || "";
+    const lines =
+      f.line_numbers ||
+      f.source_line ||
+      f.source_location?.line_range ||
+      (f.source_start_line
+        ? `${f.source_start_line}${f.source_end_line && f.source_end_line !== f.source_start_line ? `-${f.source_end_line}` : ""}`
+        : f.source_location?.start_line
+        ? String(f.source_location.start_line)
+        : "");
+    if (!file) return "";
+    return lines ? `${file}:${lines}` : file;
+  };
+
+  /**
+   * Builds and downloads a multi-page PDF 1.4 security report directly in the browser.
+   * Every bug's title, severity, exact URL/route & source code file/line location,
+   * impact, proof, remediation steps, and secure code fix are included.
+   */
+  const downloadReportPdf = () => {
+    const cleanPdfText = (input: string): string =>
+      input
+        .replace(/[^\x20-\x7E]/g, " ")
+        .replace(/\\/g, "\\\\")
+        .replace(/\(/g, "\\(")
+        .replace(/\)/g, "\\)");
+
+    const wrapLine = (text: string, maxChars = 90): string[] => {
+      const normalized = text.replace(/\r\n/g, "\n");
+      const rawLines = normalized.split("\n");
+      const out: string[] = [];
+      for (const raw of rawLines) {
+        const trimmed = raw.trimEnd();
+        if (!trimmed) {
+          out.push("");
+          continue;
+        }
+        const words = trimmed.split(/\s+/);
+        let cur = "";
+        for (const w of words) {
+          if (!cur) {
+            cur = w.length > maxChars ? w.slice(0, maxChars) : w;
+          } else if (cur.length + 1 + w.length <= maxChars) {
+            cur += ` ${w}`;
+          } else {
+            out.push(cur);
+            cur = w.length > maxChars ? w.slice(0, maxChars) : w;
+          }
+        }
+        if (cur) out.push(cur);
+      }
+      return out;
+    };
+
+    type PdfLine = { text: string; bold?: boolean; size?: number; indent?: number };
+    const reportLines: PdfLine[] = [];
+    const targetDisplay = summaryData?.target_url || targetUrl || "http://localhost:3000";
+
+    reportLines.push({ text: "AUTHSCOPE SECURITY ASSESSMENT REPORT", bold: true, size: 15 });
+    reportLines.push({ text: `Target / Repository: ${targetDisplay}`, bold: true, size: 10 });
+    reportLines.push({
+      text: `Report ID: ${assessmentId || "authscope-scan"}   |   Generated: ${new Date().toISOString()}`,
+      size: 9,
+    });
+    reportLines.push({
+      text: `Risk Score: ${riskScore}/100   |   Total Findings: ${displayFindings.length} (Critical: ${severityCounts.CRITICAL}, High: ${severityCounts.HIGH}, Medium: ${severityCounts.MEDIUM}, Low: ${severityCounts.LOW})`,
+      bold: true,
+      size: 10,
+    });
+    reportLines.push({
+      text: "==========================================================================================",
+      size: 9,
+    });
+    reportLines.push({ text: "" });
+
+    displayFindings.forEach((f, idx) => {
+      const fid = f.id || `finding-${idx}`;
+      const enriched = bugAiEnrichment[fid];
+      const sev = String(f.severity || "MEDIUM").toUpperCase();
+      const title = f.beginner_explanation?.simple_title || f.title || "Security Issue";
+      const category =
+        f.beginner_explanation?.technical_name ||
+        f.vulnerability_name ||
+        f.vulnerability_category ||
+        "Authorization / Security Issue";
+      const fullUrl = resolveFullUrlFound(f);
+      const routePath = f.target_endpoint || f.endpoint || f.affected_endpoint || "/";
+      const sourceLoc = resolveBugSourceLocationLabel(f);
+      const fnName = f.source_function || f.function_name || f.source_location?.function_name || "";
+      const repoLabel = f.source_repository || githubRepo || "";
+      const whatCanDo =
+        enriched?.what_bug_can_do ||
+        f.beginner_explanation?.what_attacker_can_do ||
+        f.impact_explanation ||
+        f.description ||
+        "";
+      const fixes = extractFixBullets(f, enriched);
+      const codeFix =
+        enriched?.secure_code_fix ||
+        f.beginner_explanation?.secure_code_example ||
+        f.proposed_code_fix ||
+        "";
+
+      reportLines.push({
+        text: `${idx + 1}. [${sev}] ${title}`,
+        bold: true,
+        size: 12,
+      });
+      reportLines.push({ text: `Category: ${category}`, bold: true, size: 9 });
+      reportLines.push({ text: "BUG LOCATION:", bold: true, size: 9 });
+      for (const l of wrapLine(`- URL / Endpoint: ${f.http_method || "GET"} ${fullUrl} (route: ${routePath})`, 88)) {
+        reportLines.push({ text: l, size: 9, indent: 10 });
+      }
+      if (sourceLoc) {
+        reportLines.push({
+          text: `- Source File & Lines: ${sourceLoc}${fnName ? `  (Function: ${fnName})` : ""}`,
+          bold: true,
+          size: 9,
+          indent: 10,
+        });
+      }
+      if (repoLabel) {
+        reportLines.push({
+          text: `- Repository / Branch: ${repoLabel}`,
+          size: 9,
+          indent: 10,
+        });
+      }
+
+      reportLines.push({ text: "WHAT THIS BUG CAN DO:", bold: true, size: 9 });
+      for (const l of wrapLine(whatCanDo, 88)) {
+        reportLines.push({ text: l, size: 9, indent: 10 });
+      }
+
+      reportLines.push({ text: "PROOF / EVIDENCE:", bold: true, size: 9 });
+      for (const l of wrapLine(formatRequestProof(f), 86).slice(0, 6)) {
+        reportLines.push({ text: `  ${l}`, size: 8, indent: 10 });
+      }
+      for (const l of wrapLine(formatResponseProof(f), 86).slice(0, 8)) {
+        reportLines.push({ text: `  ${l}`, size: 8, indent: 10 });
+      }
+
+      reportLines.push({ text: "HOW TO RESOLVE IT:", bold: true, size: 9 });
+      fixes.forEach((step) => {
+        for (const l of wrapLine(`* ${step}`, 88)) {
+          reportLines.push({ text: l, size: 9, indent: 10 });
+        }
+      });
+
+      if (codeFix) {
+        reportLines.push({ text: "RECOMMENDED CODE FIX:", bold: true, size: 9 });
+        for (const l of wrapLine(codeFix, 86).slice(0, 10)) {
+          reportLines.push({ text: `  ${l}`, size: 8, indent: 10 });
+        }
+      }
+
+      reportLines.push({
+        text: "------------------------------------------------------------------------------------------",
+        size: 9,
+      });
+      reportLines.push({ text: "" });
+    });
+
+    const linesPerPage = 48;
+    const pages: PdfLine[][] = [];
+    for (let i = 0; i < reportLines.length; i += linesPerPage) {
+      pages.push(reportLines.slice(i, i + linesPerPage));
+    }
+    if (pages.length === 0) {
+      pages.push([{ text: "No findings recorded.", size: 11 }]);
+    }
+
+    // Assemble PDF 1.4 objects
+    const objects: string[] = [];
+    // 1: Catalog, 2: Pages, 3: Font Regular, 4: Font Bold
+    objects.push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    const pageObjIds: number[] = [];
+    let nextId = 5;
+    for (let p = 0; p < pages.length; p++) {
+      pageObjIds.push(nextId);
+      nextId += 2; // page + content stream
+    }
+    objects.push(
+      `2 0 obj\n<< /Type /Pages /Kids [${pageObjIds.map((id) => `${id} 0 R`).join(" ")}] /Count ${
+        pages.length
+      } >>\nendobj\n`
+    );
+    objects.push(
+      "3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+    );
+    objects.push(
+      "4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\nendobj\n"
+    );
+
+    pages.forEach((pageLines, pIdx) => {
+      const pageId = pageObjIds[pIdx];
+      const contentId = pageId + 1;
+      let y = 755;
+      const cmds: string[] = ["BT"];
+      for (const line of pageLines) {
+        const fontRef = line.bold ? "/F2" : "/F1";
+        const sz = line.size || 9;
+        const x = 42 + (line.indent || 0);
+        const safe = cleanPdfText(line.text || "");
+        cmds.push(`${fontRef} ${sz} Tf`);
+        cmds.push(`1 0 0 1 ${x} ${y} Tm (${safe}) Tj`);
+        y -= sz + 5;
+      }
+      cmds.push(
+        `/F1 8 Tf 1 0 0 1 42 28 Tm (AuthScope Security Report - Page ${pIdx + 1} of ${
+          pages.length
+        }) Tj`
+      );
+      cmds.push("ET");
+      const streamBody = cmds.join("\n");
+
+      objects.push(
+        `${pageId} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>\nendobj\n`
+      );
+      objects.push(
+        `${contentId} 0 obj\n<< /Length ${streamBody.length} >>\nstream\n${streamBody}\nendstream\nendobj\n`
+      );
+    });
+
+    let pdf = "%PDF-1.4\n";
+    const offsets: number[] = [0];
+    for (const obj of objects) {
+      offsets.push(pdf.length);
+      pdf += obj;
+    }
+    const xrefStart = pdf.length;
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (let i = 1; i < offsets.length; i++) {
+      pdf += `${String(offsets[i]).padStart(10, "0")} 00000 n \n`;
+    }
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`;
+
+    const blob = new Blob([pdf], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `authscope-security-report-${assessmentId || "scan"}.pdf`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /**
+   * Gemini API #1: Interactive Question & Answer about a specific bug.
+   */
+  const askGeminiQuestionAboutBug = async (finding: FindingItem, customQuestion?: string) => {
+    const fid = finding.id;
+    const questionText = (customQuestion ?? bugQuestions[fid] ?? "").trim();
+    if (!questionText || bugChatLoading[fid]) return;
+
+    const currentHistory = bugChatHistory[fid] || [];
+    setBugChatLoading((prev) => ({ ...prev, [fid]: true }));
+    setBugChatError((prev) => ({ ...prev, [fid]: "" }));
+
+    try {
+      const fullUrl = resolveFullUrlFound(finding);
+      const res = await fetch(`${API_BASE_URL}/api/ai/finding-qa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: finding.beginner_explanation?.simple_title || finding.title,
+          category:
+            finding.beginner_explanation?.technical_name ||
+            finding.vulnerability_category ||
+            finding.vulnerability_type,
+          severity: String(finding.severity || "MEDIUM"),
+          endpoint: fullUrl,
+          http_method: finding.http_method || finding.evidence?.request_method || "GET",
+          description:
+            finding.beginner_explanation?.what_is_the_problem ||
+            finding.description ||
+            finding.actual_behavior,
+          what_could_happen:
+            finding.beginner_explanation?.what_attacker_can_do ||
+            finding.impact_explanation ||
+            "",
+          request_proof: formatRequestProof(finding),
+          response_proof: formatResponseProof(finding),
+          how_to_fix: extractFixBullets(finding, bugAiEnrichment[fid]),
+          question: questionText,
+          history: currentHistory.slice(-6).map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+        }),
+      });
+
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload.detail || "Gemini Q&A could not answer right now.");
+      }
+
+      setBugChatHistory((prev) => ({
+        ...prev,
+        [fid]: [
+          ...currentHistory,
+          { role: "user", content: questionText },
+          {
+            role: "assistant",
+            content: String(payload.answer || ""),
+            model: payload.model,
+          },
+        ],
+      }));
+      if (!customQuestion) {
+        setBugQuestions((prev) => ({ ...prev, [fid]: "" }));
+      }
+    } catch (err: unknown) {
+      setBugChatError((prev) => ({
+        ...prev,
+        [fid]: err instanceof Error ? err.message : "Could not reach Gemini Q&A.",
+      }));
+    } finally {
+      setBugChatLoading((prev) => ({ ...prev, [fid]: false }));
+    }
+  };
+
+  /**
+   * Gemini API #2: Generates what the bug can do, how to resolve it, and secure remediation code.
+   */
+  const generateBugImpactAndFixWithGemini2 = async (finding: FindingItem) => {
+    const fid = finding.id;
+    if (bugAiLoading[fid]) return;
+
+    setBugAiLoading((prev) => ({ ...prev, [fid]: true }));
+    try {
+      const fullUrl = resolveFullUrlFound(finding);
+      const res = await fetch(`${API_BASE_URL}/api/ai/explain-bug`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: finding.beginner_explanation?.simple_title || finding.title,
+          category:
+            finding.beginner_explanation?.technical_name ||
+            finding.vulnerability_category ||
+            finding.vulnerability_type,
+          severity: String(finding.severity || "MEDIUM"),
+          endpoint: fullUrl,
+          http_method: finding.http_method || finding.evidence?.request_method || "GET",
+          description:
+            finding.beginner_explanation?.what_is_the_problem ||
+            finding.description ||
+            finding.actual_behavior,
+          request_proof: formatRequestProof(finding),
+          response_proof: formatResponseProof(finding),
+          code_snippet: finding.vulnerable_snippet || finding.vulnerable_code || "",
+          language: "Node.js / Express / TypeScript",
+        }),
+      });
+
+      const payload = await res.json();
+      if (res.ok) {
+        setBugAiEnrichment((prev) => ({
+          ...prev,
+          [fid]: {
+            what_bug_can_do: payload.what_bug_can_do,
+            root_cause: payload.root_cause,
+            how_to_resolve: payload.how_to_resolve || [],
+            secure_code_fix: payload.secure_code_fix || "",
+            verification_steps: payload.verification_steps || [],
+            model: payload.model,
+          },
+        }));
+      }
+    } catch {
+      // ignore
+    } finally {
+      setBugAiLoading((prev) => ({ ...prev, [fid]: false }));
+    }
+  };
+
+  const copySecureCode = async (fid: string, code: string) => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedCodeId(fid);
+      window.setTimeout(() => setCopiedCodeId(null), 1600);
+    } catch {
+      // ignore
+    }
+  };
+
   return (
     <div className={`workspace ${lightMode ? "workspace-light" : ""}`}>
       {/* =================================================================== */}
-      {/* LEFT THIN SIDEBAR                                                   */}
+      {/* LEFT THIN SIDEBAR (Clean, Deduplicated, Max 5 Past Scans)           */}
       {/* =================================================================== */}
       <aside className="sidebar" aria-label="Workspace navigation">
         <div className="brand">
@@ -1417,9 +2266,7 @@ export default function Home() {
         <div className="past-scans-heading">PAST SCANS</div>
         <div className="past-scans-list">
           {pastScans.map((scan) => {
-            const isActive =
-              activePastScanId === scan.id ||
-              Boolean(assessmentId && assessmentId === scan.id);
+            const isActive = activePastScanId === scan.id;
             return (
               <button
                 key={scan.id}
@@ -1465,7 +2312,6 @@ export default function Home() {
                 }}
                 className="start-form"
               >
-                {/* Left-aligned Link GitHub project button above the website address box */}
                 <div className="github-pill-row">
                   <button
                     type="button"
@@ -1494,7 +2340,6 @@ export default function Home() {
                   )}
                 </div>
 
-                {/* Website address input box */}
                 <div className="address-box">
                   <input
                     type="text"
@@ -1556,18 +2401,16 @@ export default function Home() {
         )}
 
         {/* ================================================================= */}
-        {/* SCREEN 2 & 4: ACTIVE SCANNING VIEW                                */}
+        {/* SCREEN 2 & 4: ACTIVE SCANNING VIEW (Step-by-Step One-by-One)      */}
         {/* ================================================================= */}
         {status !== "ready" && isRunningState && (
           <div className="scan-workspace">
-            {/* Top-right target URL bubble */}
             <div className="target-url-pill-row">
               <div className="target-url-pill">
                 {summaryData?.target_url || targetUrl || "http://localhost:3000"}
               </div>
             </div>
 
-            {/* Stage & Timer */}
             <div className="scan-status-meta">
               <span className="scan-status-dot" />
               <span>
@@ -1575,10 +2418,8 @@ export default function Home() {
               </span>
             </div>
 
-            {/* Live Plain-English Action Headline */}
             <h1 className="scan-live-headline">{currentLiveHeadline}</h1>
 
-            {/* Collapsible Work Log */}
             <div className="work-log-header">
               <button
                 type="button"
@@ -1633,14 +2474,23 @@ export default function Home() {
         {/* ================================================================= */}
         {status !== "ready" && !isRunningState && (
           <div className="scan-workspace" data-testid="final-assessment-summary">
-            {/* Top-right target URL bubble */}
-            <div className="target-url-pill-row">
+            <div className="target-url-pill-row" style={{ gap: "8px" }}>
+              {status !== "failed" && (
+                <button
+                  type="button"
+                  onClick={downloadReportPdf}
+                  className="download-report-btn"
+                  style={{ padding: "6px 12px", fontSize: "12px" }}
+                >
+                  <Download size={13} />
+                  <span>Download PDF report</span>
+                </button>
+              )}
               <div className="target-url-pill">
                 {summaryData?.target_url || targetUrl || "http://localhost:3000"}
               </div>
             </div>
 
-            {/* Checkmark & Summary Headline */}
             <div className="report-check-mark">
               <Check size={16} />
             </div>
@@ -1684,7 +2534,6 @@ export default function Home() {
               </div>
             )}
 
-            {/* Risk Score & Severity Counts Bar */}
             {status !== "failed" && (
               <>
                 <div className="risk-score-strip">
@@ -1747,6 +2596,7 @@ export default function Home() {
                 {/* Numbered Problem List */}
                 <div>
                   {filteredFindings.map((finding, idx) => {
+                    const fid = finding.id || `finding-${idx}`;
                     const sevKey = String(finding.severity || "LOW").toLowerCase();
                     const sevClass =
                       sevKey === "critical" ||
@@ -1774,16 +2624,30 @@ export default function Home() {
                       finding.endpoint ||
                       finding.affected_endpoint ||
                       "/";
-                    const whatCouldHappen =
+                    const fullUrlFound = resolveFullUrlFound(finding);
+                    const httpMethod =
+                      finding.http_method ||
+                      finding.evidence?.request_method ||
+                      "GET";
+
+                    const enriched = bugAiEnrichment[fid];
+                    const whatBugCanDo =
+                      enriched?.what_bug_can_do ||
                       finding.beginner_explanation?.what_attacker_can_do ||
                       finding.impact_explanation ||
                       finding.description;
-                    const fixBullets = extractFixBullets(finding);
+                    const fixBullets = extractFixBullets(finding, enriched);
+                    const secureCodeFix =
+                      enriched?.secure_code_fix ||
+                      finding.beginner_explanation?.secure_code_example ||
+                      finding.proposed_code_fix ||
+                      "";
+                    const chatMessages = bugChatHistory[fid] || [];
 
                     return (
                       <section
-                        key={finding.id || idx}
-                        id={`problem-${finding.id || idx}`}
+                        key={fid}
+                        id={`problem-${fid}`}
                         className="problem-section"
                       >
                         <div className="problem-header">
@@ -1806,8 +2670,67 @@ export default function Home() {
                           <p className="problem-category-line">
                             <strong>{categoryLabel}:</strong> {plainProblem}
                           </p>
-                          <p className="problem-route">{routePath}</p>
 
+                          {/* Explicit Bug Location (Website URL/Route + Source File & Line Numbers) */}
+                          <div className="bug-location-box">
+                            <div className="bug-location-header">
+                              <span>Bug Location</span>
+                              {fullUrlFound.includes("github.com/") && (
+                                <a
+                                  href={fullUrlFound}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-[#5fa37f] hover:underline lowercase font-normal"
+                                >
+                                  View exact lines on GitHub ↗
+                                </a>
+                              )}
+                            </div>
+                            <div className="bug-location-grid">
+                              <div className="bug-location-item">
+                                <span className="bug-location-label">
+                                  {httpMethod === "SOURCE"
+                                    ? "GitHub Location:"
+                                    : "URL / Route:"}
+                                </span>
+                                <span className="bug-location-value">
+                                  [{httpMethod}] {fullUrlFound}{" "}
+                                  {routePath && routePath !== fullUrlFound
+                                    ? `(route: ${routePath})`
+                                    : ""}
+                                </span>
+                              </div>
+                              {resolveBugSourceLocationLabel(finding) && (
+                                <div className="bug-location-item">
+                                  <span className="bug-location-label">
+                                    File &amp; Lines:
+                                  </span>
+                                  <span className="bug-location-value">
+                                    {resolveBugSourceLocationLabel(finding)}
+                                    {finding.source_function ||
+                                    finding.function_name
+                                      ? ` · fn: ${
+                                          finding.source_function ||
+                                          finding.function_name
+                                        }`
+                                      : ""}
+                                  </span>
+                                </div>
+                              )}
+                              {finding.source_repository && (
+                                <div className="bug-location-item">
+                                  <span className="bug-location-label">
+                                    Repo / Branch:
+                                  </span>
+                                  <span className="bug-location-value">
+                                    {finding.source_repository}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Proof */}
                           <h3 className="proof-heading">Proof</h3>
                           <p className="proof-sub">
                             Private values have been hidden.
@@ -1815,14 +2738,20 @@ export default function Home() {
 
                           <div className="proof-box">
                             <div className="proof-col">
-                              <div className="proof-col-header">REQUEST SENT</div>
+                              <div className="proof-col-header">
+                                {httpMethod === "SOURCE"
+                                  ? "SOURCE FILE LOCATION"
+                                  : "REQUEST SENT"}
+                              </div>
                               <pre className="proof-col-pre">
                                 {formatRequestProof(finding)}
                               </pre>
                             </div>
                             <div className="proof-col">
                               <div className="proof-col-header">
-                                RESPONSE RECEIVED
+                                {httpMethod === "SOURCE"
+                                  ? "VULNERABLE CODE EXCERPT"
+                                  : "RESPONSE RECEIVED"}
                               </div>
                               <pre className="proof-col-pre">
                                 {formatResponseProof(finding)}
@@ -1830,22 +2759,79 @@ export default function Home() {
                             </div>
                           </div>
 
+                          {/* What this bug can do & How to resolve it (Gemini API #2) */}
                           <div className="impact-fix-callout">
-                            <h4 className="callout-heading">What could happen</h4>
-                            <p className="callout-text">{whatCouldHappen}</p>
+                            <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                              <h4 className="callout-heading" style={{ margin: 0 }}>
+                                What could happen (What this bug can do)
+                              </h4>
+                              <button
+                                type="button"
+                                disabled={bugAiLoading[fid]}
+                                onClick={() =>
+                                  void generateBugImpactAndFixWithGemini2(finding)
+                                }
+                                className="inline-flex items-center gap-1.5 rounded-md border border-[#41413d] bg-[#2d2d2a] hover:bg-[#373733] px-2.5 py-1 text-[11px] text-[#5fa37f] disabled:opacity-50"
+                              >
+                                {bugAiLoading[fid] ? (
+                                  <Loader2 size={12} className="animate-spin" />
+                                ) : (
+                                  <Sparkles size={12} />
+                                )}
+                                <span>
+                                  {bugAiLoading[fid]
+                                    ? "Analyzing with Gemini API #2..."
+                                    : enriched
+                                    ? "Refresh AI Fix & Code (Gemini API #2)"
+                                    : "Generate AI Fix & Code (Gemini API #2)"}
+                                </span>
+                              </button>
+                            </div>
 
-                            <h4 className="callout-heading">How to fix it</h4>
+                            <p className="callout-text">{whatBugCanDo}</p>
+
+                            <h4 className="callout-heading">How to fix it (How to resolve)</h4>
                             <ul className="fix-checklist">
                               {fixBullets.map((step, sIdx) => (
                                 <li key={sIdx}>
-                                  <Check
-                                    size={13}
-                                    className="fix-check-icon"
-                                  />
+                                  <Check size={13} className="fix-check-icon" />
                                   <span>{step}</span>
                                 </li>
                               ))}
                             </ul>
+
+                            {/* Secure Code Fix Block (Gemini API #2) */}
+                            {secureCodeFix && (
+                              <div className="secure-code-container">
+                                <div className="secure-code-header">
+                                  <span>
+                                    SECURE CODE FIX{" "}
+                                    {enriched?.model
+                                      ? `· Generated by Gemini API #2 (${enriched.model})`
+                                      : ""}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void copySecureCode(fid, secureCodeFix)
+                                    }
+                                    className="inline-flex items-center gap-1 text-[#d0cec8] hover:text-white"
+                                  >
+                                    {copiedCodeId === fid ? (
+                                      <Check size={12} />
+                                    ) : (
+                                      <Copy size={12} />
+                                    )}
+                                    <span>
+                                      {copiedCodeId === fid ? "Copied" : "Copy code"}
+                                    </span>
+                                  </button>
+                                </div>
+                                <pre className="secure-code-pre">
+                                  {secureCodeFix}
+                                </pre>
+                              </div>
+                            )}
 
                             {assessmentId && !assessmentId.startsWith("preset-") && (
                               <div className="mt-3 flex items-center gap-3">
@@ -1869,6 +2855,93 @@ export default function Home() {
                               </div>
                             )}
                           </div>
+
+                          {/* Interactive Question & Answer Text Field (Gemini API #1) */}
+                          <div className="bug-qa-section">
+                            <div className="bug-qa-header">
+                              <span>
+                                Ask a question about this bug (Gemini API #1 · Text &amp; Q&amp;A)
+                              </span>
+                            </div>
+
+                            <div className="bug-qa-chips">
+                              {[
+                                "What can an attacker do with this bug?",
+                                "How do I fix this step by step?",
+                                "How can I test that this bug is resolved?",
+                              ].map((chip) => (
+                                <button
+                                  key={chip}
+                                  type="button"
+                                  disabled={bugChatLoading[fid]}
+                                  onClick={() =>
+                                    void askGeminiQuestionAboutBug(finding, chip)
+                                  }
+                                  className="bug-qa-chip"
+                                >
+                                  {chip}
+                                </button>
+                              ))}
+                            </div>
+
+                            {chatMessages.length > 0 && (
+                              <div className="bug-qa-messages">
+                                {chatMessages.map((msg, mIdx) => (
+                                  <div
+                                    key={mIdx}
+                                    className={`bug-qa-bubble ${msg.role}`}
+                                  >
+                                    {msg.content}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            {bugChatError[fid] && (
+                              <p className="text-xs text-[#d2675f] mb-2">
+                                {bugChatError[fid]}
+                              </p>
+                            )}
+
+                            <div className="bug-qa-input-box">
+                              <input
+                                type="text"
+                                value={bugQuestions[fid] || ""}
+                                onChange={(e) =>
+                                  setBugQuestions((prev) => ({
+                                    ...prev,
+                                    [fid]: e.target.value,
+                                  }))
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void askGeminiQuestionAboutBug(finding);
+                                  }
+                                }}
+                                placeholder={`Ask a question about ${routePath}...`}
+                                aria-label={`Ask a question about ${plainTitle}`}
+                              />
+                              <button
+                                type="button"
+                                disabled={
+                                  bugChatLoading[fid] ||
+                                  !(bugQuestions[fid] || "").trim()
+                                }
+                                onClick={() =>
+                                  void askGeminiQuestionAboutBug(finding)
+                                }
+                                className="bug-qa-send-btn"
+                                aria-label="Send question"
+                              >
+                                {bugChatLoading[fid] ? (
+                                  <Loader2 size={14} className="animate-spin" />
+                                ) : (
+                                  <ArrowUp size={15} />
+                                )}
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       </section>
                     );
@@ -1887,6 +2960,7 @@ export default function Home() {
 
                     <div className="join-chain-row">
                       {displayFindings.slice(0, 3).map((f, idx) => {
+                        const fid = f.id || `finding-${idx}`;
                         const sev = String(f.severity || "LOW").toLowerCase();
                         const sevClass =
                           sev === "critical" || sev === "high" || sev === "medium"
@@ -1896,12 +2970,12 @@ export default function Home() {
                           f.target_endpoint || f.endpoint || "/endpoint";
                         const shortRoute = rawRoute.split("?")[0];
                         return (
-                          <React.Fragment key={f.id || idx}>
+                          <React.Fragment key={fid}>
                             <button
                               type="button"
                               onClick={() => {
                                 const el = document.getElementById(
-                                  `problem-${f.id || idx}`
+                                  `problem-${fid}`
                                 );
                                 el?.scrollIntoView({ behavior: "smooth" });
                               }}
@@ -1978,11 +3052,19 @@ export default function Home() {
                 <div className="report-bottom-actions">
                   <button
                     type="button"
-                    onClick={downloadReportJson}
+                    onClick={downloadReportPdf}
                     className="download-report-btn"
                   >
                     <Download size={14} />
-                    <span>Download report</span>
+                    <span>Download PDF report</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={downloadReportJson}
+                    className="scan-another-btn"
+                  >
+                    <Download size={14} />
+                    <span>Download JSON</span>
                   </button>
                   <button
                     type="button"
@@ -2013,7 +3095,7 @@ export default function Home() {
       </main>
 
       {/* =================================================================== */}
-      {/* GITHUB PROJECT LINKING MODAL                                        */}
+      {/* GITHUB PROJECT LINKING & AI SOURCE SCAN MODAL                       */}
       {/* =================================================================== */}
       {showGitHubModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs">
@@ -2022,7 +3104,7 @@ export default function Home() {
               <div className="flex items-center gap-2.5">
                 <GitBranch className="w-4 h-4 text-[#5fa37f]" />
                 <h3 className="text-sm font-semibold text-[#f4f2ec]">
-                  Link GitHub project
+                  Link GitHub project &amp; AI Source Code Scan
                 </h3>
               </div>
               <button
@@ -2047,7 +3129,11 @@ export default function Home() {
               />
             </div>
 
-            <GitHubCodeScanPanel apiBaseUrl={API_BASE_URL} />
+            <GitHubCodeScanPanel
+              apiBaseUrl={API_BASE_URL}
+              onScanStarted={startGitHubDashboardScan}
+              onScanSelected={loadCompletedGitHubScanIntoDashboard}
+            />
           </div>
         </div>
       )}

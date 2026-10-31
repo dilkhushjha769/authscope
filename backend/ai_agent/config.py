@@ -161,11 +161,13 @@ class GeminiAgentConfig(BaseModel):
         retry_delay: Optional[float] = None,
     ) -> "GeminiAgentConfig":
         """Constructs a GeminiAgentConfig from explicit parameters, OS environment variables, or settings."""
-        resolved_key = (
-            _clean_api_key(api_key)
-            or _clean_api_key(os.environ.get("GEMINI_API_KEY"))
-            or _clean_api_key(getattr(settings, "gemini_api_key", None))
-        )
+        if api_key is not None:
+            resolved_key = _clean_api_key(api_key)
+        else:
+            resolved_key = (
+                _clean_api_key(os.environ.get("GEMINI_API_KEY"))
+                or _clean_api_key(getattr(settings, "gemini_api_key", None))
+            )
 
         resolved_model = (
             (model.strip() if isinstance(model, str) and model.strip() else None)
@@ -242,4 +244,35 @@ class GeminiAgentConfig(BaseModel):
             max_retries=resolved_retries,
             retry_delay=resolved_delay,
         )
+
+    @classmethod
+    def for_qa(cls) -> "GeminiAgentConfig":
+        """Gemini API #1: Text Generation & Finding Question-Answer configuration."""
+        qa_key = (
+            _clean_api_key(os.environ.get("GEMINI_QA_API_KEY"))
+            or _clean_api_key(getattr(settings, "gemini_qa_api_key", None))
+        )
+        qa_model = (
+            os.environ.get("GEMINI_QA_MODEL", "").strip()
+            or getattr(settings, "gemini_qa_model", "").strip()
+        )
+        if not qa_key and not qa_model:
+            return cls.from_env()
+        return cls.from_env(api_key=qa_key or None, model=qa_model or None)
+
+    @classmethod
+    def for_code_analysis(cls) -> "GeminiAgentConfig":
+        """Gemini API #2: Bug Impact, Remediation & Code Generation configuration."""
+        code_key = (
+            _clean_api_key(os.environ.get("GEMINI_CODE_API_KEY"))
+            or _clean_api_key(getattr(settings, "gemini_code_api_key", None))
+        )
+        code_model = (
+            os.environ.get("GEMINI_CODE_MODEL", "").strip()
+            or getattr(settings, "gemini_code_model", "").strip()
+        )
+        if not code_key and not code_model:
+            return cls.from_env()
+        return cls.from_env(api_key=code_key or None, model=code_model or None)
+
 
