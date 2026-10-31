@@ -218,6 +218,38 @@ button { color: inherit; }
 .workspace-light .target-bubble { border-color: #dedbd7; background: #f0eeeb; }
 .workspace-light .target-bubble p, .workspace-light .assistant-byline strong { color: #282624; }
 .workspace-light .assistant-intro, .workspace-light .activity-item p { color: #4e4b47; }
+
+/* Screenshot-inspired scan progress and evidence presentation. */
+.scan-progress { margin: 0 0 24px 47px; padding: 0 0 18px; border-bottom: 1px solid #383838; }
+.scan-progress-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.scan-progress-heading strong { color: #eee; font-size: 16px; font-weight: 550; }
+.scan-progress-heading > span { flex: 0 0 auto; color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
+.current-stage { margin: 7px 0 12px; color: var(--muted); font-size: 11px; }
+.stage-list { display: flex; flex-direction: column; gap: 0; margin: 0; padding: 0; list-style: none; }
+.stage-list li { display: flex; align-items: center; gap: 10px; min-height: 28px; color: var(--muted); font-size: 11px; text-transform: capitalize; }
+.stage-list li > span { display: grid; width: 15px; height: 15px; flex: 0 0 15px; place-items: center; border: 1px solid #555; border-radius: 50%; color: var(--accent); }
+.stage-list .stage-done > span { border-color: #4a8067; background: #21372c; }
+.stage-list .stage-current { color: var(--text); }
+.stage-list .stage-current > span { border-color: var(--accent); }
+.stage-list .stage-current i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+.proof-grid { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; margin: 9px 0 12px; border: 1px solid #3a3a37; border-radius: 9px; }
+.proof-grid > div + div { border-left: 1px solid #3a3a37; }
+.proof-grid > div > span { display: block; padding: 8px 10px; border-bottom: 1px solid #3a3a37; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
+.proof-grid pre { min-height: 72px; max-height: 280px; margin: 0; overflow: auto; padding: 10px; background: #222220; color: #d0cec8; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.evidence-technical { margin: 8px 0 12px; }
+.evidence-technical summary { cursor: pointer; color: var(--muted); font-size: 10px; }
+.report-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.workspace-light .scan-progress { border-color: #e8e6df; }
+.workspace-light .scan-progress-heading strong { color: #292929; }
+.workspace-light .proof-grid, .workspace-light .proof-grid > div + div, .workspace-light .proof-grid > div > span { border-color: #e1dfdc; }
+.workspace-light .proof-grid pre { background: #f4f2ef; color: #333; }
+@media (max-width: 520px) {
+  .scan-progress { margin-left: 0; }
+  .scan-progress-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .proof-grid { grid-template-columns: 1fr; }
+  .proof-grid > div + div { border-top: 1px solid #3a3a37; border-left: 0; }
+  .report-actions { justify-content: flex-end; }
+}
 .workspace-light .panel-title { border-color: #dedbd7; color: #333; }
 .workspace-light .activity-item { border-color: #e7e4e0; }
 .workspace-light .finding-card { background: #fff; }

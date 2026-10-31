@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckCircle2, Clock3, Copy, FileText, Loader2, Menu, Moon, Plus, Sun, Wifi, WifiOff, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckCircle2, Clock3, Copy, Download, FileText, Loader2, Menu, Moon, Plus, Sun, Wifi, WifiOff, X } from "lucide-react";
 import { api, openAssessmentStream } from "@/api/client";
 import type { AssessmentActivityEvent, AssessmentSummaryResponse } from "@/types/assessment";
 
@@ -13,6 +13,7 @@ const active = (status: string) => ["CREATED", "QUEUED", "PENDING", "RUNNING"].i
 const asText = (value: unknown) => typeof value === "string" ? value : "";
 const uniqueFindings = (items: Finding[]) => [...new Map(items.map((item, index) => [asText(item.id) || `missing-id-${index}`, item])).values()];
 const shortDate = (value?: string) => value ? new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "Recent";
+const formatDuration = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 
 export default function Home() {
   const [target, setTarget] = useState("");
@@ -33,6 +34,7 @@ export default function Home() {
   const [copiedFix, setCopiedFix] = useState<string | null>(null);
   const [severityFilter, setSeverityFilter] = useState("ALL");
   const [showAllActivity, setShowAllActivity] = useState(false);
+  const [clockNow, setClockNow] = useState(0);
   const stream = useRef<AbortController | null>(null);
   const seenIds = useRef(new Set<number>());
 
@@ -89,6 +91,13 @@ export default function Home() {
     return () => { window.clearTimeout(timer); stream.current?.abort(); };
   }, [fetchHistory]);
 
+  useEffect(() => {
+    if (!active(status)) return;
+    const initial = window.setTimeout(() => setClockNow(Date.now()), 0);
+    const timer = window.setInterval(() => setClockNow(Date.now()), 1000);
+    return () => { window.clearTimeout(initial); window.clearInterval(timer); };
+  }, [status]);
+
   const start = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (busy || active(status)) return;
@@ -132,6 +141,21 @@ export default function Home() {
   const displayedEvents = showAllActivity ? events : events.slice(-6);
   const engineCount = (values: string[]) => visibleFindings.filter((finding) => values.includes(asText(finding.validation_status || finding.confirmation_status || finding.status).toUpperCase())).length;
   const fixesCount = visibleFindings.filter((finding) => Boolean(asText(finding.remediation_recommendation || finding.remediation_guidance))).length;
+  const observedStages = [...new Set(events.map((item) => item.stage).filter(Boolean))];
+  const latestEvent = events[events.length - 1];
+  const beganAt = report?.started_at || events[0]?.timestamp;
+  const startedMs = beganAt ? Date.parse(beganAt) : NaN;
+  const finishedMs = Date.parse(report?.completed_at || latestEvent?.timestamp || "");
+  const elapsedSeconds = Number.isFinite(startedMs) ? Math.max(0, Math.floor(((active(status) || !Number.isFinite(finishedMs) ? clockNow : finishedMs) - startedMs) / 1000)) : null;
+
+  const downloadReport = () => {
+    if (!report) return;
+    const file = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(file);
+    const anchor = document.createElement("a");
+    anchor.href = url; anchor.download = `authscope-${report.id}.json`; anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
 
   return <div className={`workspace ${light ? "workspace-light" : ""}`}>
     {mobileSidebar && <button aria-label="Close sidebar backdrop" className="sidebar-backdrop" onClick={() => setMobileSidebar(false)} />}
@@ -176,6 +200,11 @@ export default function Home() {
               <div className="assistant-content">
                 <div className="assistant-byline"><strong>AuthScope</strong><span>AI-powered authorized security testing</span></div>
                 <p className="assistant-intro">{active(status) ? "Assessment is running. Activity below is streamed from the security engine." : status === "COMPLETED" ? "Assessment complete. Review the returned evidence and findings below." : status === "FAILED" ? "The assessment failed. See the backend status and any recorded activity below." : status === "CANCELLED" ? "Assessment cancelled. The activity recorded before cancellation remains available below." : "Assessment details and backend activity are shown below."}</p>
+                {(active(status) || status === "COMPLETED") && <section className="scan-progress" aria-label="Observed assessment progress">
+                  <div className="scan-progress-heading"><strong>{active(status) ? latestEvent?.message || "Waiting for the security engine…" : `Assessment completed with ${visibleFindings.length} ${visibleFindings.length === 1 ? "finding" : "findings"}.`}</strong><span>{elapsedSeconds === null ? "Duration unavailable" : formatDuration(elapsedSeconds)}</span></div>
+                  {latestEvent?.stage && <p className="current-stage">{active(status) ? "Current stage" : "Last reported stage"} · {latestEvent.stage.replaceAll("_", " ")}</p>}
+                  {observedStages.length > 0 && <ol className="stage-list">{observedStages.map((stage, index) => <li key={`${stage}-${index}`} className={active(status) && index === observedStages.length - 1 ? "stage-current" : "stage-done"}><span>{index + 1 < observedStages.length || !active(status) ? <Check size={12} /> : <i />}</span>{stage.replaceAll("_", " ")}</li>)}</ol>}
+                </section>}
           <div className="results-grid">
             <section className="panel activity-panel"><div className="panel-title"><span>Agent activity <span className="count-chip">{events.length}</span></span><span className="activity-controls">{events.length > 6 && <button className="text-button" onClick={() => setShowAllActivity((value) => !value)}>{showAllActivity ? "Show latest" : "Show all activity"}</button>}<span className="connection-state">{connected ? <><Wifi size={14} />Live connection</> : active(status) ? <><WifiOff size={14} />Reconnecting</> : ""}</span></span></div><div className="activity-feed">{displayedEvents.length ? displayedEvents.map((item, index) => <article className="activity-item" key={`${item.id ?? "event"}-${index}`}><span className="activity-dot" /><div><p>{item.message}</p><small>{item.stage} · {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : ""}</small></div></article>) : <p className="empty-note">Waiting for activity from the assessment engine…</p>}</div></section>
             <section className="panel findings-panel"><div className="panel-title"><span>Findings <span className="count-chip">{visibleFindings.length}</span></span></div>{visibleFindings.length ? <><div className="severity-filters" role="group" aria-label="Filter findings by severity"><button className={severityFilter === "ALL" ? "selected" : ""} aria-pressed={severityFilter === "ALL"} onClick={() => setSeverityFilter("ALL")}>All <span>{visibleFindings.length}</span></button>{availableSeverities.map((severity) => <button className={severityFilter === severity ? "selected" : ""} aria-pressed={severityFilter === severity} key={severity} onClick={() => setSeverityFilter(severity)}>{severity} <span>{visibleFindings.filter((finding) => asText(finding.severity).toUpperCase() === severity).length}</span></button>)}</div><div className="finding-list">{filteredFindings.map((finding, index) => {
@@ -183,6 +212,7 @@ export default function Home() {
               const title = asText(finding.title || finding.vulnerability_category || finding.vulnerability_type) || "Finding";
               const endpoint = asText(finding.endpoint || finding.target_endpoint); const severity = asText(finding.severity).toUpperCase() || "Unrated";
               const details = (finding.technical_details && typeof finding.technical_details === "object" ? finding.technical_details : {}) as Record<string, unknown>;
+              const evidence = (finding.evidence && typeof finding.evidence === "object" && !Array.isArray(finding.evidence) ? finding.evidence : {}) as Record<string, unknown>;
               const expanded = selectedFinding === findingId;
               const engineTitle = findingStatus.replaceAll("_", " ");
               const recommendation = asText(finding.remediation_recommendation || finding.remediation_guidance);
@@ -200,7 +230,8 @@ export default function Home() {
                   <div className="engine-verdict"><strong>Security engine verdict</strong><span>{engineTitle}</span><small>{asText(finding.classification || finding.access_verdict)}</small></div>
                   <h3>Finding description</h3><p>{asText(finding.impact_explanation || finding.description) || "No description was provided by the backend."}</p>
                   <h3>AI review</h3><div className="ai-unavailable"><strong>AI review was not included in the assessment response.</strong><p>The current API returns the security engine finding and its evidence, but does not return an AI verdict, confidence estimate, reasoning, counter-evidence, or missing-evidence analysis. The engine verdict above remains separate and authoritative.</p></div>
-                  <div className="analysis-columns"><div><h3>Evidence supporting the finding</h3>{finding.evidence ? <pre>{JSON.stringify(finding.evidence, null, 2)}</pre> : <p className="missing-source">No evidence object was included in the API response.</p>}</div><div><h3>Evidence against / missing</h3><p className="missing-source">The current response schema does not provide separate counter-evidence or an AI evidence-gap analysis.</p></div></div>
+                  <h3>Proof</h3>{finding.evidence ? <><p className="detail-secondary">Sensitive request and response values are redacted by the security engine.</p><div className="proof-grid"><div><span>Request sent</span><pre>{`${asText(evidence.request_method || evidence.http_method || finding.http_method) || "GET"} ${asText(evidence.request_url || evidence.endpoint || finding.endpoint || finding.target_endpoint) || "Endpoint not provided"}`}</pre></div><div><span>Response received</span><pre>{[evidence.response_status ? `HTTP ${String(evidence.response_status)}` : "", asText(evidence.sanitized_response_evidence || evidence.sanitized_response_body || evidence.actual_behavior)].filter(Boolean).join("\n\n") || "Response details were not included."}</pre></div></div><details className="evidence-technical"><summary>Full sanitized evidence</summary><pre>{JSON.stringify(finding.evidence, null, 2)}</pre></details></> : <p className="missing-source">No evidence object was included in the API response.</p>}
+                  <div className="analysis-columns"><div><h3>Evidence supporting the finding</h3>{asText(evidence.actual_behavior || finding.evidence_summary) ? <p>{asText(evidence.actual_behavior || finding.evidence_summary)}</p> : <p className="missing-source">No evidence summary was included.</p>}</div><div><h3>Evidence against / missing</h3><p className="missing-source">The current response schema does not provide separate counter-evidence or an AI evidence-gap analysis.</p></div></div>
                   <h3>Impact</h3><p>{asText(finding.impact_explanation || finding.description) || "Impact details were not supplied."}</p>{impactedUsers && <p className="detail-secondary">Affected roles: {impactedUsers}</p>}
                   <h3>Root cause</h3><p>{rootCause || "Root-cause analysis was not supplied."}</p>
                   {details.source_file || finding.source_file ? <><h3>Vulnerable source</h3><p>{asText(details.source_file || finding.source_file)}{details.line_numbers || finding.line_numbers ? `:${String(details.line_numbers || finding.line_numbers)}` : ""}</p>{(details.vulnerable_code || finding.vulnerable_code) && <pre>{asText(details.vulnerable_code || finding.vulnerable_code)}</pre>}</> : <p className="missing-source">Source mapping was not supplied for this finding.</p>}
@@ -212,7 +243,7 @@ export default function Home() {
               </article>;
             })}</div></> : <p className="empty-note">{status === "COMPLETED" ? "No findings were returned for this assessment." : "Verified findings will appear here when reported."}</p>}</section>
           </div>
-          {report && !active(status) && <section className="report-panel"><div className="panel-title"><span><FileText size={17} />Final report</span><button className="subtle-button print-button" onClick={() => window.print()}>Print report</button></div><dl className="report-grid">{[["Target", report.target_url], ["Assessment ID", report.id], ["Status", report.status], ["Started", report.started_at], ["Finished", report.completed_at || "Not provided"], ["Endpoints tested", report.endpoints_tested_count], ["Findings detected", visibleFindings.length], ["Engine confirmed", engineCount(["CONFIRMED", "CONFIRMED_RUNTIME_VULNERABILITY"])], ["Suspicious / inconclusive", engineCount(["SUSPICIOUS", "SUSPECTED", "INCONCLUSIVE"])], ["Fix recommendations supplied", fixesCount], ["AI reviewed", "Not reported by API"]].map(([label, value]) => <div key={String(label)}><dt>{label}</dt><dd>{value}</dd></div>)}</dl><div className="report-separation"><strong>Security engine verdicts</strong><p>Counts above use engine finding statuses. They are not AI conclusions.</p></div><div className="report-separation"><strong>AI assessment</strong><p>The current assessment response contains no AI finding-review result.</p></div><div className="report-separation"><strong>Actual evidence and summary</strong>{report.summary_text ? <p className="report-summary">{report.summary_text}</p> : <p>No overall summary was supplied by the backend.</p>}</div>{status === "FAILED" && report.failure_reason && <p className="error-message">{report.failure_reason}</p>}</section>}
+          {report && !active(status) && <section className="report-panel"><div className="panel-title"><span><FileText size={17} />Final report</span><div className="report-actions"><button className="subtle-button print-button" onClick={downloadReport}><Download size={14} />Download JSON</button><button className="subtle-button print-button" onClick={() => window.print()}>Print report</button></div></div><dl className="report-grid">{[["Target", report.target_url], ["Assessment ID", report.id], ["Status", report.status], ["Started", report.started_at], ["Finished", report.completed_at || "Not provided"], ["Endpoints tested", report.endpoints_tested_count], ["Findings detected", visibleFindings.length], ["Engine confirmed", engineCount(["CONFIRMED", "CONFIRMED_RUNTIME_VULNERABILITY"])], ["Suspicious / inconclusive", engineCount(["SUSPICIOUS", "SUSPECTED", "INCONCLUSIVE"])], ["Fix recommendations supplied", fixesCount], ["AI reviewed", "Not reported by API"]].map(([label, value]) => <div key={String(label)}><dt>{label}</dt><dd>{value}</dd></div>)}</dl><div className="report-separation"><strong>Security engine verdicts</strong><p>Counts above use engine finding statuses. They are not AI conclusions.</p></div><div className="report-separation"><strong>AI assessment</strong><p>The current assessment response contains no AI finding-review result.</p></div><div className="report-separation"><strong>Actual evidence and summary</strong>{report.summary_text ? <p className="report-summary">{report.summary_text}</p> : <p>No overall summary was supplied by the backend.</p>}</div>{status === "FAILED" && report.failure_reason && <p className="error-message">{report.failure_reason}</p>}</section>}
               </div>
             </section>
           </div>

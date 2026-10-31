@@ -12,12 +12,15 @@
 - Removed the extra authorization checkbox while retaining an authorization notice and server-side ScopeGuard validation.
 - Kept the security engine verdict separate from AI review. The UI reports AI review as unavailable when no AI finding analysis is returned by the backend.
 - Canonicalized finding confirmation labels and clarified when source mapping is unavailable.
+- Extended the screenshot-inspired scan conversation with elapsed time, a headline from the latest real event, and an ordered stage trail built only from stages returned by the backend.
+- Added a side-by-side request/response proof view from sanitized evidence fields, with expandable full evidence, plus JSON download of the actual final assessment response.
+- Kept report summaries, severity counts, activity replay, finding evidence, and print output tied to backend data; omitted prototype sample findings, risk scores, and inferred attack chains.
 - Fixed reconnect replay so it does not repeat initial planning events, and made the SSE response close its generator and remove its subscriber when a client disconnects.
 - Kept the assessment rate limiter in production and reset it between tests to prevent cross-test leakage.
 
 ## Not completed / limitations
 
-- No screenshot was saved into the repository during this repair.
+- No screenshot artifact was saved into the repository during this repair.
 - The currently consumed backend assessment response does not include the requested per-finding AI verdict, estimate, reasoning, counter-evidence, or AI review progress events. These are shown as unavailable; engine findings remain visible.
 - Granular inconclusive/not-tested counts and some remediation metadata are not present in the current response contract.
 - No frontend test runner is configured in `frontend/package.json`.
