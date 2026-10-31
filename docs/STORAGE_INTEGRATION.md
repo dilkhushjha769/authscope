@@ -113,9 +113,9 @@ evidence = EvidenceArtifact(
     request_method="GET",
     request_url="http://localhost:3000/rest/basket/1",
     request_headers={
-        "Authorization": "Bearer secret_jwt",  # Automatically redacted
-        "Cookie": "connect.sid=xyz",           # Automatically redacted
-        "X-Api-Key": "my-secret-key"           # Automatically redacted
+        "Authorization": "Bearer [REDACTED_TOKEN]",  # Automatically redacted
+        "Cookie": "connect.sid=[REDACTED_COOKIE]",   # Automatically redacted
+        "X-Api-Key": "[REDACTED_KEY]"               # Automatically redacted
     },
     response_status=200,
     sanitized_response_body='{"user": "alice", "items": ["item1"]}', # Passwords/JWTs scrubbed

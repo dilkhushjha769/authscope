@@ -1,5 +1,6 @@
 """Unit and integration tests for SQLite Storage, Finding Repository, and Evidence Management."""
 
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,7 +105,7 @@ class TestStorageAndEvidence:
             authorized_role=Role.USER_A,
             request_method="GET",
             request_url="http://localhost:3000/rest/basket/1",
-            request_headers={"Authorization": "Bearer victim_token_secret"},
+            request_headers={"Authorization": f"Bearer {os.getenv('TEST_AUTH_TOKEN', 'test_auth_token_sample')}"},
             response_status=200,
             sanitized_response_body='{"status":"success","data":{"id":1,"items":["apple"]}}',
             evidence_validation_status="valid",
@@ -335,13 +336,18 @@ class TestStorageAndEvidence:
 
     def test_evidence_sanitization(self, repo: FindingRepository):
         """Verifies that Bearer tokens, cookies, passwords, and API keys are redacted."""
+        raw_jwt = os.getenv("TEST_AUTH_JWT", "mock_bearer_jwt_token_sample")
+        raw_cookie = os.getenv("TEST_AUTH_COOKIE", "connect.sid=mock_session_cookie_sample; Path=/")
+        raw_api_key = os.getenv("TEST_API_KEY", "mock_admin_api_key_sample")
+        raw_password = os.getenv("TEST_USER_PASSWORD", "MockSecretPassword99!")
+
         raw_headers = {
-            "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MX0.secret_sig_xyz",
-            "Cookie": "connect.sid=s%3A_secret_cookie_session_12345; Path=/",
-            "X-Api-Key": "super_secret_admin_api_key_value",
+            "Authorization": f"Bearer {raw_jwt}",
+            "Cookie": raw_cookie,
+            "X-Api-Key": raw_api_key,
             "Content-Type": "application/json",
         }
-        raw_body = '{"user": "victim@example.com", "password": "SuperSecretPassword99!", "token": "sensitive_access_token_abc"}'
+        raw_body = f'{{"user": "victim@example.com", "password": "{raw_password}", "token": "{raw_jwt}"}}'
 
         evidence = EvidenceArtifact(
             id="evi_sanitize_test",
@@ -357,14 +363,14 @@ class TestStorageAndEvidence:
         )
 
         # Assert headers sanitized
-        assert "eyJhbGci" not in evidence.request_headers["Authorization"]
+        assert raw_jwt not in evidence.request_headers["Authorization"]
         assert evidence.request_headers["Authorization"] == "Bearer [REDACTED_BEARER_TOKEN]"
         assert evidence.request_headers["Cookie"] == "[REDACTED_COOKIE]"
         assert evidence.request_headers["X-Api-Key"] == "[REDACTED_API_KEY]"
         assert evidence.request_headers["Content-Type"] == "application/json"
 
         # Assert body sanitized
-        assert "SuperSecretPassword99!" not in evidence.sanitized_response_body
+        assert raw_password not in evidence.sanitized_response_body
         assert "[REDACTED_SECRET]" in evidence.sanitized_response_body
 
         # Assert SHA-256 computed
@@ -379,7 +385,7 @@ class TestStorageAndEvidence:
             vulnerability_category="BOLA_IDOR",
             affected_role="user_b",
             expected_behavior="No access to password",
-            actual_behavior="Leaked password SuperSecretPassword99!",
+            actual_behavior=f"Leaked password {raw_password}",
             severity=SeverityLevel.HIGH,
             impact_explanation="Credential disclosure",
             remediation_recommendation="Exclude password from JSON response",
@@ -395,16 +401,16 @@ class TestStorageAndEvidence:
                 ("fnd_sanitized_01",)
             ).fetchone()
 
-            assert "SuperSecretPassword99!" not in row["sanitized_response_body"]
-            assert "super_secret_admin_api_key_value" not in row["request_headers_json"]
-            assert "secret_sig_xyz" not in row["request_headers_json"]
+            assert raw_password not in row["sanitized_response_body"]
+            assert raw_api_key not in row["request_headers_json"]
+            assert raw_jwt not in row["request_headers_json"]
 
             fnd_row = conn.execute(
                 "SELECT actual_behavior FROM findings WHERE id = ?",
                 ("fnd_sanitized_01",)
             ).fetchone()
             # Finding actual behavior should not store raw password
-            assert "SuperSecretPassword99!" not in fnd_row["actual_behavior"]
+            assert raw_password not in fnd_row["actual_behavior"]
 
     def test_retest_history(self, repo: FindingRepository):
         """Verifies saving retests, finding status progression, and retest log history."""
