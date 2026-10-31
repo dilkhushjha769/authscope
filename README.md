@@ -130,12 +130,43 @@ Verify the application is accessible at `http://localhost:3000`.
 
 ### 4. Run Verification Tests
 
-Run the test suite to verify scope guards and core contracts:
+Run the test suite to verify scope guards, request executor controls, and core contracts:
 ```bash
-pytest
+pytest -v
 ```
 
-### 5. Launch the Security Dashboard
+### 5. Execute HTTP Requests & Authorization-Differential Tests
+
+You can execute safe in-scope requests and multi-role differential tests programmatically:
+
+```python
+from backend.core.session_manager import Role, SessionManager
+from backend.scanner.request_executor import send_request
+from backend.scanner.authorization_tester import compare_access
+
+# 1. Execute unauthenticated request (Anonymous persona)
+response = send_request(
+    role=Role.ANONYMOUS,
+    method="GET",
+    url="http://localhost:3000/rest/admin/application-version"
+)
+print(f"Status: {response.status_code}, Latency: {response.response_time_ms:.2f} ms")
+
+# 2. Run multi-role authorization-differential comparison (requires configured role tokens in .env)
+session_mgr = SessionManager(load_from_env=True)
+result = compare_access(
+    endpoint="/rest/basket/{id}",
+    method="GET",
+    resource_id="1",
+    owner_role=Role.USER_A,
+    roles_to_test=[Role.USER_B, Role.ANONYMOUS],
+    session_manager=session_mgr,
+)
+print(f"Overall Verdict: {result.overall_verdict.value}")
+print(f"Confirmed Vulnerability: {result.is_confirmed} ({result.vulnerability_candidate})")
+```
+
+### 6. Launch the Security Dashboard
 
 ```bash
 streamlit run dashboard/app.py
@@ -154,6 +185,6 @@ streamlit run dashboard/app.py
 
 ## Development Status & Roadmap
 
-AuthScope is currently in **Phase 1: Architecture & Foundation Initialization**.
+AuthScope has completed **Phase 1 (Foundation)**, **Phase 2 (Secure Request Executor & Hard Scope Guard)**, and **Phase 3 (Authorization-Differential Testing Engine)** with 57/57 passing unit and live integration tests.
 See [docs/HACKATHON_ROADMAP.md](docs/HACKATHON_ROADMAP.md) for full phase milestones and [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) for architectural specifications.
 

@@ -47,22 +47,24 @@ class SeverityLevel(str, Enum):
 ### Scope Evaluation
 ```python
 class ScopeCheckResult(BaseModel):
-    is_allowed: bool = Field(..., description="Whether the target URL is strictly in-scope")
-    target_url: str = Field(..., description="The normalized target URL being checked")
-    reason: str = Field(..., description="Detailed explanation of allowance or rejection reason")
-    normalized_host: str
-    normalized_port: int
+    is_allowed: bool = Field(..., description="Whether the request is strictly permitted")
+    target_url: str = Field(..., description="Normalized URL checked")
+    method: str = Field(default="GET", description="HTTP method evaluated")
+    reason: str = Field(..., description="Approval or rejection explanation")
+    normalized_host: str = Field(default="")
+    normalized_port: int = Field(default=80)
+    normalized_scheme: str = Field(default="http")
 ```
 
 ### HTTP Request & Response Models
 ```python
-class HttpRequestModel(BaseModel):
-    method: str = Field(..., description="HTTP Method (GET, POST, PUT, DELETE, etc.)")
-    url: str = Field(..., description="Target full URL")
-    headers: Dict[str, str] = Field(default_factory=dict, description="Sanitized headers")
-    params: Dict[str, Any] = Field(default_factory=dict, description="URL query parameters")
-    body: Optional[Any] = Field(None, description="Request JSON or text body")
-    role: Role = Field(default=Role.ANONYMOUS, description="Role context executing this request")
+class RequestMetadata(BaseModel):
+    method: str
+    url: str
+    role: str
+    sanitized_headers: Dict[str, str] = Field(default_factory=dict)
+    params: Dict[str, Any] = Field(default_factory=dict)
+    timestamp_utc: str
 
 class HttpResponseModel(BaseModel):
     status_code: int = Field(..., description="HTTP response status code")
@@ -70,37 +72,71 @@ class HttpResponseModel(BaseModel):
     body: str = Field(..., description="Response body content string (truncated if excessive)")
     json_data: Optional[Dict[str, Any]] = Field(None, description="Parsed JSON if applicable")
     response_time_ms: float = Field(..., description="Response latency in milliseconds")
+    content_length: int = Field(0, description="Raw response byte length")
+    is_truncated: bool = Field(False, description="True if response exceeded size boundaries")
+    request_metadata: Optional[RequestMetadata] = None
 ```
 
-### Authorization Comparison
+### Authorization Comparison & Verdicts
 ```python
-class RoleExecutionResult(BaseModel):
-    role: Role
-    request: HttpRequestModel
-    response: HttpResponseModel
-    is_success: bool = Field(..., description="Whether the request succeeded (2xx)")
+class AccessVerdict(str, Enum):
+    ALLOWED_ACCESS = "ALLOWED_ACCESS"
+    CORRECTLY_DENIED = "CORRECTLY_DENIED"
+    SUSPICIOUS_ACCESS = "SUSPICIOUS_ACCESS"
+    CONFIRMED_UNAUTHORIZED_ACCESS = "CONFIRMED_UNAUTHORIZED_ACCESS"
 
-class DifferentialAnalysisResult(BaseModel):
+class RoleProbeOutcome(BaseModel):
+    role: Role
+    response: HttpResponseModel
+    verdict: AccessVerdict
+    comparison: Optional[ComparisonAnalysis] = None
+    evidence: Optional[EvidenceArtifact] = None
+
+class DifferentialResult(BaseModel):
     endpoint: str
-    method: str
-    role_results: Dict[Role, RoleExecutionResult]
-    is_discrepancy_detected: bool = Field(..., description="True if unauthorized access occurred")
-    suspected_vulnerability: Optional[VulnerabilityType] = None
-    summary: str
+    resolved_url: str = ""
+    method: str = "GET"
+    resource_id: Optional[str] = None
+    owner_role: Role = Role.USER_A
+    role_responses: Dict[Role, HttpResponseModel] = Field(default_factory=dict)
+    probe_outcomes: Dict[Role, RoleProbeOutcome] = Field(default_factory=dict)
+    overall_verdict: AccessVerdict = AccessVerdict.CORRECTLY_DENIED
+    is_discrepancy_detected: bool = False
+    is_confirmed: bool = False
+    vulnerability_candidate: Optional[str] = None
+    evidence_artifacts: List[EvidenceArtifact] = Field(default_factory=list)
+    summary: str = ""
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 ```
 
 ### Evidence & Findings
 ```python
+class EvidenceValidationStatus(str, Enum):
+    CONFIRMED = "CONFIRMED"
+    SUSPICIOUS = "SUSPICIOUS"
+    REJECTED_FALSE_POSITIVE = "REJECTED_FALSE_POSITIVE"
+    UNVALIDATED = "UNVALIDATED"
+
 class EvidenceArtifact(BaseModel):
-    evidence_id: str
+    id: str
     finding_id: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    endpoint: str
+    http_method: str = "GET"
     test_role: Role
     authorized_role: Role
-    raw_request: HttpRequestModel
-    raw_response: HttpResponseModel
-    redacted_fields: List[str] = Field(default_factory=list)
+    resource_id: Optional[str] = None
+    expected_behavior: str
+    actual_behavior: str
+    validation_status: EvidenceValidationStatus = EvidenceValidationStatus.CONFIRMED
+    request_method: str
+    request_url: str
+    request_headers: Dict[str, str] = Field(default_factory=dict)
+    response_status: int
+    response_body: str
+    sanitized_response_evidence: str
     evidence_sha256: str = Field(..., description="SHA-256 hash of normalized evidence bytes")
+    redacted_tokens: List[str] = Field(default_factory=list)
 
 class FindingRecord(BaseModel):
     id: str = Field(..., description="Unique finding UUID")
@@ -137,12 +173,19 @@ class RetestResult(BaseModel):
 
 ## 3. Core Function Interfaces
 
-### 1. `check_scope`
+### 1. `check_scope` / `ScopeGuard.validate_request`
 ```python
-def check_scope(url: str) -> ScopeCheckResult:
+def check_scope(url: str, method: str = "GET") -> ScopeCheckResult:
     """
-    Validates whether a URL strictly conforms to the authorized target allowlist.
-    Enforces host, port, protocol, and loopback/private IP restrictions.
+    Validates whether a URL and HTTP method strictly conform to the authorized allowlist.
+    Enforces host, port, protocol, method restrictions, and blocks loopback/metadata exploits.
+    """
+    ...
+
+def assert_in_scope(url: str, method: str = "GET") -> None:
+    """
+    Asserts in-scope compliance. Raises ScopeViolationError, UnsupportedMethodError,
+    or InvalidTargetURLError if rejected.
     """
     ...
 ```
@@ -150,17 +193,21 @@ def check_scope(url: str) -> ScopeCheckResult:
 ### 2. `send_request`
 ```python
 def send_request(
-    method: str,
-    url: str,
-    role: Role = Role.ANONYMOUS,
+    role: Role | str = Role.ANONYMOUS,
+    method: str = "GET",
+    url: str = "",
     params: Optional[Dict[str, Any]] = None,
-    json_body: Optional[Any] = None,
     custom_headers: Optional[Dict[str, str]] = None,
+    json_body: Optional[Any] = None,
+    timeout: Optional[float] = None,
+    scope_guard: Optional[ScopeGuard] = None,
+    session_manager: Optional[SessionManager] = None,
 ) -> HttpResponseModel:
     """
     Executes an in-scope HTTP request under the session context of the specified role.
     Strictly asserts scope via ScopeGuard prior to connection.
-    Enforces timeout and follow_redirects=False.
+    Enforces timeout, max response boundaries, and follow_redirects=False.
+    Sanitizes authentication tokens and cookies in request metadata.
     """
     ...
 ```
@@ -169,29 +216,41 @@ def send_request(
 ```python
 def compare_access(
     endpoint: str,
-    method: str,
-    param_matrix: Optional[Dict[str, Any]] = None,
-    roles_to_test: Optional[List[Role]] = None
-) -> DifferentialAnalysisResult:
+    method: str = "GET",
+    resource_id: Optional[str] = None,
+    owner_role: Role = Role.USER_A,
+    roles_to_test: Optional[List[Role]] = None,
+    executor: Optional[RequestExecutor] = None,
+    session_manager: Optional[SessionManager] = None,
+    scope_guard: Optional[ScopeGuard] = None,
+) -> DifferentialResult:
     """
-    Runs the same endpoint request across multiple roles (e.g. User A, User B, Anonymous)
-    to detect authorization differentials indicating IDOR or privilege escalation.
+    Runs the same endpoint request across owner and test roles (e.g. User A vs User B / Anonymous)
+    to detect authorization differentials indicating BOLA/IDOR, BFLA, or Missing Auth.
+    Never treats HTTP 200 alone as proof of vulnerability.
     """
     ...
 ```
 
-### 4. `validate_evidence`
+### 4. `create_and_sign_evidence` / `validate_artifact_completeness`
 ```python
-def validate_evidence(
+def create_and_sign_evidence(
     finding_id: str,
     test_role: Role,
     authorized_role: Role,
-    request: HttpRequestModel,
-    response: HttpResponseModel
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    response: HttpResponseModel,
+    endpoint: Optional[str] = None,
+    resource_id: Optional[str] = None,
+    expected_behavior: Optional[str] = None,
+    actual_behavior: Optional[str] = None,
+    validation_status: EvidenceValidationStatus = EvidenceValidationStatus.CONFIRMED,
 ) -> EvidenceArtifact:
     """
-    Sanitizes credentials, validates non-destructive proof, and generates an
-    immutable SHA-256 checksum for the request/response pair.
+    Sanitizes credentials in headers and response body, validates non-destructive proof,
+    and generates an immutable SHA-256 checksum for the request/response pair.
     """
     ...
 ```
@@ -227,4 +286,47 @@ def retest_finding(finding_id: str) -> RetestResult:
     """
     ...
 ```
+
+### 8. `AssessmentEngine.stream_assessment` & `AssessmentQueryAdapter` (Phase 3.5)
+```python
+class AssessmentEvent(BaseModel):
+    assessment_id: str
+    event_type: str
+    stage: str
+    message: str
+    timestamp: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+def stream_assessment(
+    target_url: str,
+    cancel_token: Optional[CancellationToken] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
+) -> Generator[AssessmentEvent, None, ScanSessionRecord]:
+    """
+    Executes a 7-stage security assessment against the target URL, yielding
+    sanitized real-time AssessmentEvent objects and persisting session state,
+    discovered endpoints, and signed findings in SQLite.
+    """
+    ...
+```
+
+### 9. FastAPI HTTP & Server-Sent Events (SSE) Endpoints
+```python
+# POST /api/assessments
+# Request: {"target_url": "http://localhost:3000"}
+# Response 201: {"assessment_id": "scan_...", "target_url": "...", "status": "PENDING"}
+
+# GET /api/assessments/{assessment_id}/stream
+# Content-Type: text/event-stream
+# Event 1: event: activity\ndata: {"stage": "...", "message": "...", "status": "..."}\n\n
+# Event 2: event: message\ndata: {"text": "Markdown text chunk...\n\n"}\n\n
+# Event 3: event: done\ndata: {"status": "COMPLETED", "summary": "..."}\n\n
+
+# GET /api/assessments/{assessment_id}
+# Response 200: Full AssessmentSummaryResponse with stages, events, and markdown content
+
+# POST /api/assessments/{assessment_id}/stop
+# Response 200: {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
+```
+
 

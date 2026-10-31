@@ -11,6 +11,9 @@ anthropic>=0.39.0
 
 # Dashboard & Visualization
 streamlit>=1.39.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
+sse-starlette>=2.1.0
 
 # Logging & Terminal Formatting
 rich>=13.9.4

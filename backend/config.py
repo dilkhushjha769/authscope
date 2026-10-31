@@ -18,17 +18,23 @@ class Settings(BaseSettings):
 
     # Scope Allowlist Rules
     target_base_url: str = Field(default="http://localhost:3000", alias="TARGET_BASE_URL")
-    allowed_hosts: List[str] = Field(default_factory=lambda: ["localhost", "127.0.0.1"])
-    allowed_ports: List[int] = Field(default_factory=lambda: [3000])
-    allowed_schemes: List[str] = Field(default_factory=lambda: ["http", "https"])
+    allowed_hosts: List[str] = Field(default_factory=lambda: ["localhost", "127.0.0.1"], alias="ALLOWED_HOSTS")
+    allowed_ports: List[int] = Field(default_factory=lambda: [3000], alias="ALLOWED_PORTS")
+    allowed_schemes: List[str] = Field(default_factory=lambda: ["http"], alias="ALLOWED_SCHEMES")
+    allowed_methods: List[str] = Field(default_factory=lambda: ["GET"], alias="ALLOWED_METHODS")
 
     # Test Roles Credentials (OWASP Juice Shop defaults)
     user_a_email: str = Field(default="user1@juice-sh.op", alias="USER_A_EMAIL")
     user_a_password: str = Field(default="user1_password_placeholder", alias="USER_A_PASSWORD")
+    user_a_token: str = Field(default="", alias="USER_A_TOKEN")
+
     user_b_email: str = Field(default="user2@juice-sh.op", alias="USER_B_EMAIL")
     user_b_password: str = Field(default="user2_password_placeholder", alias="USER_B_PASSWORD")
+    user_b_token: str = Field(default="", alias="USER_B_TOKEN")
+
     admin_email: str = Field(default="admin@juice-sh.op", alias="ADMIN_EMAIL")
     admin_password: str = Field(default="admin_password_placeholder", alias="ADMIN_PASSWORD")
+    admin_token: str = Field(default="", alias="ADMIN_TOKEN")
 
     # AI Configuration (Claude)
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
@@ -37,9 +43,11 @@ class Settings(BaseSettings):
     # Database
     database_path: str = Field(default="data/authscope.db", alias="DATABASE_PATH")
 
-    # Security Guardrails
+    # Security Guardrails & Request Constraints
     request_timeout_seconds: float = Field(default=10.0, alias="REQUEST_TIMEOUT_SECONDS")
     max_requests_per_minute: int = Field(default=120, alias="MAX_REQUESTS_PER_MINUTE")
+    max_response_size_bytes: int = Field(default=1_048_576, alias="MAX_RESPONSE_SIZE_BYTES")  # 1 MB max response
+    max_body_display_chars: int = Field(default=25_000, alias="MAX_BODY_DISPLAY_CHARS")
     follow_redirects: bool = Field(default=False, alias="FOLLOW_REDIRECTS")
     safe_mode: bool = Field(default=True, alias="SAFE_MODE")
 
@@ -52,4 +60,3 @@ class Settings(BaseSettings):
 
 # Global settings singleton
 settings = Settings()
-
