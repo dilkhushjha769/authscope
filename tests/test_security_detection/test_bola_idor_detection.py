@@ -163,6 +163,38 @@ def test_incorrect_ownership_or_missing_id_returns_inconclusive():
 
 
 @pytest.mark.security
+def test_explicit_id_without_configured_owner_is_not_requested():
+    """A supplied numeric ID alone does not establish that User A owns the object."""
+    guard = ScopeGuard()
+    manager = SessionManager(load_from_env=False)
+    manager.authenticate_role(Role.USER_A, "usera@test.com", "passA", token="token_a")
+    manager.authenticate_role(Role.USER_B, "userb@test.com", "passB", token="token_b")
+    requested = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requested
+        requested = True
+        return httpx.Response(200, json={"id": 1, "UserId": 1})
+
+    executor = RequestExecutor(
+        scope_guard=guard,
+        session_manager=manager,
+        client=httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False),
+    )
+    tester = AuthorizationTester(executor=executor, session_manager=manager, scope_guard=guard)
+    result = tester.test_bola_idor(
+        endpoint="/rest/basket/{id}",
+        resource_id="1",
+        owner_role=Role.USER_A,
+        attacker_role=Role.USER_B,
+    )
+
+    assert requested is False
+    assert result.overall_verdict == AccessVerdict.INCONCLUSIVE
+    assert result.is_confirmed is False
+
+
+@pytest.mark.security
 def test_user_a_baseline_failure_returns_inconclusive():
     """If User A's baseline request fails (e.g. 500 error), test returns INCONCLUSIVE."""
     def handler(request: httpx.Request) -> httpx.Response:

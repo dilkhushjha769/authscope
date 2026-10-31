@@ -21,6 +21,7 @@ from backend.core.session_manager import Role, SessionManager
 from backend.utils.helpers import (
     TargetUnreachableError,
     MissingSessionError,
+    redact_sensitive_text,
     sanitize_headers_for_logging,
 )
 from backend.utils.logger import get_logger
@@ -126,7 +127,7 @@ class RequestExecutor:
         sanitized_headers = sanitize_headers_for_logging(effective_headers)
         metadata = RequestMetadata(
             method=method.upper(),
-            url=url,
+            url=redact_sensitive_text(url),
             role=session.role.value,
             sanitized_headers=sanitized_headers,
             params=params or {},

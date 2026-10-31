@@ -34,6 +34,7 @@ from backend.core.assessment_engine import (
     AssessmentEngine,
     AssessmentQueryAdapter,
     CancellationToken,
+    sanitize_event_text,
 )
 from backend.core.scope_guard import ScopeCheckResult, ScopeGuard
 from backend.retesting.retest_engine import RetestEngine
@@ -647,7 +648,10 @@ class AssessmentTaskManager:
         target_profile: Optional[TargetProfileRecord] = None,
     ) -> None:
         """Background worker executing the unified assessment workflow decoupled from client connections."""
-        logger.info(f"Background assessment task started for {scan_id} ({target_url})")
+        logger.info(
+            "Background assessment task started",
+            extra={"assessment_id": scan_id, "target_url": redact_sensitive_text(target_url)},
+        )
 
         source_root: Optional[Path] = None
         if source_archive_path:
@@ -717,8 +721,9 @@ class AssessmentTaskManager:
             try:
                 await asyncio.wait_for(_execute_injected_steps(), timeout=settings.assessment_timeout_seconds)
             except Exception as exc:
-                logger.error(f"Injected task error: {exc}", exc_info=True)
-                await self._broadcast(scan_id, ("error", str(exc), None))
+                safe_error = sanitize_event_text(str(exc))
+                logger.error("Injected assessment task failed", extra={"error": safe_error})
+                await self._broadcast(scan_id, ("error", safe_error, None))
             finally:
                 final_session = repo.get_scan_session(scan_id)
                 done_payload = _build_done_payload(final_session, repo, target_url)
@@ -789,10 +794,17 @@ class AssessmentTaskManager:
                     )
                     repo.save_event(timeout_ev)
             except Exception as e:
-                logger.warning(f"Error recording timeout for {scan_id}: {e}")
+                logger.warning(
+                    "Failed to record assessment timeout",
+                    extra={"assessment_id": scan_id, "error": sanitize_event_text(str(e))},
+                )
             await self._broadcast(scan_id, ("error", f"Assessment timed out after {settings.assessment_timeout_seconds}s", None))
         except Exception as exc:
-            logger.error(f"Error in background assessment task {scan_id}: {exc}", exc_info=True)
+            safe_error = sanitize_event_text(str(exc))
+            logger.error(
+                "Background assessment task failed",
+                extra={"assessment_id": scan_id, "error": safe_error},
+            )
             is_persist = "database" in str(exc).lower() or "no column" in str(exc).lower() or "sqlite" in str(type(exc)).lower() or "persistence" in str(exc).lower()
             fail_reason = "PERSISTENCE_ERROR" if is_persist else "EXECUTION_ERROR"
             try:
@@ -802,24 +814,27 @@ class AssessmentTaskManager:
                     curr_session.failure_reason = fail_reason
                     curr_session.completed_at = datetime.now(timezone.utc)
                     curr_session.updated_at = datetime.now(timezone.utc)
-                    curr_session.summary_text = f"Assessment failed: {exc}"
+                    curr_session.summary_text = f"Assessment failed: {safe_error}"
                     repo.save_scan_session(curr_session)
             except Exception as e:
-                logger.error(f"Error recording failure for session {scan_id}: {e}")
+                logger.error(
+                    "Failed to record assessment failure",
+                    extra={"assessment_id": scan_id, "error": sanitize_event_text(str(e))},
+                )
 
             fail_ev = AssessmentEvent(
                 assessment_id=scan_id,
                 event_type=EventType.ASSESSMENT_FAILED.value,
                 stage=AssessmentStage.REPORT_PREPARATION.value,
-                message=f"Assessment failed: {exc}",
-                metadata={"error": str(exc), "failure_reason": fail_reason},
+                message=f"Assessment failed: {safe_error}",
+                metadata={"error": safe_error, "failure_reason": fail_reason},
             )
             try:
                 repo.save_event(fail_ev)
             except Exception:
                 pass
-            await self._broadcast(scan_id, ("activity", fail_ev, f"### Assessment Execution Failed\n\n**Reason:** `{fail_reason}`\n\n```\n{exc}\n```"))
-            await self._broadcast(scan_id, ("error", str(exc), None))
+            await self._broadcast(scan_id, ("activity", fail_ev, f"### Assessment Execution Failed\n\n**Reason:** `{fail_reason}`\n\n```\n{safe_error}\n```"))
+            await self._broadcast(scan_id, ("error", safe_error, None))
         finally:
             final_session = repo.get_scan_session(scan_id)
             done_payload = _build_done_payload(final_session, repo, target_url)
@@ -1176,10 +1191,14 @@ def _validate_target_authorization(
         else:
             detail_msg = f"Scope violation: {reason}"
 
-        logger.warning(f"Rejected out-of-scope assessment request for {target_clean}: {detail_msg}")
+        safe_detail = redact_sensitive_text(detail_msg)
+        logger.warning(
+            "Rejected out-of-scope assessment request",
+            extra={"target_url": redact_sensitive_text(target_clean), "reason": safe_detail},
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=detail_msg,
+            detail=safe_detail,
         )
 
     return target_clean, check_result
@@ -2000,7 +2019,10 @@ async def create_assessment(req: CreateAssessmentRequest) -> CreateAssessmentRes
         target_profile=matched_profile,
     )
 
-    logger.info(f"Initialized assessment session {scan_id} for target {target_clean}")
+    logger.info(
+        "Initialized assessment session",
+        extra={"assessment_id": scan_id, "target_url": redact_sensitive_text(target_clean)},
+    )
     return CreateAssessmentResponse(
         assessment_id=scan_id,
         target_url=target_clean,
@@ -2113,7 +2135,13 @@ async def stream_assessment(
         queue = task_manager.subscribe(assessment_id)
         try:
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    if request is not None and await request.is_disconnected():
+                        break
+                    yield ": heartbeat\n\n"
+                    continue
                 kind = item[0]
 
                 if kind == "activity":
@@ -2155,8 +2183,12 @@ async def stream_assessment(
             logger.info(f"SSE client disconnected for {assessment_id}; background task continues.")
             raise
         except Exception as exc:
-            logger.error(f"Error streaming live SSE events for {assessment_id}: {exc}")
-            err_data = json.dumps({"type": "assessment_failed", "error": str(exc), "assessment_id": assessment_id})
+            safe_error = sanitize_event_text(str(exc))
+            logger.error(
+                "SSE event stream failed",
+                extra={"assessment_id": assessment_id, "error": safe_error},
+            )
+            err_data = json.dumps({"type": "assessment_failed", "error": safe_error, "assessment_id": assessment_id})
             yield f"event: assessment_failed\ndata: {err_data}\n\n"
             yield f"event: error\ndata: {err_data}\n\n"
         finally:
@@ -2237,7 +2269,10 @@ async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
         github_repo=cfg.get("github_repo"),
     )
 
-    logger.info(f"Retried assessment session {assessment_id} for target {session.target_url}")
+    logger.info(
+        "Retried assessment session",
+        extra={"assessment_id": assessment_id, "target_url": redact_sensitive_text(session.target_url)},
+    )
     return CreateAssessmentResponse(
         assessment_id=assessment_id,
         target_url=session.target_url,
