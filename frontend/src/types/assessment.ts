@@ -1,6 +1,19 @@
 /**
- * TypeScript interfaces mirroring AuthScope FastAPI Pydantic schemas.
+ * AuthScope Frontend — TypeScript Data Contracts
+ * Defines states, SSE events, finding models, and assessment structures.
  */
+
+export type AssessmentState =
+  | "ready"
+  | "connecting"
+  | "analyzing"
+  | "running"
+  | "findings_discovered"
+  | "completed"
+  | "no_vulnerabilities"
+  | "failed"
+  | "cancelled"
+  | "reconnecting";
 
 export type FindingValidationStatus =
   | "CONFIRMED"
@@ -8,6 +21,26 @@ export type FindingValidationStatus =
   | "NOT_CONFIRMED"
   | "INCONCLUSIVE"
   | "NOT_TESTED";
+
+export type FindingStatus = FindingValidationStatus;
+
+export type SSEEventType =
+  | "assessment_started"
+  | "agent_thinking"
+  | "agent_plan"
+  | "tool_started"
+  | "tool_completed"
+  | "tool_failed"
+  | "endpoint_discovered"
+  | "finding_hypothesis"
+  | "finding_discovered"
+  | "evidence_validated"
+  | "source_location_found"
+  | "explanation_generated"
+  | "assessment_completed"
+  | "assessment_failed"
+  | "assessment_cancelled"
+  | string;
 
 export interface AssessmentStageState {
   stage: string;
@@ -19,15 +52,17 @@ export interface AssessmentStageState {
   duration_ms?: number | null;
 }
 
-export interface AssessmentEventItem {
+export interface AssessmentActivityEvent {
   id?: number | null;
   assessment_id: string;
-  event_type: string;
+  event_type: SSEEventType | string;
   stage: string;
   message: string;
   timestamp: string;
-  metadata: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 }
+
+export type AssessmentEventItem = AssessmentActivityEvent;
 
 export interface EvidenceItem {
   id: string;
@@ -49,6 +84,8 @@ export interface EvidenceItem {
   evidence_sha256: string;
   redacted_fields: string[];
 }
+
+export type EvidenceArtifactModel = EvidenceItem;
 
 export interface WebsiteLocationInfo {
   full_url: string;
@@ -104,6 +141,7 @@ export interface FindingItem {
   vulnerability_name?: string;
   endpoint?: string;
   target_endpoint: string;
+  affected_endpoint?: string;
   http_method: string;
   vulnerability_category: string;
   vulnerability_type: string;
@@ -115,14 +153,20 @@ export interface FindingItem {
   confirmation_status: string;
   status: string;
   validation_status: FindingValidationStatus;
+  finding_status?: FindingStatus | string;
+  confidence?: "CONFIRMED" | "HIGH" | "MEDIUM" | "LOW" | string;
   access_verdict: string;
   resource_id?: string | null;
-  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
+  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO" | string;
   impact_explanation: string;
+  impact?: string | null;
   description: string;
+  explanation?: string;
   remediation_recommendation: string;
   remediation_guidance: string;
+  how_to_fix?: string | null;
   evidence?: EvidenceItem | null;
+  evidence_summary?: EvidenceSummaryInfo | string | null;
   technical_details?: Record<string, unknown>;
 
   // Section B: Website location
@@ -141,9 +185,14 @@ export interface FindingItem {
   source_start_line?: number | null;
   source_end_line?: number | null;
   source_function?: string | null;
+  function_name?: string | null;
+  line_numbers?: string | null;
+  vulnerable_code?: string | null;
+  suggested_code?: string | null;
   vulnerable_snippet?: string | null;
   source_unavailable_message?: string | null;
   source_location?: SourceLocationInfo;
+  black_box_only?: boolean;
 
   // Section D: What the bug can affect
   exposed_data_or_functionality?: string;
@@ -164,7 +213,6 @@ export interface FindingItem {
   unauthorized_behavior?: string;
   response_difference?: string;
   evidence_validation_status?: FindingValidationStatus | string;
-  evidence_summary?: EvidenceSummaryInfo;
 }
 
 export interface DiscoveredEndpointItem {
@@ -198,11 +246,11 @@ export interface AssessmentSummaryResponse {
   scheme?: string;
   host?: string;
   port?: number;
-  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED";
+  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED" | string;
   started_at: string;
   updated_at?: string | null;
   completed_at?: string | null;
-  failure_reason?: string;
+  failure_reason?: string | null;
   endpoints_discovered_count: number;
   endpoints_tested_count: number;
   confirmed_findings_count: number;

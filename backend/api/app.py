@@ -36,6 +36,7 @@ from backend.core.assessment_engine import (
     CancellationToken,
 )
 from backend.core.scope_guard import ScopeCheckResult, ScopeGuard
+from backend.retesting.retest_engine import RetestEngine
 from backend.core.target_registry import TargetRegistry, TargetSubmissionPayload
 from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict
@@ -1896,7 +1897,13 @@ async def stream_assessment(
 
                 elif kind == "error":
                     _, err_msg, _ = item
-                    yield f"event: assessment_failed\ndata: {json.dumps({'type': 'assessment_failed', 'message': err_msg, 'assessment_id': assessment_id})}\n\n"
+                    err_payload = {
+                        "type": "assessment_failed",
+                        "error": err_msg,
+                        "message": err_msg,
+                        "assessment_id": assessment_id,
+                    }
+                    yield f"event: assessment_failed\ndata: {json.dumps(err_payload)}\n\n"
                     yield f"event: error\ndata: {json.dumps({'error': err_msg})}\n\n"
                     break
 
@@ -1997,6 +2004,55 @@ async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
         created_at=session.started_at.isoformat(),
         message="Assessment retried and running in background. Connect to SSE stream to observe.",
     )
+
+
+@app.post("/api/assessments/{assessment_id}/retest")
+async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
+    """Re-verifies findings for a given assessment session using RetestEngine."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Assessment {assessment_id} not found.",
+        )
+
+    scope_guard = _get_active_scope_guard()
+    check = scope_guard.validate_request(url=session.target_url, method="GET")
+    if not check.is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Scope violation: {check.reason}",
+        )
+
+    findings = repo.list_findings(assessment_id)
+    retest_engine = RetestEngine(repository=repo)
+    retest_results = []
+    for f in findings:
+        log_rec = retest_engine.retest_finding(f.id)
+        repo.save_retest_result(log_rec)
+        retest_results.append(log_rec.model_dump(mode="json"))
+
+    return {
+        "assessment_id": assessment_id,
+        "target_url": session.target_url,
+        "retested_count": len(retest_results),
+        "results": retest_results,
+    }
+
+
+@app.get("/api/assessments/{assessment_id}/findings")
+def get_assessment_findings(assessment_id: str) -> List[Dict[str, Any]]:
+    """Retrieves all validated and suspicious findings for a specific assessment."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Assessment {assessment_id} not found.",
+        )
+    findings = repo.list_findings(assessment_id)
+    return [f.model_dump(mode="json") for f in findings]
 
 
 @app.get("/api/assessments/{assessment_id}", response_model=AssessmentSummaryResponse)

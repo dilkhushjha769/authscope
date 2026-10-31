@@ -20,6 +20,35 @@ import { FindingItem, FindingValidationStatus } from "@/types/assessment";
 
 interface FindingCardProps {
   finding: FindingItem;
+  index?: number;
+}
+
+export function resolveFindingStatus(finding: FindingItem): FindingValidationStatus {
+  const raw = String(
+    finding.finding_status || finding.validation_status || finding.confirmation_status || finding.status || ""
+  )
+    .trim()
+    .toUpperCase();
+
+  if (raw === "CONFIRMED" || raw === "CONFIRMED_RUNTIME_VULNERABILITY" || raw === "VALIDATED") {
+    return "CONFIRMED";
+  }
+  if (raw === "INCONCLUSIVE") {
+    return "INCONCLUSIVE";
+  }
+  if (raw === "NOT_TESTED" || raw === "SKIPPED" || raw === "UNTESTED") {
+    return "NOT_TESTED";
+  }
+  if (
+    raw === "NOT_CONFIRMED" ||
+    raw === "UNVALIDATED" ||
+    raw === "FALSE_POSITIVE" ||
+    raw === "REJECTED_FALSE_POSITIVE" ||
+    raw === "NOT_REPRODUCIBLE"
+  ) {
+    return "NOT_CONFIRMED";
+  }
+  return "SUSPICIOUS";
 }
 
 const UNAVAILABLE_SOURCE_TEXT =

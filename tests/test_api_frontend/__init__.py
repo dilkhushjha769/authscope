@@ -1,2 +1,1 @@
-"""Test package for Sprint Group 4 — HTTPS Website Input, API Integration, and Real Finding Display."""
-
+"""API, SSE, and Frontend Integration Test Package (Member 4 / Group 4)."""

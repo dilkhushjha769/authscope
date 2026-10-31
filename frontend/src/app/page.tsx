@@ -134,6 +134,109 @@ export function validateWebsiteUrlSyntax(rawInput: string): {
   };
 }
 
+
+function mapRecordToFindingItem(rec: Record<string, unknown>): FindingItem {
+  const id = String(rec.id || `f-${Date.now()}`);
+  const endpoint = String(rec.endpoint || rec.target_endpoint || "");
+  const method = String(rec.http_method || "GET");
+  const category = String(
+    rec.vulnerability_category || rec.vulnerability_type || "BOLA_IDOR"
+  );
+  const title = String(rec.title || `${category} on ${endpoint}`);
+  const severity = String(rec.severity || "MEDIUM").toUpperCase();
+  const confirmation_status = String(
+    rec.confirmation_status || rec.status || "confirmed"
+  ).toUpperCase();
+  const validation_status = String(
+    rec.validation_status || "CONFIRMED"
+  ).toUpperCase();
+
+  let finding_status: FindingValidationStatus = "SUSPICIOUS";
+  if (
+    validation_status === "CONFIRMED" &&
+    (confirmation_status === "CONFIRMED" ||
+      confirmation_status === "CONFIRMED_RUNTIME_VULNERABILITY")
+  ) {
+    finding_status = "CONFIRMED";
+  } else if (
+    validation_status === "INCONCLUSIVE" ||
+    confirmation_status === "INCONCLUSIVE"
+  ) {
+    finding_status = "INCONCLUSIVE";
+  } else if (
+    validation_status === "NOT_TESTED" ||
+    confirmation_status === "NOT_TESTED"
+  ) {
+    finding_status = "NOT_TESTED";
+  } else if (
+    validation_status === "REJECTED_FALSE_POSITIVE" ||
+    validation_status === "UNVALIDATED" ||
+    validation_status === "NOT_CONFIRMED" ||
+    confirmation_status === "FALSE_POSITIVE" ||
+    confirmation_status === "NOT_REPRODUCIBLE"
+  ) {
+    finding_status = "NOT_CONFIRMED";
+  } else if (
+    validation_status === "SUSPICIOUS" ||
+    confirmation_status === "SUSPECTED" ||
+    confirmation_status === "SUSPICIOUS"
+  ) {
+    finding_status = "SUSPICIOUS";
+  }
+
+  const explanation = String(
+    rec.description ||
+      rec.impact_explanation ||
+      `Differential authorization discrepancy observed on ${endpoint}.`
+  );
+  const impact = String(
+    rec.impact_explanation ||
+      rec.business_impact ||
+      rec.description ||
+      "Unauthorized exposure or modification of protected application resources."
+  );
+
+  const technicalDetails =
+    (rec.technical_details as Record<string, unknown>) || {};
+  const evidenceObj =
+    (rec.evidence as EvidenceItem) || null;
+
+  return {
+    id,
+    scan_id: String(rec.scan_id || ""),
+    title,
+    vulnerability_name: title,
+    endpoint,
+    target_endpoint: endpoint,
+    affected_endpoint: endpoint,
+    http_method: method,
+    vulnerability_category: category,
+    vulnerability_type: category,
+    affected_role: String(rec.affected_role || "user_b"),
+    affected_roles: Array.isArray(rec.affected_roles) ? rec.affected_roles as string[] : [],
+    expected_behavior: String(rec.expected_behavior || "Access denied (401/403)"),
+    actual_behavior: String(rec.actual_behavior || ""),
+    confirmation_status,
+    status: String(rec.status || "suspected"),
+    validation_status: finding_status,
+    finding_status,
+    confidence: confirmation_status,
+    access_verdict: String(rec.access_verdict || "SUSPICIOUS_ACCESS"),
+    resource_id: rec.resource_id ? String(rec.resource_id) : undefined,
+    severity: severity as any,
+    impact_explanation: impact,
+    impact,
+    description: explanation,
+    explanation,
+    remediation_recommendation: String(rec.remediation_recommendation || ""),
+    remediation_guidance: String(rec.remediation_guidance || ""),
+    evidence: evidenceObj,
+    technical_details: technicalDetails,
+    source_file: (technicalDetails.source_file as string) || (rec.source_file as string) || null,
+    black_box_only: !technicalDetails.source_file && !rec.source_file,
+  };
+}
+
 export default function Home() {
   // Input states
   const [targetUrl, setTargetUrl] = useState<string>("http://localhost:3000");
@@ -171,6 +274,7 @@ export default function Home() {
 
   // Reconnection tracking
   const [reconnectAttempts, setReconnectAttempts] = useState<number>(0);
+  const reconnectAttemptsRef = useRef<number>(0);
   const maxReconnectAttempts = 3;
 
   // Refs
@@ -545,6 +649,7 @@ export default function Home() {
 
         fetchAssessmentDetails(scanId);
         setReconnectAttempts(0);
+    reconnectAttemptsRef.current = 0;
         es.close();
       });
 
@@ -562,8 +667,9 @@ export default function Home() {
             return prevStatus;
           }
 
-          if (reconnectAttempts < maxReconnectAttempts) {
-            setReconnectAttempts((prev) => prev + 1);
+          if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+            reconnectAttemptsRef.current += 1;
+            setReconnectAttempts(reconnectAttemptsRef.current);
             setTimeout(() => {
               connectSSERef.current?.(scanId);
             }, 2000 * (reconnectAttempts + 1));
@@ -650,6 +756,7 @@ export default function Home() {
     setDiscoveredEndpoints([]);
     setSummaryData(null);
     setReconnectAttempts(0);
+    reconnectAttemptsRef.current = 0;
 
     try {
       const res = await fetch(`${API_BASE_URL}/api/assessments`, {
@@ -676,8 +783,12 @@ export default function Home() {
       fetchAssessmentDetails(scanId);
       connectSSE(scanId);
     } catch (err: unknown) {
+      const rawMsg = err instanceof Error ? err.message : "Failed to start assessment.";
       const msg =
-        err instanceof Error ? err.message : "Failed to start assessment.";
+        rawMsg.toLowerCase().includes("failed to fetch") ||
+        rawMsg.toLowerCase().includes("networkerror")
+          ? "Unable to reach the AuthScope API backend on http://localhost:8000. Please ensure the FastAPI backend is running."
+          : rawMsg;
       setError(msg);
       setStatus("ready");
     }
@@ -720,6 +831,7 @@ export default function Home() {
     setSummaryData(null);
     setError(null);
     setReconnectAttempts(0);
+    reconnectAttemptsRef.current = 0;
     setGithubRepo("");
     setSourceArchive(null);
     if (fileInputRef.current) {

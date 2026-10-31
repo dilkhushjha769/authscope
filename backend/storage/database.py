@@ -256,6 +256,8 @@ class DatabaseManager:
             ("retest_logs", "summary", "TEXT"),
             ("retest_logs", "notes", "TEXT"),
             ("retest_logs", "differential_result_json", "TEXT"),
+            ("scan_sessions", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("scan_sessions", "failure_reason", "TEXT DEFAULT ''"),
         ]
 
         # Cache existing table columns using PRAGMA table_info
