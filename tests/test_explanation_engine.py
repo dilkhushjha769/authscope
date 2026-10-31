@@ -678,3 +678,102 @@ def test_suspicious_finding_never_upgraded_to_confirmed(engine: ExplanationEngin
     assert report.validation_status != ExplanationValidationStatus.CONFIRMED, (
         "SUSPICIOUS finding must never be upgraded to CONFIRMED by the ExplanationEngine"
     )
+
+
+# ==============================================================================
+# CodeMapper Integration Tests
+# ==============================================================================
+
+
+def test_explanation_with_code_mapper_exact_location(
+    tmp_path, confirmed_evidence: EvidenceArtifact
+) -> None:
+    """When CodeMapper verifies an exact route handler, explanation engine uses actual source."""
+    from backend.analysis.code_mapper import CodeMapper
+
+    # Create dummy source repo with route
+    routes_dir = tmp_path / "routes"
+    routes_dir.mkdir(parents=True)
+    route_file = routes_dir / "basket.js"
+    route_file.write_text(
+        "const express = require('express');\n"
+        "const router = express.Router();\n\n"
+        "// Insecure basket endpoint\n"
+        "router.get('/rest/basket/:id', async (req, res) => {\n"
+        "  const basket = await Basket.findByPk(req.params.id);\n"
+        "  return res.json(basket);\n"
+        "});\n",
+        encoding="utf-8"
+    )
+
+    code_mapper = CodeMapper(repo_root=tmp_path)
+    engine = ExplanationEngine(code_mapper=code_mapper)
+
+    finding = _make_finding(
+        vuln_type="BOLA_IDOR",
+        endpoint="/rest/basket/1",
+        http_method="GET",
+        evidence=confirmed_evidence,
+    )
+
+    report = engine.generate_explanation(finding)
+
+    assert report.code_example is not None
+    assert report.code_example.is_illustrative is False, (
+        "When CodeMapper maps exact code, is_illustrative must be False"
+    )
+    assert report.code_example.snippet_provenance == "ACTUAL_VERIFIED_SOURCE"
+    assert "router.get('/rest/basket/:id'" in report.code_example.vulnerable_code
+    assert report.source_location is not None
+    assert "routes/basket.js" in report.source_location
+    assert report.snippet_provenance == "ACTUAL_VERIFIED_SOURCE"
+
+    # Evidence summary must preserve source_location & provenance
+    assert report.evidence_summary is not None
+    assert report.evidence_summary.source_location == report.source_location
+    assert report.evidence_summary.snippet_provenance == "ACTUAL_VERIFIED_SOURCE"
+
+
+def test_explanation_with_code_mapper_unavailable_falls_back_to_illustrative(
+    tmp_path, confirmed_evidence: EvidenceArtifact
+) -> None:
+    """When CodeMapper finds no matching endpoint, explanation engine falls back to illustrative."""
+    from backend.analysis.code_mapper import CodeMapper
+
+    # Empty repo without matching routes
+    code_mapper = CodeMapper(repo_root=tmp_path)
+    engine = ExplanationEngine(code_mapper=code_mapper)
+
+    finding = _make_finding(
+        vuln_type="BOLA_IDOR",
+        endpoint="/rest/nonexistent/route",
+        http_method="GET",
+        evidence=confirmed_evidence,
+    )
+
+    report = engine.generate_explanation(finding)
+
+    assert report.code_example is not None
+    assert report.code_example.is_illustrative is True, (
+        "When CodeMapper cannot map source code, is_illustrative must be True"
+    )
+    assert report.code_example.snippet_provenance == "ILLUSTRATIVE_EXAMPLE"
+    assert "ILLUSTRATIVE" in report.code_example.vulnerable_code.upper()
+    assert report.source_location is None
+    assert "illustrative" in report.disclaimer.lower()
+
+
+def test_never_invent_source_code_when_unmapped(engine: ExplanationEngine) -> None:
+    """When no CodeMapper is configured, code example is always flagged as illustrative."""
+    finding = _make_finding(
+        vuln_type="BFLA",
+        endpoint="/api/admin/action",
+    )
+    report = engine.generate_explanation(finding)
+
+    assert report.code_example is not None
+    assert report.code_example.is_illustrative is True
+    assert report.code_example.source_location is None
+    assert report.code_example.snippet_provenance == "ILLUSTRATIVE_EXAMPLE"
+    assert "illustrative" in report.disclaimer.lower()
+
