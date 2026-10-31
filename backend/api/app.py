@@ -716,13 +716,13 @@ async def stream_assessment(
                     if ev_id > 0:
                         last_sent_id = max(last_sent_id, ev_id)
 
-                    agent_events = _map_event_to_agent_sse(ev, assessment_id, agent)
-                    for event_type, payload in agent_events:
-                        yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
-
                     yield f"id: {ev_id}\nevent: activity\ndata: {ev.model_dump_json()}\n\n"
                     if msg_chunk:
                         yield f"id: msg_{ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
+
+                    agent_events = _map_event_to_agent_sse(ev, assessment_id, agent)
+                    for event_type, payload in agent_events:
+                        yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
                 elif kind == "done":
                     _, done_payload, _ = item
@@ -814,7 +814,7 @@ async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
 
     # Launch background task
     token = CancellationToken()
-    active_tokens[scan_id] = token
+    active_tokens[assessment_id] = token
     task_manager.start_assessment_task(
         scan_id=assessment_id,
         target_url=session.target_url,
