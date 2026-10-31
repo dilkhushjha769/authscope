@@ -566,3 +566,402 @@ class TestStorageAndEvidence:
                 assert fetched.evidence is not None
                 assert fetched.evidence.evidence_sha256 == finding.evidence.evidence_sha256
 
+
+@pytest.mark.integration
+class TestCrossModuleIntegration:
+    """Integration test suite verifying cross-module compatibility for Member 1 and Member 2."""
+
+    def test_scanner_finding_input_to_storage(self, repo: FindingRepository):
+        """Scenario 1: Scanner-like finding input -> Pydantic validation -> SQLite persistence."""
+        scanner_payload = {
+            "id": "fnd_scan_test_01",
+            "target_identifier": "scan_run_2026_10",
+            "endpoint": "/api/v1/invoices/992",
+            "http_method": "GET",
+            "vulnerability_category": "BOLA_IDOR",
+            "affected_role": "user_b",
+            "expected_behavior": "HTTP 403 Forbidden for User B accessing Invoice 992",
+            "actual_behavior": "HTTP 200 OK with complete billing data for User A",
+            "confirmation_status": "confirmed",
+            "evidence": {
+                "id": "evi_scan_test_01",
+                "finding_id": "fnd_scan_test_01",
+                "testing_role": "user_b",
+                "authorized_role": "user_a",
+                "request_method": "GET",
+                "request_url": "http://localhost:3000/api/v1/invoices/992",
+                "request_headers": {
+                    "Accept": "application/json",
+                    "X-Request-ID": "req-xyz-123"
+                },
+                "response_status": 200,
+                "sanitized_response_body": '{"invoice_id": 992, "amount": 1500.00, "owner": "user_a"}',
+                "evidence_validation_status": "valid"
+            }
+        }
+
+        saved_id = repo.save_finding(scanner_payload)
+        assert saved_id == "fnd_scan_test_01"
+
+        retrieved = repo.get_finding("fnd_scan_test_01")
+        assert retrieved is not None
+        assert retrieved.endpoint == "/api/v1/invoices/992"
+        assert retrieved.http_method == "GET"
+        assert retrieved.vulnerability_category == "BOLA_IDOR"
+        assert retrieved.confirmation_status == "confirmed"
+        assert retrieved.evidence is not None
+        assert retrieved.evidence.id == "evi_scan_test_01"
+        assert retrieved.evidence.response_status == 200
+        assert retrieved.evidence.evidence_sha256 is not None
+        assert len(retrieved.evidence.evidence_sha256) == 64
+
+    def test_evidence_creation_sanitization_pipeline(self, repo: FindingRepository):
+        """Scenario 2: Evidence creation -> sanitization of tokens/passwords/cookies -> persistence."""
+        mock_raw_token = os.getenv("TEST_AUTH_TOKEN", "mock_scanner_token_value_abc")
+        mock_raw_cookie = "session_token=mock_cookie_secret_999; theme=dark"
+        raw_evidence = EvidenceArtifact(
+            id="evi_sanitize_pipe_01",
+            finding_id="fnd_sanitize_pipe_01",
+            testing_role="anonymous",
+            request_method="POST",
+            request_url=f"http://localhost:3000/api/auth/reset?token={mock_raw_token}",
+            request_headers={
+                "Authorization": f"Bearer {mock_raw_token}",
+                "Proxy-Authorization": "Basic dXNlcm5hbWU6cGFzc3dvcmQ=",
+                "Cookie": mock_raw_cookie,
+                "X-Api-Key": mock_raw_token
+            },
+            request_metadata={
+                "debug_auth_token": mock_raw_token,
+                "nested_headers": {"auth": f"Bearer {mock_raw_token}"}
+            },
+            response_status=200,
+            relevant_response_headers={
+                "Set-Cookie": "session_id=new_secret_session_456; Path=/; HttpOnly"
+            },
+            sanitized_response_body=(
+                '{"status": "ok", "user": "alice", "password": "supersecretpassword123", '
+                '"secret_key": "raw_secret_key_val", "card_token": "tok_12345"}'
+            ),
+            evidence_validation_status="valid"
+        )
+
+        finding = FindingRecord(
+            id="fnd_sanitize_pipe_01",
+            target_identifier="scan_01",
+            endpoint="/api/auth/reset",
+            http_method="POST",
+            vulnerability_category="Missing_Authentication",
+            affected_role="anonymous",
+            expected_behavior="401 Unauthorized",
+            actual_behavior="200 OK",
+            evidence=raw_evidence
+        )
+
+        repo.save_finding(finding)
+
+        # Inspect stored record through repository
+        stored = repo.get_finding("fnd_sanitize_pipe_01")
+        assert stored is not None
+        assert stored.evidence is not None
+
+        # Verify sensitive headers are redacted
+        headers = stored.evidence.request_headers
+        assert headers["Authorization"] == "Bearer [REDACTED_BEARER_TOKEN]"
+        assert headers["Proxy-Authorization"] == "Basic [REDACTED_BASIC_AUTH]"
+        assert headers["Cookie"] == "[REDACTED_COOKIE]"
+        assert headers["X-Api-Key"] == "[REDACTED_API_KEY]"
+
+        # Verify Set-Cookie header is redacted
+        resp_headers = stored.evidence.relevant_response_headers
+        assert resp_headers["Set-Cookie"] == "[REDACTED_COOKIE]"
+
+        # Verify query parameter in request_url is sanitized
+        assert "mock_scanner_token_value_abc" not in stored.evidence.request_url
+        assert "[REDACTED" in stored.evidence.request_url
+
+        # Verify request metadata dictionary is recursively sanitized
+        assert stored.evidence.request_metadata["debug_auth_token"] == "[REDACTED_SECRET]"
+        assert stored.evidence.request_metadata["nested_headers"]["auth"] == "Bearer [REDACTED_BEARER_TOKEN]"
+
+        # Verify response body secrets are sanitized
+        body = stored.evidence.sanitized_response_body
+        assert "supersecretpassword123" not in body
+        assert "raw_secret_key_val" not in body
+        assert "[REDACTED_SECRET]" in body
+
+        # Query raw SQLite database table directly to prove no raw secret leaked to disk
+        with repo.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT request_headers_json, sanitized_response_body, request_url FROM evidence_artifacts WHERE id = ?",
+                ("evi_sanitize_pipe_01",)
+            ).fetchone()
+            assert row is not None
+            raw_headers_in_db, raw_body_in_db, raw_url_in_db = row
+            assert "supersecretpassword123" not in raw_body_in_db
+            assert "mock_raw_cookie" not in raw_headers_in_db
+            assert "mock_scanner_token_value_abc" not in raw_url_in_db
+
+    def test_ai_agent_finding_retrieval_and_update(self, repo: FindingRepository):
+        """Scenario 3: Finding retrieval -> AI-style update (severity, impact, remediation) -> persistence."""
+        # 1. Scanner produces preliminary suspected finding
+        initial_finding = FindingRecord(
+            id="fnd_ai_eval_01",
+            target_identifier="scan_nightly",
+            endpoint="/api/v2/admin/tenants/delete",
+            http_method="POST",
+            vulnerability_category="BFLA",
+            affected_role="user_b",
+            expected_behavior="403 Forbidden for non-admin roles",
+            actual_behavior="200 OK - Tenant deleted",
+            severity=SeverityLevel.MEDIUM,
+            confirmation_status="suspected",
+            impact_explanation="Preliminary scan detected potential BFLA.",
+            remediation_recommendation="Needs AI analysis.",
+        )
+        repo.save_finding(initial_finding)
+
+        # 2. AI Agent queries suspected findings
+        pending_findings = repo.get_all_findings(status="suspected")
+        assert len(pending_findings) >= 1
+        target_fnd = next(f for f in pending_findings if f.id == "fnd_ai_eval_01")
+
+        # 3. AI Agent analyzes finding and produces structured update
+        ai_update = {
+            "severity": SeverityLevel.CRITICAL,
+            "confirmation_status": "confirmed",
+            "impact_explanation": (
+                "Critical horizontal and vertical authorization bypass: Unprivileged User B can delete "
+                "arbitrary customer tenant databases via endpoint /api/v2/admin/tenants/delete."
+            ),
+            "remediation_recommendation": (
+                "Enforce role-based access control middleware: Require 'Role.ADMIN' and verify that "
+                "the calling session belongs to the tenant organization before executing deletion."
+            ),
+        }
+
+        updated = repo.update_finding(target_fnd.id, ai_update)
+        assert updated.severity == SeverityLevel.CRITICAL
+        assert updated.confirmation_status == "confirmed"
+        assert "Critical horizontal and vertical" in updated.impact_explanation
+        assert "Enforce role-based" in updated.remediation_recommendation
+
+        # 4. Verify SQLite persistence of AI update
+        persisted = repo.get_finding("fnd_ai_eval_01")
+        assert persisted is not None
+        assert persisted.severity == SeverityLevel.CRITICAL
+        assert persisted.confirmation_status == "confirmed"
+        assert persisted.impact_explanation == updated.impact_explanation
+
+    def test_retest_result_and_history_workflow(self, repo: FindingRepository):
+        """Scenario 4: Retest result -> retest history retrieval and finding status transition."""
+        finding = FindingRecord(
+            id="fnd_retest_flow_01",
+            target_identifier="scan_flow",
+            endpoint="/api/v1/documents/45",
+            http_method="GET",
+            vulnerability_category="BOLA_IDOR",
+            affected_role="user_b",
+            expected_behavior="403 Forbidden",
+            actual_behavior="200 OK document returned",
+            severity=SeverityLevel.HIGH,
+            confirmation_status="confirmed",
+            impact_explanation="Confidential document disclosure",
+            remediation_recommendation="Implement document permission checks",
+        )
+        repo.save_finding(finding)
+
+        # Retest 1: Developer deployed partial fix, retest fails (still vulnerable)
+        retest_1 = RetestLogRecord(
+            id="ret_log_001",
+            finding_id="fnd_retest_flow_01",
+            previous_status="confirmed",
+            new_status="confirmed",
+            is_vulnerable=True,
+            summary="Retest failed: User B can still access document 45.",
+            notes="Endpoint returned 200 OK with document stream."
+        )
+        repo.save_retest_result(retest_1)
+
+        fnd_after_ret1 = repo.get_finding("fnd_retest_flow_01")
+        assert fnd_after_ret1.retest_status == "vulnerable"
+        assert fnd_after_ret1.last_retested_timestamp is not None
+
+        # Retest 2: Developer deployed complete fix, retest passes (remediated)
+        retest_2 = RetestLogRecord(
+            id="ret_log_002",
+            finding_id="fnd_retest_flow_01",
+            previous_status="confirmed",
+            new_status="remediated",
+            is_vulnerable=False,
+            summary="Retest passed: Endpoint returned 403 Forbidden as expected.",
+            notes="Authorization guard successfully validated ownership."
+        )
+        repo.save_retest_result(retest_2)
+
+        fnd_after_ret2 = repo.get_finding("fnd_retest_flow_01")
+        assert fnd_after_ret2.retest_status == "remediated"
+
+        # Verify historical log retrieval
+        history = repo.get_retest_history("fnd_retest_flow_01")
+        assert len(history) == 2
+        # Ordered by retested_at DESC
+        assert history[0].id == "ret_log_002"
+        assert history[0].is_vulnerable is False
+        assert history[1].id == "ret_log_001"
+        assert history[1].is_vulnerable is True
+
+    def test_database_persistence_across_reopening(self, tmp_path: Path):
+        """Scenario 5: Database reopening -> data persistence across process boundaries."""
+        db_path = str(tmp_path / "persistent_cross_module.db")
+
+        # Session 1: Create, save finding and retest
+        mgr1 = DatabaseManager(db_path=db_path)
+        repo1 = FindingRepository(db_manager=mgr1)
+
+        evidence = EvidenceArtifact(
+            id="evi_persist_cross_01",
+            finding_id="fnd_persist_cross_01",
+            testing_role="user_b",
+            request_method="GET",
+            request_url="http://localhost:3000/api/admin/metrics",
+            response_status=200,
+            sanitized_response_body='{"cpu": 45, "tenants": 12}'
+        )
+        finding = FindingRecord(
+            id="fnd_persist_cross_01",
+            target_identifier="scan_target_persistent",
+            endpoint="/api/admin/metrics",
+            http_method="GET",
+            vulnerability_category="BFLA",
+            affected_role="user_b",
+            expected_behavior="403 Forbidden",
+            actual_behavior="200 OK with server metrics",
+            severity=SeverityLevel.HIGH,
+            confirmation_status="confirmed",
+            impact_explanation="Unauthorized access to system metrics",
+            remediation_recommendation="Restrict to Admin role",
+            evidence=evidence
+        )
+        repo1.save_finding(finding)
+
+        retest = RetestLogRecord(
+            id="ret_persist_cross_01",
+            finding_id="fnd_persist_cross_01",
+            previous_status="confirmed",
+            new_status="remediated",
+            is_vulnerable=False,
+            summary="Verification passed after ACL patch."
+        )
+        repo1.save_retest_result(retest)
+        mgr1.close()
+
+        # Session 2: Fresh instances pointing to the same file
+        mgr2 = DatabaseManager(db_path=db_path)
+        repo2 = FindingRepository(db_manager=mgr2)
+
+        retrieved_finding = repo2.get_finding("fnd_persist_cross_01")
+        assert retrieved_finding is not None
+        assert retrieved_finding.endpoint == "/api/admin/metrics"
+        assert retrieved_finding.retest_status == "remediated"
+        assert retrieved_finding.evidence is not None
+        assert retrieved_finding.evidence.id == "evi_persist_cross_01"
+        assert retrieved_finding.evidence.sanitized_response_body == '{"cpu": 45, "tenants": 12}'
+
+        retrieved_history = repo2.get_retest_history("fnd_persist_cross_01")
+        assert len(retrieved_history) == 1
+        assert retrieved_history[0].id == "ret_persist_cross_01"
+        assert retrieved_history[0].is_vulnerable is False
+        mgr2.close()
+
+    def test_invalid_scanner_input_rejection(self, repo: FindingRepository):
+        """Scenario 6: Invalid scanner input -> safe validation failure."""
+        # Missing required endpoint
+        invalid_missing_endpoint = {
+            "id": "fnd_inv_01",
+            "target_identifier": "scan_01",
+            "http_method": "GET",
+            "vulnerability_category": "BOLA_IDOR",
+            "affected_role": "user_b",
+            "expected_behavior": "403 Forbidden",
+            "actual_behavior": "200 OK"
+        }
+        with pytest.raises(InvalidDataError):
+            repo.save_finding(invalid_missing_endpoint)
+
+        # Invalid HTTP method
+        invalid_method = {
+            "id": "fnd_inv_02",
+            "target_identifier": "scan_01",
+            "endpoint": "/api/test",
+            "http_method": "INVALID_HTTP_METHOD",
+            "vulnerability_category": "BOLA_IDOR",
+            "affected_role": "user_b",
+            "expected_behavior": "403 Forbidden",
+            "actual_behavior": "200 OK"
+        }
+        with pytest.raises(InvalidDataError):
+            repo.save_finding(invalid_method)
+
+        # Invalid severity
+        invalid_severity = {
+            "id": "fnd_inv_03",
+            "target_identifier": "scan_01",
+            "endpoint": "/api/test",
+            "http_method": "GET",
+            "vulnerability_category": "BOLA_IDOR",
+            "affected_role": "user_b",
+            "severity": "SUPER_APOCALYPTIC_HIGH",
+            "expected_behavior": "403 Forbidden",
+            "actual_behavior": "200 OK"
+        }
+        with pytest.raises(InvalidDataError):
+            repo.save_finding(invalid_severity)
+
+    def test_duplicate_finding_id_handling(self, repo: FindingRepository):
+        """Scenario 7: Duplicate finding IDs -> appropriate error handling or controlled overwrite."""
+        finding_initial = FindingRecord(
+            id="fnd_dup_test_01",
+            target_identifier="scan_01",
+            endpoint="/api/v1/records/1",
+            http_method="GET",
+            vulnerability_category="BOLA_IDOR",
+            affected_role="user_b",
+            expected_behavior="403 Forbidden",
+            actual_behavior="200 OK",
+            severity=SeverityLevel.MEDIUM,
+            impact_explanation="Initial assessment",
+            remediation_recommendation="Initial fix",
+        )
+
+        repo.save_finding(finding_initial)
+
+        finding_duplicate = FindingRecord(
+            id="fnd_dup_test_01",
+            target_identifier="scan_01",
+            endpoint="/api/v1/records/1",
+            http_method="GET",
+            vulnerability_category="BOLA_IDOR",
+            affected_role="user_b",
+            expected_behavior="403 Forbidden",
+            actual_behavior="200 OK with expanded details",
+            severity=SeverityLevel.HIGH,
+            impact_explanation="Updated assessment",
+            remediation_recommendation="Updated fix",
+        )
+
+        # Default overwrite=False must raise DuplicateRecordError
+        with pytest.raises(DuplicateRecordError) as exc_info:
+            repo.save_finding(finding_duplicate, overwrite=False)
+        assert "already exists" in str(exc_info.value)
+
+        # Overwrite=True must succeed cleanly
+        saved_id = repo.save_finding(finding_duplicate, overwrite=True)
+        assert saved_id == "fnd_dup_test_01"
+
+        updated = repo.get_finding("fnd_dup_test_01")
+        assert updated is not None
+        assert updated.severity == SeverityLevel.HIGH
+        assert updated.impact_explanation == "Updated assessment"
+
+

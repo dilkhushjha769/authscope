@@ -60,9 +60,10 @@ def compute_sha256(data: str | bytes) -> str:
 
 _JWT_PATTERN = re.compile(r"eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-\.+/=]*")
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[a-zA-Z0-9_\-\.=~+/]+")
+_BASIC_AUTH_PATTERN = re.compile(r"(?i)\bbasic\s+[a-zA-Z0-9+/=]{8,}")
 _COOKIE_PATTERN = re.compile(r"(?i)\b(connect\.sid|sessionid|session_id|jwt|token|PHPSESSID)=([^;\s&\"']+)")
 _JSON_SECRET_PATTERN = re.compile(
-    r'("(?i:(?:password|access_token|refresh_token|secret|api_key|apikey|auth_token|authorization|token))"\s*:\s*)"(?:[^"\\]|\\.)*"'
+    r'("(?i:[a-zA-Z0-9_\-]*(?:password|passwd|secret|token|api_key|apikey|auth_token|authorization|credential|privkey|private_key)[a-zA-Z0-9_\-]*)"\s*:\s*)"(?:[^"\\]|\\.)*"'
 )
 _QUERY_SECRET_PATTERN = re.compile(
     r'(?i)\b(password|access_token|secret|api_key|apikey|auth_token)=([^&\s"\']+)'
@@ -70,6 +71,11 @@ _QUERY_SECRET_PATTERN = re.compile(
 _PROSE_PASSWORD_PATTERN = re.compile(
     r'(?i)\b(password|passwd|pwd)\s*[:= ]\s*([^\s,;"\'\]}]+)'
 )
+
+_SENSITIVE_KEY_NAMES = {
+    "password", "passwd", "pwd", "token", "access_token", "refresh_token",
+    "secret", "api_key", "apikey", "auth_token", "authorization", "cookie"
+}
 
 
 def redact_sensitive_text(text: str) -> str:
@@ -81,9 +87,28 @@ def redact_sensitive_text(text: str) -> str:
         return text
 
     sanitized = _BEARER_PATTERN.sub("Bearer [REDACTED_BEARER_TOKEN]", text)
+    sanitized = _BASIC_AUTH_PATTERN.sub("Basic [REDACTED_BASIC_AUTH]", sanitized)
     sanitized = _JWT_PATTERN.sub("[REDACTED_JWT]", sanitized)
     sanitized = _JSON_SECRET_PATTERN.sub(r'\1"[REDACTED_SECRET]"', sanitized)
     sanitized = _QUERY_SECRET_PATTERN.sub(r'\1=[REDACTED_SECRET]', sanitized)
     sanitized = _COOKIE_PATTERN.sub(r'\1=[REDACTED_COOKIE]', sanitized)
     sanitized = _PROSE_PASSWORD_PATTERN.sub(r'\1 [REDACTED_PASSWORD]', sanitized)
     return sanitized
+
+
+def sanitize_dict_or_list(data: Any) -> Any:
+    """Recursively sanitizes nested dictionaries, lists, and strings."""
+    if isinstance(data, dict):
+        sanitized = {}
+        for k, v in data.items():
+            k_str = str(k).lower()
+            if any(s in k_str for s in _SENSITIVE_KEY_NAMES):
+                sanitized[k] = "[REDACTED_SECRET]"
+            else:
+                sanitized[k] = sanitize_dict_or_list(v)
+        return sanitized
+    elif isinstance(data, list):
+        return [sanitize_dict_or_list(item) for item in data]
+    elif isinstance(data, str):
+        return redact_sensitive_text(data)
+    return data
