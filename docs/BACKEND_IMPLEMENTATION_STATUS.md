@@ -10,6 +10,10 @@ The audit found that endpoint discovery returned only a curated Juice Shop list,
 
 ## Completed
 
+- Added `BeginnerExplanation` output for every detailed finding in API responses. The explanation uses deterministic validation, sanitized observations, role context, and engine severity; suspicious or incomplete cases explicitly say they are unconfirmed and list what remains unknown.
+- Added a beginner-first Next.js finding card with clear risk definitions, fix-copy action, and collapsed technical evidence. The final report summarizes confirmed versus investigating findings and prioritizes the highest-risk confirmed issue.
+- Added tests for confirmed, suspicious, false-positive, missing evidence/model output, unsupported claims, and secure-code suppression. See `docs/BEGINNER_FRIENDLY_EXPLANATIONS.md`.
+
 - Added an evidence-gated, Pydantic-validated AI finding review service with redacted structured context, conservative failure handling, and advisory-only verdicts. The API task runner and Gemini agent adapter invoke it after engine validation; the finding status and access verdict remain under deterministic engine control.
 - Added SSE events for finding detection, evidence validation boundaries, AI review progress/completion, and fix recommendations. Added `docs/AI_FINDING_REVIEW.md` and mocked-provider coverage.
 - The production review provider is intentionally unconfigured. Sending finding evidence to Gemini would violate the repository's current outbound allowlist. The injectable provider interface is testable but an approved model egress path is still required for live AI review.
@@ -37,8 +41,12 @@ The audit found that endpoint discovery returned only a curated Juice Shop list,
 
 - `backend/analysis/evidence_validator.py`
 - `backend/analysis/finding_review.py`
+- `backend/analysis/explanation_engine.py`
 - `backend/api/app.py`
 - `backend/api/adapters.py`
+- `frontend/src/components/FindingCard.tsx`
+- `frontend/src/app/page.tsx`
+- `frontend/src/types/assessment.ts`
 - `backend/core/assessment_engine.py`
 - `backend/storage/models.py`
 - `backend/core/assessment_engine.py`
@@ -57,6 +65,8 @@ The audit found that endpoint discovery returned only a curated Juice Shop list,
 - `tests/test_security_detection/test_request_safety_and_scope.py`
 - `tests/test_task_recovery_and_multi_role.py`
 - `tests/test_finding_review.py`
+- `tests/test_explanation_engine.py`
+- `tests/test_api_frontend/test_api_and_findings.py`
 
 ## APIs and Events
 
@@ -111,3 +121,10 @@ Run the local OWASP Juice Shop target separately at `http://localhost:3000`. Con
 - Define an approved model-provider egress policy before making Gemini calls part of the default runner. Until then, keep provider calls opt-in and preserve the hard target boundary.
 - Connect the optional local source directory/archive workflow to the default API runner and emit source mapping/explanation details only after filesystem verification.
 - Add broader assessment lifecycle regression cases for idle SSE heartbeat, live-task duplicate initiation, and route-level failure reporting.
+
+## Beginner Explanation Phase Verification
+
+- Backend full suite: `586 passed, 5 warnings`.
+- Frontend `npm run lint`: passed without warnings.
+- Frontend `npm run build`: passed, including TypeScript checking and static page generation.
+- Focused explanation/API tests: `60 passed, 2 warnings`.

@@ -15,8 +15,10 @@ import {
   Info,
   HelpCircle,
   MinusCircle,
+  Copy,
+  Check,
 } from "lucide-react";
-import { FindingItem, FindingValidationStatus } from "@/types/assessment";
+import { BeginnerExplanation, FindingItem, FindingValidationStatus } from "@/types/assessment";
 
 interface FindingCardProps {
   finding: FindingItem;
@@ -128,6 +130,7 @@ function getStatusMeta(status: FindingValidationStatus): {
 
 export function FindingCard({ finding }: FindingCardProps) {
   const [showRawEvidence, setShowRawEvidence] = useState(false);
+  const [fixCopied, setFixCopied] = useState(false);
 
   // Never display a suspicious finding as confirmed
   const rawStatus = (finding.validation_status || "SUSPICIOUS").toUpperCase();
@@ -190,6 +193,11 @@ export function FindingCard({ finding }: FindingCardProps) {
   // C. Source-code location (strictly verified; never invent files or line numbers)
   const techDetails = (finding.technical_details || {}) as Record<string, unknown>;
   const rawTechLoc = techDetails.source_location as Record<string, unknown> | undefined;
+  const aiReview = techDetails.ai_review as Record<string, unknown> | undefined;
+  const aiSeverityReview = aiReview?.severity_review as Record<string, unknown> | undefined;
+  const aiSuggestedSeverity = typeof aiSeverityReview?.suggested_severity === "string"
+    ? aiSeverityReview.suggested_severity
+    : "";
 
   const hasVerifiedSource = Boolean(
     (finding.source_code_available === true && finding.source_file) ||
@@ -279,31 +287,62 @@ export function FindingCard({ finding }: FindingCardProps) {
 
   // F. Sanitized Evidence Summary
   const baselineBehavior =
-    finding.evidence_summary?.baseline_behavior ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.baseline_behavior
+      : undefined) ||
     finding.baseline_behavior ||
     finding.expected_behavior ||
     finding.evidence?.expected_behavior ||
     "Unauthorized requests must be denied with HTTP 401/403.";
   const unauthorizedBehavior =
-    finding.evidence_summary?.unauthorized_behavior ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.unauthorized_behavior
+      : undefined) ||
     finding.unauthorized_behavior ||
     finding.actual_behavior ||
     finding.evidence?.actual_behavior ||
     "Observed discrepant response from target endpoint.";
   const responseDifference =
-    finding.evidence_summary?.response_difference ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.response_difference
+      : undefined) ||
     finding.response_difference ||
     `Expected access denial (${baselineBehavior}), but observed HTTP ${
       finding.evidence?.response_status ?? 200
     } (${unauthorizedBehavior}).`;
   const evidenceStatus =
-    finding.evidence_summary?.validation_status ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.validation_status
+      : undefined) ||
     finding.evidence_validation_status ||
     normalizedStatus;
   const evidenceSha =
-    finding.evidence_summary?.evidence_sha256 ||
+    (typeof finding.evidence_summary === "object" && finding.evidence_summary
+      ? finding.evidence_summary.evidence_sha256
+      : undefined) ||
     finding.evidence?.evidence_sha256 ||
     "";
+  const beginner: BeginnerExplanation | undefined = finding.beginner_explanation;
+  const riskDescriptions: Record<string, string> = {
+    CRITICAL: "Could cause very serious damage.",
+    HIGH: "Could expose important information or allow serious unauthorized actions.",
+    MEDIUM: "Could cause limited unauthorized access or other meaningful harm.",
+    LOW: "A smaller weakness that should still be fixed.",
+    INFO: "Useful security advice; not necessarily a vulnerability.",
+    INFORMATIONAL: "Useful security advice; not necessarily a vulnerability.",
+  };
+  const severityLabel = severity === "INFO" || severity === "INFORMATIONAL" ? "Informational" : severity;
+  const beginnerFix = beginner?.how_to_fix?.length ? beginner.how_to_fix : [recommendedFix];
+  const beginnerVerify = beginner?.how_to_verify_fix?.length ? beginner.how_to_verify_fix : [verificationProcedure];
+  const copyFix = async () => {
+    try {
+      await navigator.clipboard.writeText(beginnerFix.map((step, i) => `${i + 1}. ${step}`).join("\n"));
+      setFixCopied(true);
+      window.setTimeout(() => setFixCopied(false), 1800);
+    } catch {
+      setFixCopied(false);
+    }
+  };
 
   return (
     <div
@@ -328,26 +367,40 @@ export function FindingCard({ finding }: FindingCardProps) {
                   severityBadgeColor[severity] || severityBadgeColor.MEDIUM
                 }`}
               >
-                {severity}
-              </span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-200 border border-zinc-700">
-                {categoryDisplay}
-              </span>
-              <span className="text-[10px] font-mono text-zinc-500">
-                ({rawCategory})
+                {severityLabel}
               </span>
             </div>
             <h4 className="text-sm font-semibold text-zinc-100 mt-1.5">
-              {bugName}
+              {beginner?.simple_title || bugName}
             </h4>
-            <p className="text-[11px] text-zinc-400 mt-0.5">
-              Status note: {statusMeta.description}
+            <p className="text-[11px] text-zinc-300 mt-1">
+              {normalizedStatus === "CONFIRMED"
+                ? "Confirmed by the security engine using captured evidence."
+                : "Still being investigated. The current evidence does not confirm an attack."}
             </p>
           </div>
         </div>
       </div>
 
+      <div className="mt-4 space-y-3 text-sm leading-relaxed">
+        <p className="text-xs text-zinc-300"><strong className="text-zinc-100">Risk level: {severityLabel}</strong> — {beginner?.risk_description || riskDescriptions[severity] || "Risk level set by the security engine."}</p>
+        <section><h5 className="font-semibold text-white">What happened?</h5><p className="text-zinc-300">{beginner?.what_is_the_problem || "A plain-language explanation is unavailable for this finding."}</p></section>
+        <section><h5 className="font-semibold text-white">What could an attacker do?</h5><p className="text-zinc-300">{beginner?.what_attacker_can_do || "The available information does not establish what an attacker could do."}</p></section>
+        <section><h5 className="font-semibold text-white">Why is it dangerous?</h5><p className="text-zinc-300">{beginner?.real_world_impact || beginner?.why_it_matters || "The impact is not established by the available information."}</p></section>
+        <section>
+          <div className="flex flex-wrap items-center justify-between gap-2"><h5 className="font-semibold text-white">How to fix it</h5><button type="button" onClick={copyFix} className="inline-flex items-center gap-1 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-200 hover:bg-zinc-800">{fixCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}{fixCopied ? "Copied" : "Copy recommended fix"}</button></div>
+          <ol className="list-decimal space-y-1 pl-5 text-zinc-300">{beginnerFix.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}</ol>
+        </section>
+        <section><h5 className="font-semibold text-white">How to check the fix</h5><ol className="list-decimal space-y-1 pl-5 text-zinc-300">{beginnerVerify.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}</ol></section>
+        {(beginner?.additional_recommendations || []).length > 0 && <section><h5 className="font-semibold text-white">Additional recommendations</h5><ul className="list-disc space-y-1 pl-5 text-zinc-300">{beginner?.additional_recommendations.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ul></section>}
+        {(beginner?.what_is_not_yet_proven || []).length > 0 && <p className="rounded border border-amber-500/30 bg-amber-950/20 p-2 text-xs text-amber-100">{beginner?.what_is_not_yet_proven.join(" ")}</p>}
+      </div>
+
+      <details className="mt-4 border-t border-zinc-800 pt-3">
+        <summary className="cursor-pointer text-sm font-semibold text-zinc-300">Technical details</summary>
       <div className="mt-3 pt-3 border-t border-zinc-800/80 space-y-3 text-xs">
+        <div className="text-zinc-400">{beginner?.technical_name || categoryDisplay} ({rawCategory}) · {httpMethod} {endpointPath}</div>
+        {aiSuggestedSeverity && <p className="rounded border border-purple-500/30 bg-purple-950/20 p-2 text-zinc-300">AI severity suggestion: <strong>{aiSuggestedSeverity}</strong>. Engine severity remains {severity}. {String(aiSeverityReview?.justification || "")}</p>}
         {/* ==================================================================
             B. WEBSITE LOCATION
         ================================================================== */}
@@ -662,6 +715,7 @@ export function FindingCard({ finding }: FindingCardProps) {
           )}
         </div>
       </div>
+      </details>
     </div>
   );
 }

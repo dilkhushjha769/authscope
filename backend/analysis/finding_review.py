@@ -34,6 +34,24 @@ class SeverityReview(BaseModel):
     justification: str = ""
 
 
+class BeginnerReviewExplanation(BaseModel):
+    """Plain-language narrative requested from Gemini when an approved provider is used."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    simple_title: str
+    what_is_the_problem: str
+    what_attacker_can_do: str
+    real_world_impact: str
+    why_it_matters: str
+    how_to_fix: List[str] = Field(default_factory=list)
+    secure_code_example: Optional[str] = None
+    how_to_verify_fix: List[str] = Field(default_factory=list)
+    additional_recommendations: List[str] = Field(default_factory=list)
+    evidence_summary: List[str] = Field(default_factory=list)
+    what_is_not_yet_proven: List[str] = Field(default_factory=list)
+
+
 class FindingReview(BaseModel):
     """Structured model opinion; it is advisory and cannot alter engine state."""
 
@@ -49,6 +67,7 @@ class FindingReview(BaseModel):
     severity_review: SeverityReview
     fix_recommendation: str
     secure_code_example: Optional[str] = None
+    beginner_explanation: Optional[BeginnerReviewExplanation] = None
     additional_recommendations: List[str] = Field(default_factory=list)
     verification_steps: List[str] = Field(default_factory=list)
     missing_information: List[str] = Field(default_factory=list)
@@ -113,7 +132,9 @@ class FindingReviewService:
             "facts from inference, state missing evidence, and use UNCERTAIN when evidence is insufficient. "
             "Do not invent files, lines, frameworks, endpoints, or code. Code examples are allowed only when "
             "the supplied source mapping establishes language/framework and root cause. This review cannot "
-            "change deterministic validation or finding status.\nFACTS_JSON:\n"
+            "change deterministic validation or finding status. Also provide the beginner_explanation fields "
+            "in short, plain English. If the engine result is not confirmed, explicitly state that more evidence "
+            "is needed and do not describe an attack as successful.\nFACTS_JSON:\n"
             + json.dumps(context, ensure_ascii=True)
         )
         try:
@@ -129,6 +150,12 @@ class FindingReviewService:
             )
             if parsed.secure_code_example and not code_context_known:
                 parsed = parsed.model_copy(update={"secure_code_example": None})
+            if parsed.beginner_explanation and parsed.beginner_explanation.secure_code_example and not code_context_known:
+                parsed = parsed.model_copy(update={
+                    "beginner_explanation": parsed.beginner_explanation.model_copy(
+                        update={"secure_code_example": None}
+                    )
+                })
             return parsed
         except Exception as exc:
             # Model outage/malformed output must never discard the engine finding.

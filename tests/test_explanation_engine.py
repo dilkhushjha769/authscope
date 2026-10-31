@@ -184,6 +184,53 @@ def test_simple_explanation_bola_idor(
     )
 
 
+def test_beginner_explanation_uses_observed_facts_without_unsupported_claims(
+    engine: ExplanationEngine, bola_confirmed_finding: FindingRecord
+) -> None:
+    report = engine.generate_beginner_explanation(bola_confirmed_finding)
+    assert report.confirmation_status == "CONFIRMED"
+    assert "received a response" in report.what_is_the_problem
+    assert "thousands" not in report.what_attacker_can_do
+    assert "account takeover" not in report.real_world_impact
+    assert report.secure_code_example is None
+    assert report.risk_level == "HIGH"
+    assert report.how_to_fix and report.how_to_verify_fix
+
+
+def test_beginner_explanation_keeps_suspicious_and_false_positive_results_unproven(
+    engine: ExplanationEngine,
+) -> None:
+    suspicious = _make_finding(
+        confirmation_status="suspected",
+        validation_status="SUSPICIOUS",
+        evidence=_make_evidence("suspicious", validation_status=EvidenceValidationStatus.SUSPICIOUS),
+    )
+    suspicious_result = engine.generate_beginner_explanation(suspicious)
+    assert "not enough to confirm" in suspicious_result.what_is_the_problem
+    assert "We need more evidence to confirm this." in suspicious_result.what_is_not_yet_proven
+    assert "have not proven" in suspicious_result.what_attacker_can_do
+
+    false_positive = _make_finding(
+        confirmation_status="false_positive",
+        validation_status="REJECTED_FALSE_POSITIVE",
+        evidence=None,
+    )
+    false_positive_result = engine.generate_beginner_explanation(false_positive)
+    assert false_positive_result.confirmation_status == "CORRECTLY_DENIED"
+    assert "have not proven" in false_positive_result.what_attacker_can_do
+
+
+def test_beginner_explanation_handles_missing_evidence_without_inventing_details(
+    engine: ExplanationEngine,
+) -> None:
+    finding = _make_finding(evidence=None, validation_status="UNVALIDATED")
+    result = engine.generate_beginner_explanation(finding)
+    assert result.confirmation_status == "UNVERIFIED"
+    assert "We need more evidence to confirm this." in result.what_is_not_yet_proven
+    assert any("No evidence artifact was attached" in item for item in result.evidence_summary)
+    assert result.secure_code_example is None
+
+
 # ==============================================================================
 # 2. Simple explanation — BFLA
 # ==============================================================================

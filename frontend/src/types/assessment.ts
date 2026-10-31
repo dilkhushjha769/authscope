@@ -168,6 +168,7 @@ export interface FindingItem {
   evidence?: EvidenceItem | null;
   evidence_summary?: EvidenceSummaryInfo | string | null;
   technical_details?: Record<string, unknown>;
+  beginner_explanation?: BeginnerExplanation;
 
   // Section B: Website location
   full_url?: string;
@@ -213,6 +214,24 @@ export interface FindingItem {
   unauthorized_behavior?: string;
   response_difference?: string;
   evidence_validation_status?: FindingValidationStatus | string;
+}
+
+export interface BeginnerExplanation {
+  simple_title: string;
+  technical_name: string;
+  risk_level: string;
+  risk_description: string;
+  confirmation_status: string;
+  what_is_the_problem: string;
+  what_attacker_can_do: string;
+  real_world_impact: string;
+  why_it_matters: string;
+  how_to_fix: string[];
+  secure_code_example?: string | null;
+  how_to_verify_fix: string[];
+  additional_recommendations: string[];
+  evidence_summary: string[];
+  what_is_not_yet_proven: string[];
 }
 
 export interface DiscoveredEndpointItem {

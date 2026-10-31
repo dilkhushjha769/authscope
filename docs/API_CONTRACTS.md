@@ -457,6 +457,12 @@ def stream_assessment(
 
 # GET /api/assessments/{assessment_id}
 # Response 200: Full AssessmentSummaryResponse with stages, events, and markdown content
+# Each detailed finding includes a `beginner_explanation` object with `simple_title`,
+# `technical_name`, engine-preserved `risk_level` and `confirmation_status`,
+# `what_is_the_problem`, `what_attacker_can_do`, `real_world_impact`, `why_it_matters`,
+# numbered `how_to_fix` and `how_to_verify_fix` arrays, optional `secure_code_example`,
+# `additional_recommendations`, `evidence_summary`, and `what_is_not_yet_proven`.
+# This is additive; existing finding fields remain available.
 
 # POST /api/assessments/{assessment_id}/stop
 # Response 200: {"status": "CANCELLING", "message": "Cancellation signal dispatched."}

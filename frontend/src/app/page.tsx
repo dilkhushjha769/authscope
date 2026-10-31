@@ -135,108 +135,6 @@ export function validateWebsiteUrlSyntax(rawInput: string): {
 }
 
 
-function mapRecordToFindingItem(rec: Record<string, unknown>): FindingItem {
-  const id = String(rec.id || `f-${Date.now()}`);
-  const endpoint = String(rec.endpoint || rec.target_endpoint || "");
-  const method = String(rec.http_method || "GET");
-  const category = String(
-    rec.vulnerability_category || rec.vulnerability_type || "BOLA_IDOR"
-  );
-  const title = String(rec.title || `${category} on ${endpoint}`);
-  const severity = String(rec.severity || "MEDIUM").toUpperCase();
-  const confirmation_status = String(
-    rec.confirmation_status || rec.status || "confirmed"
-  ).toUpperCase();
-  const validation_status = String(
-    rec.validation_status || "CONFIRMED"
-  ).toUpperCase();
-
-  let finding_status: FindingValidationStatus = "SUSPICIOUS";
-  if (
-    validation_status === "CONFIRMED" &&
-    (confirmation_status === "CONFIRMED" ||
-      confirmation_status === "CONFIRMED_RUNTIME_VULNERABILITY")
-  ) {
-    finding_status = "CONFIRMED";
-  } else if (
-    validation_status === "INCONCLUSIVE" ||
-    confirmation_status === "INCONCLUSIVE"
-  ) {
-    finding_status = "INCONCLUSIVE";
-  } else if (
-    validation_status === "NOT_TESTED" ||
-    confirmation_status === "NOT_TESTED"
-  ) {
-    finding_status = "NOT_TESTED";
-  } else if (
-    validation_status === "REJECTED_FALSE_POSITIVE" ||
-    validation_status === "UNVALIDATED" ||
-    validation_status === "NOT_CONFIRMED" ||
-    confirmation_status === "FALSE_POSITIVE" ||
-    confirmation_status === "NOT_REPRODUCIBLE"
-  ) {
-    finding_status = "NOT_CONFIRMED";
-  } else if (
-    validation_status === "SUSPICIOUS" ||
-    confirmation_status === "SUSPECTED" ||
-    confirmation_status === "SUSPICIOUS"
-  ) {
-    finding_status = "SUSPICIOUS";
-  }
-
-  const explanation = String(
-    rec.description ||
-      rec.impact_explanation ||
-      `Differential authorization discrepancy observed on ${endpoint}.`
-  );
-  const impact = String(
-    rec.impact_explanation ||
-      rec.business_impact ||
-      rec.description ||
-      "Unauthorized exposure or modification of protected application resources."
-  );
-
-  const technicalDetails =
-    (rec.technical_details as Record<string, unknown>) || {};
-  const evidenceObj =
-    (rec.evidence as EvidenceItem) || null;
-
-  return {
-    id,
-    scan_id: String(rec.scan_id || ""),
-    title,
-    vulnerability_name: title,
-    endpoint,
-    target_endpoint: endpoint,
-    affected_endpoint: endpoint,
-    http_method: method,
-    vulnerability_category: category,
-    vulnerability_type: category,
-    affected_role: String(rec.affected_role || "user_b"),
-    affected_roles: Array.isArray(rec.affected_roles) ? rec.affected_roles as string[] : [],
-    expected_behavior: String(rec.expected_behavior || "Access denied (401/403)"),
-    actual_behavior: String(rec.actual_behavior || ""),
-    confirmation_status,
-    status: String(rec.status || "suspected"),
-    validation_status: finding_status,
-    finding_status,
-    confidence: confirmation_status,
-    access_verdict: String(rec.access_verdict || "SUSPICIOUS_ACCESS"),
-    resource_id: rec.resource_id ? String(rec.resource_id) : undefined,
-    severity: severity as any,
-    impact_explanation: impact,
-    impact,
-    description: explanation,
-    explanation,
-    remediation_recommendation: String(rec.remediation_recommendation || ""),
-    remediation_guidance: String(rec.remediation_guidance || ""),
-    evidence: evidenceObj,
-    technical_details: technicalDetails,
-    source_file: (technicalDetails.source_file as string) || (rec.source_file as string) || null,
-    black_box_only: !technicalDetails.source_file && !rec.source_file,
-  };
-}
-
 export default function Home() {
   // Input states
   const [targetUrl, setTargetUrl] = useState<string>("http://localhost:3000");
@@ -891,6 +789,21 @@ export default function Home() {
   const displayScheme = (summaryData?.scheme || parsedTarget.scheme || "http").toUpperCase();
   const displayPort = summaryData?.port ?? parsedTarget.port ?? 3000;
 
+  const reportFindings = summaryData?.findings || findings;
+  const confirmedReportFindings = reportFindings.filter((finding) => finding.validation_status === "CONFIRMED");
+  const investigatingFindings = reportFindings.filter((finding) => finding.validation_status !== "CONFIRMED");
+  const severityRank: Record<string, number> = { CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, INFO: 1 };
+  const highestRiskFinding = [...reportFindings].sort(
+    (left, right) => (severityRank[String(right.severity).toUpperCase()] || 0) - (severityRank[String(left.severity).toUpperCase()] || 0)
+  )[0];
+  const highestRiskLabel = highestRiskFinding && ["INFO", "INFORMATIONAL"].includes(String(highestRiskFinding.severity).toUpperCase())
+    ? "Informational"
+    : highestRiskFinding?.severity;
+  const firstRecommendedFix = highestRiskFinding?.beginner_explanation?.how_to_fix?.[0];
+  const reportRecommendations = Array.from(new Set(
+    reportFindings.flatMap((finding) => finding.beginner_explanation?.additional_recommendations || [])
+  )).slice(0, 3);
+
   return (
     <div className="flex flex-col min-h-screen bg-[#0B0F17] text-[#F9FAFB]">
       {/* =================================================================== */}
@@ -1529,6 +1442,23 @@ export default function Home() {
                         </div>
                       </div>
                     </div>
+
+                    <section className="rounded-xl border border-blue-500/30 bg-blue-950/15 p-4 space-y-2" aria-label="Beginner-friendly final report">
+                      <h4 className="font-semibold text-white">What this assessment found</h4>
+                      <p className="text-sm text-zinc-300">
+                        {confirmedReportFindings.length} confirmed issue(s); {investigatingFindings.length} result(s) still need investigation.
+                      </p>
+                      {highestRiskFinding ? (
+                        <>
+                          <p className="text-sm text-zinc-300"><strong className="text-white">{highestRiskFinding.validation_status === "CONFIRMED" ? "Most serious confirmed issue:" : "Highest-risk result still under investigation:"}</strong> {highestRiskFinding.beginner_explanation?.simple_title || highestRiskFinding.title} ({highestRiskLabel}).</p>
+                          <p className="text-sm text-zinc-300"><strong className="text-white">Possible effect on users:</strong> {highestRiskFinding.beginner_explanation?.real_world_impact || "The impact is not established by the available evidence."}</p>
+                          {firstRecommendedFix && <p className="text-sm text-zinc-300"><strong className="text-white">{highestRiskFinding.validation_status === "CONFIRMED" ? "Fix first:" : "Next step:"}</strong> {firstRecommendedFix}</p>}
+                        </>
+                      ) : (
+                        <p className="text-sm text-zinc-300">No issue was confirmed. Review any results still under investigation before drawing conclusions.</p>
+                      )}
+                      {reportRecommendations.length > 0 && <div><strong className="text-sm text-white">Important recommendations</strong><ul className="list-disc pl-5 text-sm text-zinc-300">{reportRecommendations.map((recommendation) => <li key={recommendation}>{recommendation}</li>)}</ul></div>}
+                    </section>
 
                     {summaryData.summary_text && (
                       <div className="text-xs text-zinc-300 bg-zinc-950/60 border border-zinc-800 rounded-lg p-3 leading-relaxed">

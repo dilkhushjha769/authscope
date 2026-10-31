@@ -30,6 +30,7 @@ from backend.ai_agent import GeminiAgentConfig, GeminiAuthScopeAgent
 from backend.analysis.code_mapper import CodeMapper, MappingStatus
 from backend.analysis.remediation import RemediationEngine
 from backend.analysis.finding_review import FindingReviewService, ReviewProvider
+from backend.analysis.explanation_engine import ExplanationEngine
 from backend.config import settings
 from backend.core.assessment_engine import (
     AssessmentEngine,
@@ -345,10 +346,17 @@ def _serialize_detailed_finding(
     recommended_fix = redact_sensitive_text(
         str(tech_details.get("recommended_fix") or (kb_item.remediation_guidance if kb_item else "Enforce strict server-side session and ownership validation before returning resource data."))
     )
-    proposed_code_fix = redact_sensitive_text(
-        finding.remediation_guidance
-        or finding.remediation_recommendation
-        or (kb_item.code_pattern_secure if kb_item else "// Enforce server-side authorization check\nif (resource.ownerId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });")
+    code_context_verified = bool(
+        source_code_available
+        and tech_details.get("language")
+        and tech_details.get("framework")
+        and tech_details.get("root_cause")
+        and tech_details.get("verified_secure_code_example")
+    )
+    proposed_code_fix = (
+        redact_sensitive_text(str(tech_details["verified_secure_code_example"]))
+        if code_context_verified
+        else ""
     )
     verification_procedure = redact_sensitive_text(
         str(tech_details.get("verification_procedure") or (kb_item.retesting_procedure if kb_item else f"Re-issue {finding.http_method} {endpoint_rel} using an unauthorized role and verify the server returns HTTP 401 or HTTP 403."))
@@ -365,7 +373,43 @@ def _serialize_detailed_finding(
     evi_sha = finding.evidence.evidence_sha256 if finding.evidence else ""
     redacted_fields = list(finding.evidence.redacted_fields) if finding.evidence else []
 
+    beginner_explanation = ExplanationEngine().generate_beginner_explanation(finding).model_dump(mode="json")
+    ai_review = tech_details.get("ai_review")
+    ai_beginner = ai_review.get("beginner_explanation") if isinstance(ai_review, dict) else None
+    if (
+        val_status == "CONFIRMED"
+        and isinstance(ai_review, dict)
+        and ai_review.get("verdict") == "LIKELY_REAL"
+        and isinstance(ai_beginner, dict)
+    ):
+        for field_name in (
+            "simple_title",
+            "what_is_the_problem",
+            "what_attacker_can_do",
+            "real_world_impact",
+            "why_it_matters",
+            "how_to_fix",
+            "how_to_verify_fix",
+            "additional_recommendations",
+            "evidence_summary",
+        ):
+            candidate = ai_beginner.get(field_name)
+            if isinstance(candidate, str) and candidate.strip():
+                beginner_explanation[field_name] = candidate
+            elif isinstance(candidate, list) and candidate and all(isinstance(item, str) for item in candidate):
+                beginner_explanation[field_name] = candidate
+        ai_unproven = ai_beginner.get("what_is_not_yet_proven", [])
+        if not isinstance(ai_unproven, list):
+            ai_unproven = []
+        beginner_explanation["what_is_not_yet_proven"] = list(dict.fromkeys(
+            beginner_explanation["what_is_not_yet_proven"]
+            + [item for item in ai_unproven if isinstance(item, str)]
+        ))
+        # Code remains omitted unless a future mapper verifies framework and root cause together.
+        beginner_explanation["secure_code_example"] = None
+
     base.update({
+        "beginner_explanation": beginner_explanation,
         # A. Bug identity
         "vulnerability_name": redact_sensitive_text(finding.title),
         "vulnerability_category": raw_cat,
@@ -427,13 +471,21 @@ def _serialize_detailed_finding(
         "root_cause": root_cause,
         "recommended_fix": recommended_fix,
         "proposed_code_fix": proposed_code_fix,
-        "proposed_fix_label": "Proposed Fix — Not automatically applied to the website",
+        "proposed_fix_label": (
+            "Verified-context example — not automatically applied"
+            if proposed_code_fix
+            else "No code example supplied; Not automatically applied; language and root cause need verification"
+        ),
         "verification_procedure": verification_procedure,
         "resolution_details": {
             "root_cause": root_cause,
             "recommended_fix": recommended_fix,
             "proposed_code_fix": proposed_code_fix,
-            "proposed_fix_label": "Proposed Fix — Not automatically applied to the website",
+            "proposed_fix_label": (
+                "Verified-context example — not automatically applied"
+                if proposed_code_fix
+                else "No code example supplied; Not automatically applied; language and root cause need verification"
+            ),
             "verification_procedure": verification_procedure,
         },
         # F. Evidence summary
