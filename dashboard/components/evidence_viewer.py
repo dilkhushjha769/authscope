@@ -1,83 +1,78 @@
-"""Dashboard Component: Endpoint Explorer & Cryptographic Evidence Viewer."""
+"""AuthScope Dashboard — Cryptographic Evidence & Route Inspection Component."""
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 import streamlit as st
 
-from backend.storage.models import DiscoveredEndpointRecord, FindingRecord
-
-
-VERDICT_COLORS = {
-    "CONFIRMED_UNAUTHORIZED_ACCESS": ("#EF4444", "#450A0A"),
-    "SUSPICIOUS_ACCESS": ("#F59E0B", "#451A03"),
-    "CORRECTLY_DENIED": ("#22C55E", "#052E16"),
-    "ALLOWED_ACCESS": ("#3B82F6", "#172554"),
-    "INCONCLUSIVE": ("#94A3B8", "#1E293B"),
-}
+from backend.storage.models import EndpointModel, FindingRecord
 
 
 def render_endpoint_explorer(
-    endpoints: List[DiscoveredEndpointRecord],
-    findings: Optional[List[FindingRecord]] = None,
+    endpoints: List[EndpointModel],
+    findings: List[FindingRecord],
 ) -> None:
-    """Renders the Endpoint Explorer showing discovered routes, methods, test status, and associated findings."""
+    """Renders tabular attack surface endpoint discovery with associated findings."""
     st.markdown(
-        f"""
-        <div style="margin-bottom:10px;">
-            <span style="color:#F9FAFB; font-weight:600; font-size:1.05rem;">Endpoint Explorer</span>
-            <span style="color:#94A3B8; font-size:0.83rem; margin-left:10px;">{len(endpoints)} discovered application routes</span>
+        """
+        <div style="margin-top:10px; margin-bottom:10px;">
+            <span style="color:#F9FAFB; font-weight:600; font-size:1.05rem;">Attack Surface Route Discovery</span>
+            <span style="color:#94A3B8; font-size:0.83rem; margin-left:10px;">Safe, non-destructive route enumeration</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     if not endpoints:
-        st.markdown(
-            """
-            <div style="background-color:#111827; border:1px solid #1E293B; border-radius:8px; padding:16px; color:#94A3B8; font-size:0.9rem;">
-                No discovered endpoints recorded yet. Start an assessment to map target routes.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        st.info("No endpoints enumerated for this assessment session.")
         return
 
-    findings_by_id = {f.id: f for f in (findings or [])}
+    findings_by_id: Dict[str, FindingRecord] = {f.id: f for f in findings}
 
-    for ep in endpoints:
-        verdict_str = ep.verdict or "NOT_EVALUATED"
-        v_fg, v_bg = VERDICT_COLORS.get(verdict_str, ("#94A3B8", "#1E293B"))
+    col_srch, col_filt = st.columns([2, 1])
+    with col_srch:
+        search_query = st.text_input("Filter endpoints by path or pattern", placeholder="/rest/...")
+    with col_filt:
+        filter_findings_only = st.checkbox("Show only endpoints with findings", value=False)
+
+    displayed_endpoints = [
+        ep
+        for ep in endpoints
+        if (not search_query or search_query.lower() in ep.path.lower())
+        and (not filter_findings_only or len(ep.associated_finding_ids) > 0)
+    ]
+
+    st.caption(f"Displaying {len(displayed_endpoints)} of {len(endpoints)} enumerated attack surface paths.")
+
+    for ep in displayed_endpoints:
         assoc_count = len(ep.associated_finding_ids)
+        badge_color = "#EF4444" if assoc_count > 0 else "#64748B"
+        badge_text = f"{assoc_count} Finding(s)" if assoc_count > 0 else "Clean Baseline"
 
-        st.markdown(
-            f"""
-            <div style="background-color:#111827; border:1px solid #1E293B; border-radius:8px; padding:12px 16px; margin-bottom:6px;">
-                <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-                    <div style="display:flex; align-items:center; gap:10px;">
-                        <span style="background-color:#172554; color:#3B82F6; font-family:monospace; font-size:0.76rem; font-weight:700; padding:2px 8px; border-radius:4px;">{ep.method}</span>
-                        <span style="color:#F9FAFB; font-family:monospace; font-weight:600; font-size:0.94rem;">{ep.path}</span>
-                        <span style="background-color:#1E293B; color:#94A3B8; font-size:0.72rem; padding:2px 8px; border-radius:4px; font-family:monospace;">{ep.category}</span>
+        with st.container():
+            st.markdown(
+                f"""
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 12px; margin-bottom:6px; background-color:#1E293B; border-radius:4px; border-left:3px solid {badge_color};">
+                    <div>
+                        <code style="color:#38BDF8; font-weight:700;">{ep.method}</code>
+                        <span style="font-family:monospace; color:#F8FAFC; margin-left:8px;">{ep.path}</span>
                     </div>
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="background-color:#1E293B; color:#E5E7EB; font-size:0.72rem; padding:2px 8px; border-radius:4px; font-family:monospace;">Status: {ep.test_status}</span>
-                        <span style="background-color:{v_bg}; color:{v_fg}; border:1px solid {v_fg}55; font-size:0.72rem; font-weight:600; padding:2px 8px; border-radius:4px; font-family:monospace;">{verdict_str}</span>
-                        <span style="color:#94A3B8; font-size:0.78rem; font-family:monospace;">Findings: {assoc_count}</span>
+                    <div>
+                        <span style="background-color:#0F172A; color:{badge_color}; border:1px solid {badge_color}; font-weight:600; font-size:0.75rem; padding:2px 6px; border-radius:3px;">
+                            {badge_text}
+                        </span>
                     </div>
                 </div>
-                <div style="color:#94A3B8; font-size:0.84rem; margin-top:6px;">
-                    {ep.summary or ep.description}
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                """,
+                unsafe_allow_html=True,
+            )
 
-        if ep.associated_finding_ids:
+        if assoc_count > 0:
             with st.expander(f"Associated Findings for {ep.method} {ep.path} ({assoc_count})"):
                 for fid in ep.associated_finding_ids:
                     f_rec = findings_by_id.get(fid)
                     if f_rec:
+                        sev_val = getattr(f_rec.severity, "value", f_rec.severity)
                         st.markdown(
-                            f"- **`{f_rec.id}`** — **{f_rec.title}** (`{f_rec.severity.value}` | `{f_rec.validation_status}` | `{f_rec.access_verdict}`)"
+                            f"- **`{f_rec.id}`** — **{f_rec.title}** (`{sev_val}` | `{f_rec.validation_status}` | `{f_rec.access_verdict}`)"
                         )
                     else:
                         st.markdown(f"- Finding ID: `{fid}`")
@@ -106,9 +101,12 @@ def render_evidence_viewer(findings: List[FindingRecord]) -> None:
             continue
         with st.expander(f"Artifact {evi.finding_id} — {f.http_method} {f.target_endpoint} (SHA-256: {evi.evidence_sha256[:16]}...)", expanded=True):
             st.markdown(f"**Full SHA-256 Digest:** `{evi.evidence_sha256}`")
+            val_status_str = getattr(evi.validation_status, "value", evi.validation_status)
+            test_role_str = getattr(evi.test_role, "value", evi.test_role)
+            auth_role_str = getattr(evi.authorized_role, "value", evi.authorized_role)
             st.markdown(
-                f"**Validation Status:** `{evi.validation_status.value}` | "
-                f"**Test Role:** `{evi.test_role.value}` | **Authorized Role:** `{evi.authorized_role.value}`"
+                f"**Validation Status:** `{val_status_str}` | "
+                f"**Test Role:** `{test_role_str}` | **Authorized Role:** `{auth_role_str}`"
             )
             st.code(
                 f"{evi.request_method} {evi.request_url}\n"

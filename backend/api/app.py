@@ -373,3 +373,16 @@ def list_assessments(limit: int = Query(default=10, ge=1, le=50)) -> List[Dict[s
     sessions = repo.list_scan_sessions(limit=limit)
     return [s.model_dump(mode="json") for s in sessions]
 
+
+
+@app.get("/", include_in_schema=False)
+def root() -> Dict[str, Any]:
+    """Root landing endpoint directing to documentation and health status."""
+    return {
+        "service": "AuthScope AI Security Agent API",
+        "status": "healthy",
+        "documentation": "/docs",
+        "redoc": "/redoc",
+        "health": "/api/health",
+        "assessments": "/api/assessments",
+    }
