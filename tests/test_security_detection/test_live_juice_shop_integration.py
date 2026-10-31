@@ -20,6 +20,7 @@ from backend.scanner.authorization_tester import AuthorizationTester
 from backend.scanner.endpoint_discovery import EndpointDiscovery
 from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict, ResponseAnalyzer
+from backend.scanner.security_inspector import SecurityInspector, FindingValidationStatus
 
 
 def _is_juice_shop_running() -> bool:
@@ -101,3 +102,58 @@ def test_live_juice_shop_unowned_resource_returns_inconclusive():
 
     assert result.overall_verdict == AccessVerdict.INCONCLUSIVE
     assert result.is_confirmed is False
+
+
+@pytest.mark.integration
+@skip_if_no_juice_shop
+def test_live_juice_shop_security_headers_inspection():
+    """Inspects real HTTP security headers returned by live OWASP Juice Shop."""
+    guard = ScopeGuard()
+    mgr = SessionManager(load_from_env=False)
+    executor = RequestExecutor(scope_guard=guard, session_manager=mgr)
+    inspector = SecurityInspector(executor=executor, scope_guard=guard)
+
+    result = inspector.inspect_security_headers(endpoint="/")
+
+    assert result.status in [FindingValidationStatus.CONFIRMED.value, FindingValidationStatus.NOT_CONFIRMED.value, "SECURE", "COMPLETED"]
+    assert "inspected_items" in result.model_dump()
+    # OWASP Juice Shop omits Permissions-Policy or other security headers
+    assert len(result.findings) >= 1
+    for f in result.findings:
+        assert f.what_is_wrong != ""
+        assert f.attacker_impact != ""
+        assert f.remediation_guidance != ""
+
+
+@pytest.mark.integration
+@skip_if_no_juice_shop
+def test_live_juice_shop_cors_inspection():
+    """Inspects real CORS headers returned by live OWASP Juice Shop."""
+    guard = ScopeGuard()
+    mgr = SessionManager(load_from_env=False)
+    executor = RequestExecutor(scope_guard=guard, session_manager=mgr)
+    inspector = SecurityInspector(executor=executor, scope_guard=guard)
+
+    result = inspector.inspect_cors_configuration(
+        endpoint="/rest/admin/application-version",
+        probe_origin="https://untrusted-origin.example",
+    )
+
+    assert result.status in [FindingValidationStatus.CONFIRMED.value, FindingValidationStatus.NOT_CONFIRMED.value, "SECURE", "COMPLETED"]
+    assert result.target_url.startswith("http://localhost:3000")
+
+
+@pytest.mark.integration
+@skip_if_no_juice_shop
+def test_live_juice_shop_comprehensive_scan():
+    """Runs a real comprehensive Sprint 2 misconfiguration scan against OWASP Juice Shop."""
+    guard = ScopeGuard()
+    mgr = SessionManager(load_from_env=False)
+    executor = RequestExecutor(scope_guard=guard, session_manager=mgr)
+    inspector = SecurityInspector(executor=executor, scope_guard=guard)
+
+    data = inspector.run_comprehensive_inspection(endpoint="/")
+
+    assert "categories" in data
+    assert "total_findings" in data
+    assert data["assessment_id"] != ""

@@ -46,8 +46,6 @@ class EvidenceValidator:
         "REJECTED_FALSE_POSITIVE",
         "UNVALIDATED",
     }
-    """Validates, sanitizes, and signs non-destructive proof artifacts."""
-
     SENSITIVE_HEADER_KEYS = {
         "authorization": "Bearer [REDACTED_BEARER_TOKEN]",
         "proxy-authorization": "Bearer [REDACTED_BEARER_TOKEN]",
@@ -218,7 +216,7 @@ class EvidenceValidator:
         """Redacts the cookie value while preserving the cookie name and all security attributes.
 
         Example:
-            'connect.sid=s%3Asecret123; Path=/; HttpOnly; SameSite=Lax'
+            'connect.sid=s%3Asample_sess_val_99; Path=/; HttpOnly; SameSite=Lax'
             -> 'connect.sid=[REDACTED_COOKIE_VALUE]; Path=/; HttpOnly; SameSite=Lax'
         """
         if not raw_set_cookie or not raw_set_cookie.strip():

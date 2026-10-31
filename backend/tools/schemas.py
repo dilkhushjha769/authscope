@@ -449,3 +449,113 @@ class GetAssessmentSummaryOutput(BaseModel):
     severity_breakdown: Dict[str, int]
     category_breakdown: Dict[str, int]
     endpoints_tested: int
+
+
+# --- 5. Sprint 2: Auth, Session, Headers, CORS & Transport Schemas ---
+
+
+class CheckAuthWeaknessesInput(BaseModel):
+    """Input for checking authentication weaknesses on an endpoint."""
+    endpoint: str = Field(default="/", description="Endpoint path or URL to inspect")
+    assessment_id: str = Field(default="default_assessment", description="Assessment identifier")
+
+
+class CheckAuthWeaknessesOutput(BaseModel):
+    """Output for authentication weakness inspection."""
+    category: str
+    target_url: str
+    endpoint: str
+    status: str
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    inspected_items: Dict[str, Any] = Field(default_factory=dict)
+    suppressed_duplicates_count: int = 0
+    summary: str
+
+
+class CheckSessionSecurityInput(BaseModel):
+    """Input for checking session and cookie security."""
+    endpoint: str = Field(default="/", description="Endpoint path or URL to inspect for cookies and session tokens")
+    assessment_id: str = Field(default="default_assessment", description="Assessment identifier")
+
+
+class CheckSessionSecurityOutput(BaseModel):
+    """Output for session security inspection."""
+    category: str
+    target_url: str
+    endpoint: str
+    status: str
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    inspected_items: Dict[str, Any] = Field(default_factory=dict)
+    suppressed_duplicates_count: int = 0
+    summary: str
+
+
+class CheckSecurityHeadersInput(BaseModel):
+    """Input for checking HTTP security headers."""
+    endpoint: str = Field(default="/", description="Endpoint path or URL to inspect for security headers")
+    assessment_id: str = Field(default="default_assessment", description="Assessment identifier")
+
+
+class CheckSecurityHeadersOutput(BaseModel):
+    """Output for security headers inspection."""
+    category: str
+    target_url: str
+    endpoint: str
+    status: str
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    inspected_items: Dict[str, Any] = Field(default_factory=dict)
+    suppressed_duplicates_count: int = 0
+    summary: str
+
+
+class CheckCorsInput(BaseModel):
+    """Input for checking CORS configuration."""
+    endpoint: str = Field(default="/", description="Endpoint path or URL to inspect for CORS headers")
+    probe_origin: str = Field(default="https://untrusted-origin.example", description="Benign test Origin header value")
+    assessment_id: str = Field(default="default_assessment", description="Assessment identifier")
+
+
+class CheckCorsOutput(BaseModel):
+    """Output for CORS configuration inspection."""
+    category: str
+    target_url: str
+    endpoint: str
+    status: str
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    inspected_items: Dict[str, Any] = Field(default_factory=dict)
+    suppressed_duplicates_count: int = 0
+    summary: str
+
+
+class CheckTransportSecurityInput(BaseModel):
+    """Input for checking HTTPS and transport security."""
+    target_url: Optional[str] = Field(default=None, description="Target URL or endpoint path")
+    assessment_id: str = Field(default="default_assessment", description="Assessment identifier")
+
+
+class CheckTransportSecurityOutput(BaseModel):
+    """Output for HTTPS and transport security inspection."""
+    category: str
+    target_url: str
+    endpoint: str
+    status: str
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    inspected_items: Dict[str, Any] = Field(default_factory=dict)
+    suppressed_duplicates_count: int = 0
+    summary: str
+
+
+class RunMisconfigurationScanInput(BaseModel):
+    """Input for running comprehensive Sprint 2 security checks on an endpoint."""
+    endpoint: str = Field(default="/", description="Endpoint path or URL")
+    assessment_id: str = Field(default="default_assessment", description="Assessment identifier")
+
+
+class RunMisconfigurationScanOutput(BaseModel):
+    """Output of comprehensive Sprint 2 security inspection."""
+    assessment_id: str
+    endpoint: str
+    total_findings: int
+    suppressed_duplicates_count: int
+    categories: Dict[str, Any]
+    findings: List[Dict[str, Any]]

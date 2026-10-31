@@ -27,6 +27,7 @@ from backend.scanner.endpoint_discovery import (
 from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict, ResponseAnalyzer
 from backend.scanner.authorization_tester import AuthorizationTester
+from backend.scanner.security_inspector import SecurityInspector
 from backend.analysis.evidence_validator import (
     BEARER_REGEX,
     EvidenceArtifact,
@@ -132,6 +133,24 @@ class AssessmentEngine:
         self.evidence_validator = EvidenceValidator()
         self.severity_engine = SeverityEngine()
         self.remediation_engine = RemediationEngine()
+
+    def run_extended_security_checks(
+        self,
+        target_url: str,
+        assessment_id: Optional[str] = None,
+        cancel_token: Optional[CancellationToken] = None,
+    ) -> Dict[str, Any]:
+        """Runs Sprint 2 extended security checks (Auth, Session, Headers, CORS, Transport)."""
+        inspector = SecurityInspector(
+            executor=self.executor,
+            scope_guard=self.scope_guard,
+            session_manager=self.session_manager,
+            cancel_token=cancel_token,
+        )
+        return inspector.run_comprehensive_inspection(
+            endpoint=target_url,
+            assessment_id=assessment_id or f"extended_sec_{uuid.uuid4().hex[:8]}",
+        )
 
     def validate_target_url(self, target_url: str) -> ScopeCheckResult:
         """Pre-validates a user-supplied target URL via ScopeGuard without opening sockets."""

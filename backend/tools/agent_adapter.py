@@ -34,6 +34,18 @@ CANONICAL_ALIASES: Dict[str, str] = {
     "test_bola": "detect_idor",
     "test_bfla": "test_bfla",
     "verify_evidence": "validate_evidence",
+    "test_authentication": "check_authentication_weaknesses",
+    "inspect_authentication": "check_authentication_weaknesses",
+    "test_session_security": "check_session_security",
+    "inspect_cookies": "check_session_security",
+    "test_security_headers": "check_security_headers",
+    "inspect_headers": "check_security_headers",
+    "test_cors": "check_cors_misconfiguration",
+    "check_cors": "check_cors_misconfiguration",
+    "test_transport_security": "check_transport_security",
+    "test_https": "check_transport_security",
+    "check_transport": "check_transport_security",
+    "scan_misconfigurations": "run_security_misconfiguration_scan",
 }
 
 
@@ -69,7 +81,8 @@ class ToolRegistryAdapter:
         self,
         tool_name: str,
         arguments: Dict[str, Any],
-        context: Optional[Union[Dict[str, Any], ToolExecutionContext]] = None
+        context: Optional[Union[Dict[str, Any], ToolExecutionContext]] = None,
+        assessment_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Asynchronously dispatches an approved tool call via ToolRegistry.
 
@@ -88,6 +101,12 @@ class ToolRegistryAdapter:
                 "errors": list
             }
         """
+        if context is None and assessment_id:
+            context = {"assessment_id": assessment_id}
+
+        if context is None and assessment_id:
+            context = {"assessment_id": assessment_id}
+
         # Resolve aliases
         effective_name = CANONICAL_ALIASES.get(tool_name, tool_name)
 

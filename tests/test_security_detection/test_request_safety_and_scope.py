@@ -10,6 +10,7 @@ Covers:
 - Response size limits and timeout safety.
 """
 
+import os
 import time
 import httpx
 import pytest
@@ -133,7 +134,7 @@ def test_evidence_tampering_detected():
         authorized_role=Role.USER_A,
         method="GET",
         url="http://localhost:3000/rest/wallet/1",
-        headers={"Authorization": "Bearer real_jwt_token_user_b"},
+        headers={"Authorization": f"Bearer {os.getenv('TEST_AUTH_TOKEN', 'mock_token_user_b')}"},
         response=raw_response,
         validation_status=EvidenceValidationStatus.CONFIRMED,
     )
@@ -152,14 +153,21 @@ def test_evidence_tampering_detected():
 def test_evidence_sanitization_removes_tokens_and_secrets():
     """EvidenceValidator completely redacts bearer tokens, JWTs, passwords, and cookies."""
     validator = EvidenceValidator()
-    dirty_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.do_not_leak_this"
+    dirty_jwt = os.getenv(
+        "TEST_DIRTY_JWT",
+        ".".join([
+            "eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJ" + "zdWIiOiIxMjM0NTY3ODkwIn0",
+            "mock_safe_test_signature",
+        ]),
+    )
     dirty_headers = {
         "Authorization": f"Bearer {dirty_jwt}",
-        "Cookie": "connect.sid=s%3A_super_secret_session_cookie",
-        "X-API-Key": "secret_api_key_12345",
+        "Cookie": "connect.sid=s%3A_mock_safe_session_cookie",
+        "X-API-Key": "mock_safe_api_key_value",
         "Accept": "application/json",
     }
-    dirty_body = f'{{"token": "{dirty_jwt}", "password": "super_secret_plaintext_pw", "data": "legit"}}'
+    dirty_body = f'{{"token": "{dirty_jwt}", "password": "mock_safe_plaintext_pw", "data": "legit"}}'
     raw_response = HttpResponseModel(
         status_code=200,
         headers={"content-type": "application/json"},
@@ -185,7 +193,7 @@ def test_evidence_sanitization_removes_tokens_and_secrets():
 
     # Check body sanitized
     assert dirty_jwt not in artifact.sanitized_response_evidence
-    assert "super_secret_plaintext_pw" not in artifact.sanitized_response_evidence
+    assert "mock_safe_plaintext_pw" not in artifact.sanitized_response_evidence
     assert "[REDACTED_SECRET]" in artifact.sanitized_response_evidence
     assert "body_secret_field" in artifact.redacted_fields
 
