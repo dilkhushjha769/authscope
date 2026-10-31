@@ -1,0 +1,78 @@
+{
+  "analysis": {
+    "title": "Broken Object Level Authorization (IDOR) on Shopping Basket",
+    "vulnerability_explanation": "The endpoint /rest/basket/{id} returns customer cart details based solely on the URL path ID parameter. Requesting basket ID 1 using User B credentials successfully returned User A's private product inventory without proper ownership verification.",
+    "technical_root_cause": "The application fails to verify whether req.user.id matches the owner (basket.UserId) before returning the shopping basket record from the database.",
+    "affected_resources": [
+      {
+        "resource_id": "basket_1",
+        "resource_type": "API_ENDPOINT",
+        "endpoint": "/rest/basket/1",
+        "application_name": "OWASP Juice Shop",
+        "parameters": [
+          "id"
+        ],
+        "owner_identity": "user_a",
+        "unauthorized_accessors": [
+          "user_b",
+          "anonymous"
+        ]
+      }
+    ],
+    "potential_impact": "Unauthorized customer PII disclosure, order history leakage, and horizontal privilege escalation across tenant accounts.",
+    "supporting_evidence": [
+      {
+        "evidence_id": "evi_8a4f91c2",
+        "evidence_type": "differential_response",
+        "description": "User B was able to view User A's private shopping basket without authorization.",
+        "source_component": "AuthorizationTester",
+        "affected_endpoint": "/rest/basket/1",
+        "http_method": "GET",
+        "observed_behavior": "HTTP 200 OK returned with User A's cart data containing Apple Juice product item.",
+        "expected_behavior": "HTTP 403 Forbidden with Access Denied error.",
+        "validation_status": "validated",
+        "supporting_evidence_refs": [
+          "sha256_8a4f91c2b53e7f22384a86b3a097d8e6a1476b7e193e4d9c7f12e5a6438901b2"
+        ],
+        "timestamp": "2026-10-31T15:30:00Z"
+      }
+    ],
+    "confidence_level": "CONFIRMED",
+    "confirmation_status": "confirmed",
+    "limitations_and_missing_info": []
+  },
+  "severity_assessment": {
+    "severity": "HIGH",
+    "exploitability": "HIGH",
+    "data_sensitivity": "PII",
+    "privilege_gained": "HORIZONTAL_USER",
+    "potential_impact": "Complete unauthorized disclosure of arbitrary user shopping carts and personal item selections.",
+    "severity_rationale": "CVSS:3.1 base score 6.5 (High) due to network accessibility, low attack complexity, low privileges required, and significant confidentiality impact.",
+    "confidence": "CONFIRMED",
+    "contributing_factors": [
+      "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+      "Direct customer PII exposure",
+      "No user interaction required"
+    ]
+  },
+  "remediation_recommendation": {
+    "recommended_fix": "Enforce object-level access control verifying session identity matches resource ownership prior to database retrieval.",
+    "technical_implementation_guidance": "const basket = await BasketModel.findByPk(req.params.id);\nif (!basket) return res.status(404).json({ error: 'Basket not found' });\nif (basket.UserId !== req.user.id && req.user.role !== 'admin') {\n    return res.status(403).json({ error: 'Access Denied: You do not own this basket' });\n}",
+    "server_side_controls": [
+      "OwnershipVerificationMiddleware",
+      "RoleBasedAccessControl"
+    ],
+    "why_fix_works": "Explicitly checks authenticated session identity against resource owner identity at the controller layer before releasing entity data.",
+    "retesting_procedure": "Authenticate as User B and send HTTP GET /rest/basket/1. Verify status code is 403 Forbidden with an access denied payload.",
+    "regression_testing_recommendations": [
+      "Implement integration tests asserting that non-owner tokens receive 403 for /rest/basket/:id.",
+      "Add automated differential role scans to CI pipeline."
+    ]
+  },
+  "evidence_references": [
+    "evi_8a4f91c2"
+  ],
+  "overall_status": "completed",
+  "warnings_or_limitations": []
+}
+
