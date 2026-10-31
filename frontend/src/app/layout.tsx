@@ -1,9 +1,14 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "AuthScope | AI Security Testing Agent",
   description: "Authorized, hard-scoped AI-powered penetration testing agent for web applications and APIs.",
+  applicationName: "AuthScope",
+};
+
+export const viewport: Viewport = {
+  themeColor: "#262624",
 };
 
 export default function RootLayout({
