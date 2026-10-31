@@ -189,3 +189,4 @@ class ReportTools:
             category_breakdown=category_breakdown,
             endpoints_tested=len(endpoints)
         )
+
