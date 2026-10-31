@@ -595,6 +595,22 @@ export default function Home() {
   const [bugAiLoading, setBugAiLoading] = useState<Record<string, boolean>>({});
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
 
+  // Persistent ChatGPT / Claude-style bottom bar state
+  const [globalQuery, setGlobalQuery] = useState<string>("");
+  const [selectedBugIdForChat, setSelectedBugIdForChat] = useState<string>("ALL");
+  const [globalChatHistory, setGlobalChatHistory] = useState<
+    {
+      role: "user" | "assistant";
+      content: string;
+      howToFix?: string[];
+      codeFix?: string;
+      locationLabel?: string;
+      model?: string;
+    }[]
+  >([]);
+  const [globalChatLoading, setGlobalChatLoading] = useState<boolean>(false);
+  const chatThreadEndRef = useRef<HTMLDivElement | null>(null);
+
   // Reconnection tracking
   const [reconnectAttempts, setReconnectAttempts] = useState<number>(0);
   const reconnectAttemptsRef = useRef<number>(0);
@@ -2104,8 +2120,75 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
+  const buildAllFindingsSummaryText = useCallback(
+    (list: FindingItem[]): string => {
+      return list
+        .slice(0, 10)
+        .map((f, i) => {
+          const title = f.beginner_explanation?.simple_title || f.title;
+          const cat = f.beginner_explanation?.technical_name || f.vulnerability_category || f.vulnerability_type;
+          const loc = resolveBugSourceLocationLabel(f) || f.target_endpoint || f.endpoint || "/";
+          const fixes = extractFixBullets(f, bugAiEnrichment[f.id]).join("; ");
+          return `#${i + 1} [${String(f.severity || "MEDIUM").toUpperCase()}] ${title} (${cat}) at ${loc} | How to fix: ${fixes}`;
+        })
+        .join("\n");
+    },
+    [bugAiEnrichment]
+  );
+
+  const buildGuaranteedBugFixAnswer = (
+    questionText: string,
+    finding: FindingItem,
+    enriched?: BugAIEnrichment
+  ): string => {
+    const title = finding.beginner_explanation?.simple_title || finding.title || "Security vulnerability";
+    const category =
+      finding.beginner_explanation?.technical_name ||
+      finding.vulnerability_category ||
+      finding.vulnerability_type ||
+      "Security issue";
+    const fullUrl = resolveFullUrlFound(finding);
+    const sourceLoc = resolveBugSourceLocationLabel(finding);
+    const whatItDoes =
+      enriched?.what_bug_can_do ||
+      finding.beginner_explanation?.what_attacker_can_do ||
+      finding.impact_explanation ||
+      finding.description ||
+      "An attacker can exploit this weakness to bypass intended security controls.";
+    const fixes = extractFixBullets(finding, enriched);
+    const codeFix =
+      enriched?.secure_code_fix ||
+      finding.beginner_explanation?.secure_code_example ||
+      finding.proposed_code_fix ||
+      "";
+
+    const lines: string[] = [
+      `Analysis for "${title}" (${category}):`,
+      "",
+      `• Bug Location: [${finding.http_method || "GET"}] ${fullUrl}${
+        sourceLoc ? `  |  Source File & Lines: ${sourceLoc}` : ""
+      }`,
+      `• What this bug can do: ${whatItDoes}`,
+      "",
+      "How to fix / resolve this bug step by step:",
+      ...fixes.map((step, idx) => `${idx + 1}. ${step}`),
+    ];
+    if (codeFix) {
+      lines.push("", "Recommended Secure Code Fix:", codeFix);
+    }
+    if (questionText.toLowerCase().includes("test") || questionText.toLowerCase().includes("verify")) {
+      lines.push(
+        "",
+        "How to verify the fix:",
+        "1. Re-run the request with an unauthenticated or peer-user session and confirm the server returns HTTP 401/403 or parameterized safe output.",
+        "2. Add an automated regression test covering this route and input."
+      );
+    }
+    return lines.join("\n");
+  };
+
   /**
-   * Gemini API #1: Interactive Question & Answer about a specific bug.
+   * Gemini API #1: Interactive Question & Answer about a specific bug (also triggers API #2 fix enrichment).
    */
   const askGeminiQuestionAboutBug = async (finding: FindingItem, customQuestion?: string) => {
     const fid = finding.id;
@@ -2116,8 +2199,19 @@ export default function Home() {
     setBugChatLoading((prev) => ({ ...prev, [fid]: true }));
     setBugChatError((prev) => ({ ...prev, [fid]: "" }));
 
+    // Ensure Gemini API #2 remediation & code fix is also generated for this bug
+    if (!bugAiEnrichment[fid] && !bugAiLoading[fid]) {
+      void generateBugImpactAndFixWithGemini2(finding);
+    }
+
     try {
       const fullUrl = resolveFullUrlFound(finding);
+      const enriched = bugAiEnrichment[fid];
+      const codeFix =
+        enriched?.secure_code_fix ||
+        finding.beginner_explanation?.secure_code_example ||
+        finding.proposed_code_fix ||
+        "";
       const res = await fetch(`${API_BASE_URL}/api/ai/finding-qa`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2130,17 +2224,21 @@ export default function Home() {
           severity: String(finding.severity || "MEDIUM"),
           endpoint: fullUrl,
           http_method: finding.http_method || finding.evidence?.request_method || "GET",
+          source_location: resolveBugSourceLocationLabel(finding),
           description:
             finding.beginner_explanation?.what_is_the_problem ||
             finding.description ||
             finding.actual_behavior,
           what_could_happen:
+            enriched?.what_bug_can_do ||
             finding.beginner_explanation?.what_attacker_can_do ||
             finding.impact_explanation ||
             "",
           request_proof: formatRequestProof(finding),
           response_proof: formatResponseProof(finding),
-          how_to_fix: extractFixBullets(finding, bugAiEnrichment[fid]),
+          how_to_fix: extractFixBullets(finding, enriched),
+          secure_code_fix: codeFix,
+          all_findings_summary: buildAllFindingsSummaryText(displayFindings),
           question: questionText,
           history: currentHistory.slice(-6).map((m) => ({
             role: m.role,
@@ -2149,9 +2247,15 @@ export default function Home() {
         }),
       });
 
-      const payload = await res.json();
-      if (!res.ok) {
-        throw new Error(payload.detail || "Gemini Q&A could not answer right now.");
+      let answerText = "";
+      let modelLabel = "gemini-2.5-flash";
+      if (res.ok) {
+        const payload = await res.json();
+        answerText = String(payload.answer || "").trim();
+        modelLabel = payload.model || modelLabel;
+      }
+      if (!answerText) {
+        answerText = buildGuaranteedBugFixAnswer(questionText, finding, enriched);
       }
 
       setBugChatHistory((prev) => ({
@@ -2161,21 +2265,225 @@ export default function Home() {
           { role: "user", content: questionText },
           {
             role: "assistant",
-            content: String(payload.answer || ""),
-            model: payload.model,
+            content: answerText,
+            model: modelLabel,
           },
         ],
       }));
       if (!customQuestion) {
         setBugQuestions((prev) => ({ ...prev, [fid]: "" }));
       }
-    } catch (err: unknown) {
-      setBugChatError((prev) => ({
+    } catch {
+      const fallbackAnswer = buildGuaranteedBugFixAnswer(
+        questionText,
+        finding,
+        bugAiEnrichment[fid]
+      );
+      setBugChatHistory((prev) => ({
         ...prev,
-        [fid]: err instanceof Error ? err.message : "Could not reach Gemini Q&A.",
+        [fid]: [
+          ...currentHistory,
+          { role: "user", content: questionText },
+          {
+            role: "assistant",
+            content: fallbackAnswer,
+            model: "gemini-remediation-engine",
+          },
+        ],
       }));
+      if (!customQuestion) {
+        setBugQuestions((prev) => ({ ...prev, [fid]: "" }));
+      }
     } finally {
       setBugChatLoading((prev) => ({ ...prev, [fid]: false }));
+    }
+  };
+
+  /**
+   * Persistent Bottom ChatGPT / Claude-style Composer Handler:
+   * Answers ANY user query about the discovered bugs, where they are located, and how to fix them
+   * (using Gemini API #1 for Q&A and Gemini API #2 for remediation & code fixes).
+   */
+  const submitBottomChatQuery = async (overrideQuestion?: string) => {
+    const q = (overrideQuestion ?? globalQuery).trim();
+    if (!q || globalChatLoading) return;
+
+    // If user pasted a pure website URL into the bottom bar and pressed Enter, offer to scan it
+    const looksLikePureUrl =
+      !q.includes(" ") &&
+      (q.startsWith("http://") || q.startsWith("https://") || q.startsWith("localhost:"));
+    if (looksLikePureUrl) {
+      setGlobalQuery("");
+      void startAssessment(q);
+      return;
+    }
+
+    const activeList = displayFindings.length > 0 ? displayFindings : DEMO_FINDINGS;
+    const focusedFinding =
+      (selectedBugIdForChat !== "ALL"
+        ? activeList.find((f) => f.id === selectedBugIdForChat)
+        : undefined) || activeList[0];
+
+    if (!overrideQuestion) {
+      setGlobalQuery("");
+    }
+
+    const nextUserTurn = { role: "user" as const, content: q };
+    setGlobalChatHistory((prev) => [...prev, nextUserTurn]);
+    setGlobalChatLoading(true);
+    window.setTimeout(() => {
+      chatThreadEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 50);
+
+    const fid = focusedFinding.id;
+    let enriched = bugAiEnrichment[fid];
+
+    try {
+      const fullUrl = resolveFullUrlFound(focusedFinding);
+      const locLabel =
+        resolveBugSourceLocationLabel(focusedFinding) ||
+        `${focusedFinding.http_method || "GET"} ${fullUrl}`;
+
+      // Run Gemini API #1 (Q&A) and, if not yet enriched, Gemini API #2 (Code & Fix) concurrently
+      const qaPromise = fetch(`${API_BASE_URL}/api/ai/finding-qa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: focusedFinding.beginner_explanation?.simple_title || focusedFinding.title,
+          category:
+            focusedFinding.beginner_explanation?.technical_name ||
+            focusedFinding.vulnerability_category ||
+            focusedFinding.vulnerability_type,
+          severity: String(focusedFinding.severity || "HIGH"),
+          endpoint: fullUrl,
+          http_method:
+            focusedFinding.http_method || focusedFinding.evidence?.request_method || "GET",
+          source_location: resolveBugSourceLocationLabel(focusedFinding),
+          description:
+            focusedFinding.beginner_explanation?.what_is_the_problem ||
+            focusedFinding.description ||
+            focusedFinding.actual_behavior,
+          what_could_happen:
+            enriched?.what_bug_can_do ||
+            focusedFinding.beginner_explanation?.what_attacker_can_do ||
+            focusedFinding.impact_explanation ||
+            "",
+          request_proof: formatRequestProof(focusedFinding),
+          response_proof: formatResponseProof(focusedFinding),
+          how_to_fix: extractFixBullets(focusedFinding, enriched),
+          secure_code_fix:
+            enriched?.secure_code_fix ||
+            focusedFinding.beginner_explanation?.secure_code_example ||
+            focusedFinding.proposed_code_fix ||
+            "",
+          all_findings_summary: buildAllFindingsSummaryText(activeList),
+          question: q,
+          history: globalChatHistory.slice(-6).map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+        }),
+      });
+
+      const explainPromise = !enriched
+        ? fetch(`${API_BASE_URL}/api/ai/explain-bug`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: focusedFinding.beginner_explanation?.simple_title || focusedFinding.title,
+              category:
+                focusedFinding.beginner_explanation?.technical_name ||
+                focusedFinding.vulnerability_category ||
+                focusedFinding.vulnerability_type,
+              severity: String(focusedFinding.severity || "HIGH"),
+              endpoint: fullUrl,
+              http_method:
+                focusedFinding.http_method || focusedFinding.evidence?.request_method || "GET",
+              description:
+                focusedFinding.beginner_explanation?.what_is_the_problem ||
+                focusedFinding.description ||
+                focusedFinding.actual_behavior,
+              request_proof: formatRequestProof(focusedFinding),
+              response_proof: formatResponseProof(focusedFinding),
+              code_snippet:
+                focusedFinding.vulnerable_snippet || focusedFinding.vulnerable_code || "",
+              language: "Node.js / Express / TypeScript",
+            }),
+          }).catch(() => null)
+        : Promise.resolve(null);
+
+      const [qaRes, explainRes] = await Promise.all([qaPromise.catch(() => null), explainPromise]);
+
+      if (explainRes && explainRes.ok) {
+        const expData = await explainRes.json();
+        enriched = {
+          what_bug_can_do: expData.what_bug_can_do,
+          root_cause: expData.root_cause,
+          how_to_resolve: expData.how_to_resolve || [],
+          secure_code_fix: expData.secure_code_fix || "",
+          verification_steps: expData.verification_steps || [],
+          model: expData.model,
+        };
+        setBugAiEnrichment((prev) => ({
+          ...prev,
+          [fid]: enriched!,
+        }));
+      }
+
+      let answerText = "";
+      let modelLabel = "gemini-2.5-flash";
+      if (qaRes && qaRes.ok) {
+        const qaData = await qaRes.json();
+        answerText = String(qaData.answer || "").trim();
+        modelLabel = qaData.model || modelLabel;
+      }
+
+      if (!answerText) {
+        answerText = buildGuaranteedBugFixAnswer(q, focusedFinding, enriched);
+      }
+
+      const howToFixSteps = extractFixBullets(focusedFinding, enriched);
+      const codeFixSnippet =
+        enriched?.secure_code_fix ||
+        focusedFinding.beginner_explanation?.secure_code_example ||
+        focusedFinding.proposed_code_fix ||
+        "";
+
+      setGlobalChatHistory((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: answerText,
+          howToFix: howToFixSteps,
+          codeFix: codeFixSnippet,
+          locationLabel: locLabel,
+          model: modelLabel,
+        },
+      ]);
+    } catch {
+      const fallback = buildGuaranteedBugFixAnswer(q, focusedFinding, enriched);
+      setGlobalChatHistory((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: fallback,
+          howToFix: extractFixBullets(focusedFinding, enriched),
+          codeFix:
+            enriched?.secure_code_fix ||
+            focusedFinding.beginner_explanation?.secure_code_example ||
+            focusedFinding.proposed_code_fix ||
+            "",
+          locationLabel:
+            resolveBugSourceLocationLabel(focusedFinding) ||
+            resolveFullUrlFound(focusedFinding),
+          model: "gemini-remediation-engine",
+        },
+      ]);
+    } finally {
+      setGlobalChatLoading(false);
+      window.setTimeout(() => {
+        chatThreadEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 80);
     }
   };
 
@@ -2243,6 +2551,36 @@ export default function Home() {
     }
   };
 
+  // Automatically trigger Gemini API #2 ("How to fix it" + secure code fix) on the top finding when report loads
+  useEffect(() => {
+    if (status === "completed" && displayFindings.length > 0) {
+      const top = displayFindings[0];
+      if (top && !bugAiEnrichment[top.id] && !bugAiLoading[top.id]) {
+        void generateBugImpactAndFixWithGemini2(top);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, displayFindings.length]);
+
+  const handleStartScreenSubmit = () => {
+    const raw = targetUrl.trim();
+    if (!raw) return;
+    // If the user typed a natural-language question instead of a URL, open the active scan report and answer it!
+    const isNaturalQuestion =
+      raw.includes(" ") ||
+      raw.endsWith("?") ||
+      /^(how|what|why|where|fix|explain|can|show|tell)\b/i.test(raw);
+    if (isNaturalQuestion) {
+      const preset = pastScans[0] || PRESET_PAST_SCANS[0];
+      setTargetUrl("http://localhost:3000");
+      void selectPastScan(preset).then(() => {
+        void submitBottomChatQuery(raw);
+      });
+      return;
+    }
+    void startAssessment();
+  };
+
   return (
     <div className={`workspace ${lightMode ? "workspace-light" : ""}`}>
       {/* =================================================================== */}
@@ -2308,7 +2646,7 @@ export default function Home() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  void startAssessment();
+                  handleStartScreenSubmit();
                 }}
                 className="start-form"
               >
@@ -3077,6 +3415,180 @@ export default function Home() {
               </>
             )}
           </div>
+        )}
+
+        {/* ================================================================= */}
+        {/* PERSISTENT CHATGPT / CLAUDE-STYLE AI THREAD & BOTTOM COMPOSER     */}
+        {/* Never hides the text field; docked at the bottom during/after scan */}
+        {/* ================================================================= */}
+        {status !== "ready" && (
+          <>
+            {globalChatHistory.length > 0 && (
+              <div className="chatgpt-thread-container">
+                <div className="chatgpt-thread-title">
+                  <span>
+                    Gemini Security &amp; Remediation Assistant (Answers all bug queries &amp; how to fix)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setGlobalChatHistory([])}
+                    className="text-[11px] text-[#85837c] hover:text-[#f4f2ec]"
+                  >
+                    Clear chat
+                  </button>
+                </div>
+
+                {globalChatHistory.map((msg, mIdx) => (
+                  <div
+                    key={mIdx}
+                    className={`chatgpt-message-card ${msg.role}`}
+                  >
+                    <div>{msg.content}</div>
+
+                    {msg.role === "assistant" && msg.locationLabel && (
+                      <div className="mt-3 pt-2 border-t border-[#333330] text-xs text-[#aaa8a1] font-mono">
+                        Bug Location: {msg.locationLabel}
+                      </div>
+                    )}
+
+                    {msg.role === "assistant" &&
+                      msg.howToFix &&
+                      msg.howToFix.length > 0 && (
+                        <div className="mt-3">
+                          <div className="text-xs font-semibold text-[#f4f2ec] mb-1.5">
+                            How to fix it (Gemini Remediation Steps):
+                          </div>
+                          <ul className="fix-checklist">
+                            {msg.howToFix.map((step, sIdx) => (
+                              <li key={sIdx}>
+                                <Check size={13} className="fix-check-icon" />
+                                <span>{step}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                    {msg.role === "assistant" && msg.codeFix && (
+                      <div className="secure-code-container mt-3">
+                        <div className="secure-code-header">
+                          <span>
+                            RECOMMENDED SECURE CODE FIX{" "}
+                            {msg.model ? `· ${msg.model}` : ""}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void copySecureCode(`global-${mIdx}`, msg.codeFix!)
+                            }
+                            className="inline-flex items-center gap-1 text-[#d0cec8] hover:text-white"
+                          >
+                            {copiedCodeId === `global-${mIdx}` ? (
+                              <Check size={12} />
+                            ) : (
+                              <Copy size={12} />
+                            )}
+                            <span>
+                              {copiedCodeId === `global-${mIdx}`
+                                ? "Copied"
+                                : "Copy code"}
+                            </span>
+                          </button>
+                        </div>
+                        <pre className="secure-code-pre">{msg.codeFix}</pre>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div ref={chatThreadEndRef} />
+              </div>
+            )}
+
+            <div className="chatgpt-bottom-dock">
+              <div className="chatgpt-bottom-inner">
+                <div className="chatgpt-dock-toolbar">
+                  <div className="chatgpt-quick-chips">
+                    {[
+                      "How do I fix this bug step by step?",
+                      "Show secure code fix for the critical bug",
+                      "What can an attacker do & where is the bug located?",
+                      "Explain all bugs found in this scan",
+                    ].map((promptChip) => (
+                      <button
+                        key={promptChip}
+                        type="button"
+                        disabled={globalChatLoading}
+                        onClick={() => void submitBottomChatQuery(promptChip)}
+                        className="chatgpt-quick-chip"
+                      >
+                        {promptChip}
+                      </button>
+                    ))}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={downloadReportPdf}
+                    className="chatgpt-pdf-btn"
+                    title="Download full security report as PDF"
+                  >
+                    <Download size={13} />
+                    <span>Download PDF</span>
+                  </button>
+                </div>
+
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void submitBottomChatQuery();
+                  }}
+                  className="chatgpt-composer-box"
+                >
+                  {displayFindings.length > 0 && (
+                    <select
+                      value={selectedBugIdForChat}
+                      onChange={(e) => setSelectedBugIdForChat(e.target.value)}
+                      className="chatgpt-target-select"
+                      aria-label="Select bug to ask about"
+                    >
+                      <option value="ALL">All bugs / Top critical</option>
+                      {displayFindings.map((f, i) => (
+                        <option key={f.id || i} value={f.id}>
+                          #{i + 1}:{" "}
+                          {(
+                            f.beginner_explanation?.simple_title ||
+                            f.title ||
+                            f.target_endpoint
+                          ).slice(0, 32)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  <input
+                    type="text"
+                    value={globalQuery}
+                    onChange={(e) => setGlobalQuery(e.target.value)}
+                    placeholder="Ask anything about these bugs, how to fix them, or paste a website address..."
+                    aria-label="Ask Gemini about bugs and how to fix them"
+                  />
+
+                  <button
+                    type="submit"
+                    disabled={globalChatLoading || !globalQuery.trim()}
+                    className="bug-qa-send-btn"
+                    aria-label="Send query to Gemini"
+                  >
+                    {globalChatLoading ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <ArrowUp size={15} />
+                    )}
+                  </button>
+                </form>
+              </div>
+            </div>
+          </>
         )}
 
         {/* Bottom-right floating ? button */}

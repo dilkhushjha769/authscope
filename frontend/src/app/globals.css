@@ -1257,3 +1257,169 @@ nextjs-portal {
   color: var(--text);
   word-break: break-all;
 }
+
+/* ========================================================================== */
+/* PERSISTENT CHATGPT / CLAUDE-STYLE BOTTOM COMPOSER & AI THREAD              */
+/* ========================================================================== */
+
+.chatgpt-thread-container {
+  width: 100%;
+  max-width: 780px;
+  margin: 24px auto 12px;
+  padding: 0 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.chatgpt-thread-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-subtle);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--soft);
+}
+
+.chatgpt-message-card {
+  border-radius: 12px;
+  padding: 14px 16px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.chatgpt-message-card.user {
+  align-self: flex-end;
+  max-width: 85%;
+  background: var(--surface-active);
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+
+.chatgpt-message-card.assistant {
+  align-self: flex-start;
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--soft);
+}
+
+.chatgpt-bottom-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 25;
+  width: 100%;
+  padding: 12px 32px 18px;
+  background: linear-gradient(
+    to top,
+    var(--canvas) 78%,
+    color-mix(in srgb, var(--canvas) 82%, transparent) 92%,
+    transparent
+  );
+}
+
+.chatgpt-bottom-inner {
+  width: 100%;
+  max-width: 780px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chatgpt-dock-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chatgpt-quick-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.chatgpt-quick-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: all 0.14s ease;
+}
+
+.chatgpt-quick-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.chatgpt-composer-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
+  transition: border-color 0.15s ease;
+}
+
+.chatgpt-composer-box:focus-within {
+  border-color: var(--accent);
+}
+
+.chatgpt-target-select {
+  max-width: 190px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--soft);
+  font-size: 11.5px;
+  outline: none;
+}
+
+.chatgpt-composer-box input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+}
+
+.chatgpt-composer-box input::placeholder {
+  color: var(--faint);
+}
+
+.chatgpt-pdf-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 11px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.14s ease;
+}
+
+.chatgpt-pdf-btn:hover {
+  background: var(--accent);
+  color: #102218;
+}
