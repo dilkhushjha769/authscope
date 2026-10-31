@@ -18,6 +18,7 @@ import uuid
 from pydantic import BaseModel, Field
 
 from backend.config import settings
+from backend.agent.schemas import ConfidenceLevel, SeverityLevel
 from backend.core.scope_guard import ScopeGuard
 from backend.core.session_manager import Role, SessionManager
 from backend.scanner.endpoint_discovery import (
@@ -37,6 +38,8 @@ from backend.analysis.evidence_validator import (
     EvidenceValidationStatus,
     EvidenceValidator,
 )
+from backend.scanner.source_analyzer import FindingClassification, SourceFinding
+from backend.storage.models import FindingRecord, FindingStatus
 from backend.utils.helpers import (
     HumanApprovalRequiredError,
     InvalidTargetURLError,
@@ -70,6 +73,38 @@ class DifferentialResult(BaseModel):
     vulnerability_candidate: Optional[str] = None
     evidence_artifacts: List[EvidenceArtifact] = Field(default_factory=list)
     summary: str = ""
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class VerifiedPromotionResult(BaseModel):
+    """Result of runtime verification and potential promotion of a candidate finding.
+
+    Strictly satisfies:
+    - Affected endpoint and HTTP method.
+    - Relevant authentication roles.
+    - Request and response evidence with sensitive data redacted.
+    - Expected versus actual authorization behavior.
+    - Reproduction steps.
+    - Confidence and risk rating.
+    - Recommended fix.
+    """
+    finding_id: str
+    target_endpoint: str
+    http_method: str
+    previous_classification: str
+    new_classification: FindingClassification
+    is_promoted: bool
+    status: str
+    validation_status: str
+    summary: str
+    owner_role: Role = Role.USER_A
+    test_roles: List[Role] = Field(default_factory=list)
+    reproduction_steps: List[str] = Field(default_factory=list)
+    evidence: Optional[EvidenceArtifact] = None
+    finding_record: Optional[FindingRecord] = None
+    confidence: ConfidenceLevel = ConfidenceLevel.MEDIUM
+    severity: SeverityLevel = SeverityLevel.HIGH
+    recommended_fix: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -390,6 +425,274 @@ class AuthorizationTester:
             test_roles=test_roles,
             resource_id=resource_id,
             method=method,
+        )
+
+    def verify_potential_finding(
+        self,
+        candidate: Union[SourceFinding, FindingRecord, Dict[str, Any]],
+        owner_role: Role = Role.USER_A,
+        test_roles: Optional[List[Role]] = None,
+        resource_id: Optional[str] = None,
+    ) -> VerifiedPromotionResult:
+        """Verifies a potential vulnerability candidate through scoped runtime differential testing.
+
+        STRICT PROMOTION RULE:
+        Only AuthorizationTester can promote a POTENTIAL_VULNERABILITY to
+        CONFIRMED_RUNTIME_VULNERABILITY, and only when non-destructive differential HTTP testing
+        demonstrates reproducible unauthorized access with cryptographic evidence.
+
+        - If reproducible unauthorized access is confirmed -> CONFIRMED_RUNTIME_VULNERABILITY
+        - If server properly denies unauthorized access (401/403) -> NOT_REPRODUCIBLE
+        - If behavioral divergence without confirmed sensitive data access -> SUSPICIOUS_ACCESS
+        - If target cannot be safely tested or is out of scope -> INCONCLUSIVE
+        """
+        # 1. Extract endpoint, method, and candidate metadata
+        if hasattr(candidate, "target_endpoint") and candidate.target_endpoint:
+            endpoint = candidate.target_endpoint
+        elif hasattr(candidate, "endpoint") and candidate.endpoint:
+            endpoint = candidate.endpoint
+        elif hasattr(candidate, "route_path") and candidate.route_path:
+            endpoint = candidate.route_path
+        elif isinstance(candidate, dict):
+            endpoint = candidate.get("target_endpoint") or candidate.get("endpoint") or candidate.get("route_path") or ""
+        else:
+            endpoint = ""
+
+        if hasattr(candidate, "http_method") and candidate.http_method:
+            method = candidate.http_method
+        elif isinstance(candidate, dict):
+            method = candidate.get("http_method", "GET")
+        else:
+            method = "GET"
+
+        finding_id = (
+            getattr(candidate, "finding_id", None)
+            or getattr(candidate, "id", None)
+            or (candidate.get("finding_id") or candidate.get("id") if isinstance(candidate, dict) else None)
+            or f"fnd_{uuid.uuid4().hex[:8]}"
+        )
+
+        prev_class_raw = (
+            getattr(candidate, "classification", None)
+            or (candidate.get("classification") if isinstance(candidate, dict) else None)
+            or "POTENTIAL_VULNERABILITY"
+        )
+        prev_class = prev_class_raw.value if hasattr(prev_class_raw, "value") else str(prev_class_raw)
+
+        category = (
+            getattr(candidate, "vulnerability_category", None)
+            or getattr(candidate, "vulnerability_type", None)
+            or (candidate.get("vulnerability_category") or candidate.get("vulnerability_type") if isinstance(candidate, dict) else None)
+            or "BROKEN_ACCESS_CONTROL"
+        )
+
+        effective_roles = [r for r in (test_roles or [Role.USER_B, Role.ANONYMOUS]) if r != owner_role]
+
+        # 2. Reject pure source code locations without an exposed HTTP endpoint
+        if not endpoint or endpoint.startswith("source://"):
+            return VerifiedPromotionResult(
+                finding_id=finding_id,
+                target_endpoint=endpoint or "unknown",
+                http_method=method,
+                previous_classification=prev_class,
+                new_classification=FindingClassification.INCONCLUSIVE,
+                is_promoted=False,
+                status="suspected",
+                validation_status="SUSPICIOUS",
+                summary="Candidate has no resolvable HTTP route for runtime differential testing; pure source pattern remains unconfirmed.",
+                owner_role=owner_role,
+                test_roles=effective_roles,
+                confidence=ConfidenceLevel.LOW,
+                recommended_fix="Map source location to an exposed HTTP endpoint before running runtime differential testing.",
+            )
+
+        # 3. Scope validation (Hard scope enforcement via ScopeGuard)
+        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+            test_url = endpoint
+        else:
+            test_url = f"{self.discovery.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+
+        is_in_scope = False
+        try:
+            scope_res = self.scope_guard.validate_url(test_url)
+            is_in_scope = scope_res.is_allowed
+        except Exception:
+            is_in_scope = False
+
+        if not is_in_scope:
+            return VerifiedPromotionResult(
+                finding_id=finding_id,
+                target_endpoint=endpoint,
+                http_method=method,
+                previous_classification=prev_class,
+                new_classification=FindingClassification.INCONCLUSIVE,
+                is_promoted=False,
+                status="suspected",
+                validation_status="SUSPICIOUS",
+                summary=f"Target URL '{test_url}' is outside authorized testing scope ({settings.target_base_url}). Finding cannot be verified at runtime.",
+                owner_role=owner_role,
+                test_roles=effective_roles,
+                confidence=ConfidenceLevel.LOW,
+                recommended_fix="Verify endpoint authorization within authorized target boundary.",
+            )
+
+        # 4. Execute multi-role authorization-differential testing
+        diff_result = self.test_resource_access(
+            endpoint=endpoint,
+            owner_role=owner_role,
+            test_roles=effective_roles,
+            resource_id=resource_id,
+            method=method,
+        )
+
+        # Case A: Runtime unauthorized access confirmed
+        if diff_result.is_confirmed:
+            artifact = diff_result.evidence_artifacts[0] if diff_result.evidence_artifacts else None
+            owner_status = diff_result.role_responses[owner_role].status_code if owner_role in diff_result.role_responses else 200
+            unauth_statuses = [
+                f"{r.value}: HTTP {diff_result.role_responses[r].status_code}"
+                for r in effective_roles
+                if r in diff_result.role_responses
+            ]
+            repro_steps = [
+                f"1. Target Endpoint & Method: {method} {diff_result.resolved_url}",
+                f"2. Legitimate Baseline Check: Authenticate as owner role '{owner_role.value}' and send {method} request -> Received HTTP {owner_status} with legitimate resource payload.",
+                f"3. Unauthorized Probe Check: Authenticate as unauthorized role(s) ({', '.join(r.value for r in effective_roles)}) and replay identical {method} request -> Observed {', '.join(unauth_statuses)}.",
+                "4. Discrepancy & Security Violation: Unauthorized caller obtained sensitive resource data without server-side 401/403 authorization enforcement.",
+                f"5. Cryptographic Evidence: Artifact verified with SHA-256 digest: {artifact.evidence_sha256 if artifact else 'N/A'}.",
+            ]
+            recommended_fix = (
+                "Enforce strict server-side authorization checks verifying caller ownership or role permissions "
+                "before returning resource data. Never rely solely on client-side routing or unverified IDs."
+            )
+            summary_msg = (
+                f"Runtime differential testing confirmed Broken Access Control on {method} {diff_result.resolved_url}: "
+                f"unauthorized caller accessed resource owned by '{owner_role.value}'."
+            )
+
+            rec = FindingRecord(
+                id=finding_id,
+                scan_id="runtime_verification",
+                title=f"[Confirmed Runtime: {category}] Unauthorized access to {diff_result.resolved_url}",
+                endpoint=diff_result.endpoint,
+                target_endpoint=diff_result.resolved_url,
+                http_method=method,
+                vulnerability_category=str(category),
+                vulnerability_type=str(category),
+                confirmation_status=FindingStatus.CONFIRMED.value,
+                status=FindingStatus.CONFIRMED.value,
+                validation_status="CONFIRMED",
+                access_verdict=diff_result.overall_verdict.value,
+                classification=FindingClassification.CONFIRMED_RUNTIME_VULNERABILITY.value,
+                severity=SeverityLevel.HIGH,
+                confidence=ConfidenceLevel.CONFIRMED,
+                description=summary_msg,
+                impact_explanation="Unauthorized users can access or manipulate resources belonging to other tenants/users, leading to confidential data compromise.",
+                remediation_guidance=recommended_fix,
+                remediation_recommendation=recommended_fix,
+                technical_details={
+                    "reproduction_steps": repro_steps,
+                    "owner_role": owner_role.value,
+                    "test_roles": [r.value for r in effective_roles],
+                    "resolved_url": diff_result.resolved_url,
+                    "overall_verdict": diff_result.overall_verdict.value,
+                },
+                evidence=artifact,
+            )
+
+            return VerifiedPromotionResult(
+                finding_id=finding_id,
+                target_endpoint=diff_result.resolved_url,
+                http_method=method,
+                previous_classification=prev_class,
+                new_classification=FindingClassification.CONFIRMED_RUNTIME_VULNERABILITY,
+                is_promoted=True,
+                status=FindingStatus.CONFIRMED.value,
+                validation_status="CONFIRMED",
+                summary=summary_msg,
+                owner_role=owner_role,
+                test_roles=effective_roles,
+                reproduction_steps=repro_steps,
+                evidence=artifact,
+                finding_record=rec,
+                confidence=ConfidenceLevel.CONFIRMED,
+                severity=SeverityLevel.HIGH,
+                recommended_fix=recommended_fix,
+            )
+
+        # Case B: Server correctly denied unauthorized access
+        if diff_result.overall_verdict == AccessVerdict.CORRECTLY_DENIED:
+            repro_steps = [
+                f"1. Target Endpoint: {method} {diff_result.resolved_url}",
+                "2. Probe unauthorized role(s): Server responded with HTTP 401/403 (Access Correctly Denied).",
+                "3. Outcome: Authorization is properly enforced at runtime; potential finding is NOT_REPRODUCIBLE.",
+            ]
+            return VerifiedPromotionResult(
+                finding_id=finding_id,
+                target_endpoint=diff_result.resolved_url,
+                http_method=method,
+                previous_classification=prev_class,
+                new_classification=FindingClassification.NOT_REPRODUCIBLE,
+                is_promoted=False,
+                status=FindingStatus.FALSE_POSITIVE.value,
+                validation_status="REJECTED",
+                summary=f"Runtime differential testing rejected vulnerability on {method} {diff_result.resolved_url}: unauthorized caller received proper access denial.",
+                owner_role=owner_role,
+                test_roles=effective_roles,
+                reproduction_steps=repro_steps,
+                evidence=diff_result.evidence_artifacts[0] if diff_result.evidence_artifacts else None,
+                confidence=ConfidenceLevel.HIGH,
+                severity=SeverityLevel.LOW,
+                recommended_fix="No fix required; authorization controls are enforced as expected.",
+            )
+
+        # Case C: Behavioral divergence detected without explicit proof
+        if diff_result.overall_verdict == AccessVerdict.SUSPICIOUS_ACCESS:
+            repro_steps = [
+                f"1. Target Endpoint: {method} {diff_result.resolved_url}",
+                "2. Compare owner response with unauthorized response: Behavioral divergence detected without explicit owner match or sensitive data leakage.",
+                "3. Outcome: Access remains SUSPICIOUS_ACCESS pending manual review or specialized probes.",
+            ]
+            return VerifiedPromotionResult(
+                finding_id=finding_id,
+                target_endpoint=diff_result.resolved_url,
+                http_method=method,
+                previous_classification=prev_class,
+                new_classification=FindingClassification.SUSPICIOUS_ACCESS,
+                is_promoted=False,
+                status=FindingStatus.SUSPECTED.value,
+                validation_status="SUSPICIOUS",
+                summary=f"Runtime differential testing observed response divergence on {method} {diff_result.resolved_url}, but evidence does not confirm unauthorized access.",
+                owner_role=owner_role,
+                test_roles=effective_roles,
+                reproduction_steps=repro_steps,
+                evidence=diff_result.evidence_artifacts[0] if diff_result.evidence_artifacts else None,
+                confidence=ConfidenceLevel.MEDIUM,
+                severity=SeverityLevel.MEDIUM,
+                recommended_fix="Review response differences between authenticated roles to verify whether sensitive metadata is leaked.",
+            )
+
+        # Case D: Inconclusive
+        repro_steps = [
+            f"1. Target Endpoint: {method} {diff_result.resolved_url}",
+            "2. Outcome: Differential test did not yield conclusive authorization evidence.",
+        ]
+        return VerifiedPromotionResult(
+            finding_id=finding_id,
+            target_endpoint=diff_result.resolved_url,
+            http_method=method,
+            previous_classification=prev_class,
+            new_classification=FindingClassification.INCONCLUSIVE,
+            is_promoted=False,
+            status=FindingStatus.SUSPECTED.value,
+            validation_status="SUSPICIOUS",
+            summary=f"Runtime differential testing was inconclusive for {method} {diff_result.resolved_url}.",
+            owner_role=owner_role,
+            test_roles=effective_roles,
+            reproduction_steps=repro_steps,
+            confidence=ConfidenceLevel.LOW,
+            severity=SeverityLevel.LOW,
+            recommended_fix="Review target endpoint accessibility and parameter requirements.",
         )
 
 

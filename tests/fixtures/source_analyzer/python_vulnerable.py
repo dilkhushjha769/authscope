@@ -65,3 +65,4 @@ def unsafe_system_helpers(user_cmd: str, yaml_payload: str):
     subprocess.run(user_cmd, shell=True)
     data = yaml.load(yaml_payload)
     return eval("1 + 1"), data
+

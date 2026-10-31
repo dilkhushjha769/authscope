@@ -363,6 +363,7 @@ class FindingRecord(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Alias for created_timestamp")
     last_retested_timestamp: Optional[datetime] = None
     retest_status: Optional[str] = "untested"
+    classification: Optional[str] = Field(default=None, description="Finding classification")
     title: str = Field(default="", description="Human-readable title for dashboards and reports")
     technical_details: Dict[str, Any] = Field(default_factory=dict, description="Differential metrics and context")
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -431,6 +432,12 @@ class FindingRecord(BaseModel):
                 else "SUSPICIOUS_ACCESS"
             )
 
+        # Harmonize classification
+        if not data.get("classification") and "technical_details" in data and isinstance(data["technical_details"], dict):
+            data["classification"] = data["technical_details"].get("classification")
+        elif "classification" in data and data["classification"]:
+            cl = data["classification"]
+            data["classification"] = cl.value if hasattr(cl, "value") else str(cl)
         # Harmonize severity
         sev = data.get("severity")
         if sev is None:

@@ -49,3 +49,4 @@ router.get('/rest/basket/:id', requireAuth, async (req: Request, res: Response) 
     }
     res.json(basket);
 });
+

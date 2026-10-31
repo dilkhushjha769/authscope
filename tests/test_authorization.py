@@ -31,7 +31,10 @@ from backend.scanner.endpoint_discovery import (
 )
 from backend.scanner.request_executor import HttpResponseModel, RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict, ResponseAnalyzer
-from backend.scanner.authorization_tester import AuthorizationTester, compare_access
+from backend.scanner.authorization_tester import AuthorizationTester, VerifiedPromotionResult, compare_access
+from backend.scanner.source_analyzer import FindingClassification, SourceFinding
+from backend.agent.schemas import ConfidenceLevel, SeverityLevel
+from backend.storage.models import FindingStatus
 from backend.analysis.evidence_validator import EvidenceValidationStatus
 from backend.utils.helpers import (
     HumanApprovalRequiredError,
@@ -436,3 +439,199 @@ class TestAuthorizationDifferentialEngine:
                 test_roles=[Role.USER_B],
                 human_approved=False,
             )
+
+
+class TestRuntimeVerificationAndPromotion:
+    """Tests for Phase 5.1 Runtime Verification, Strict Finding Promotion, and Evidence Completeness."""
+
+    @pytest.fixture
+    def mock_idor_candidate(self) -> SourceFinding:
+        return SourceFinding(
+            finding_id="fnd_candidate_001",
+            rule_id="AS-PY-BAC-001",
+            vulnerability_category="BOLA_IDOR",
+            severity=SeverityLevel.HIGH,
+            confidence=ConfidenceLevel.MEDIUM,
+            classification=FindingClassification.POTENTIAL_VULNERABILITY,
+            file_path="routers/baskets.py",
+            route_path="/rest/basket/{id}",
+            http_method="GET",
+            start_line=15,
+            end_line=20,
+            code_snippet="def get_basket(id: int): return db.baskets.get(id)",
+            detection_explanation="Potential IDOR flaw detected on basket endpoint.",
+            detection_method="python_ast",
+        )
+
+    def test_verify_potential_finding_confirmed_promotion(
+        self,
+        scope_guard: ScopeGuard,
+        session_manager: SessionManager,
+        mock_idor_candidate: SourceFinding,
+    ):
+        """Verifies that reproducible unauthorized access promotes POTENTIAL to CONFIRMED_RUNTIME_VULNERABILITY."""
+        session_manager.set_token(Role.USER_A, "jwt_user_a", user_id="1")
+        session_manager.set_token(Role.USER_B, "jwt_user_b", user_id="2")
+        session_manager.register_resource_ownership(Role.USER_A, "basket", "1")
+
+        basket_payload = {
+            "status": "success",
+            "data": {
+                "id": 1,
+                "UserId": 1,
+                "Products": [{"id": 10, "name": "Apple Juice", "price": 1.99}]
+            }
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            auth = request.headers.get("Authorization", "")
+            if "jwt_user_a" in auth or "jwt_user_b" in auth:
+                return httpx.Response(status_code=200, json=basket_payload)
+            return httpx.Response(status_code=401, json={"error": "Unauthorized"})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+        executor = RequestExecutor(scope_guard=scope_guard, session_manager=session_manager, client=client)
+        tester = AuthorizationTester(executor=executor, session_manager=session_manager, scope_guard=scope_guard)
+
+        result = tester.verify_potential_finding(
+            candidate=mock_idor_candidate,
+            owner_role=Role.USER_A,
+            test_roles=[Role.USER_B, Role.ANONYMOUS],
+            resource_id="1",
+        )
+
+        # 1. Promotion Assertions
+        assert result.is_promoted is True
+        assert result.new_classification == FindingClassification.CONFIRMED_RUNTIME_VULNERABILITY
+        assert result.status == FindingStatus.CONFIRMED.value
+        assert result.validation_status == "CONFIRMED"
+        assert result.confidence == ConfidenceLevel.CONFIRMED
+        assert result.severity == SeverityLevel.HIGH
+
+        # 2. Reproduction Steps Verification
+        assert len(result.reproduction_steps) >= 4
+        assert any("Target Endpoint & Method: GET" in s for s in result.reproduction_steps)
+        assert any("Legitimate Baseline Check" in s for s in result.reproduction_steps)
+        assert any("Unauthorized Probe Check" in s for s in result.reproduction_steps)
+        assert any("Cryptographic Evidence" in s for s in result.reproduction_steps)
+
+        # 3. Evidence Artifact Verification
+        assert result.evidence is not None
+        assert len(result.evidence.evidence_sha256) == 64
+        assert result.evidence.validation_status == EvidenceValidationStatus.CONFIRMED
+
+        # 4. FindingRecord Generation Verification
+        assert result.finding_record is not None
+        assert result.finding_record.classification == FindingClassification.CONFIRMED_RUNTIME_VULNERABILITY.value
+        assert result.finding_record.status == FindingStatus.CONFIRMED.value
+        assert result.finding_record.validation_status == "CONFIRMED"
+        assert result.finding_record.severity == SeverityLevel.HIGH
+        assert len(result.recommended_fix) > 10
+
+    def test_verify_potential_finding_not_reproducible_when_denied(
+        self,
+        scope_guard: ScopeGuard,
+        session_manager: SessionManager,
+        mock_idor_candidate: SourceFinding,
+    ):
+        """Verifies that server access denial classifies the finding as NOT_REPRODUCIBLE."""
+        session_manager.set_token(Role.USER_A, "jwt_user_a", user_id="1")
+        session_manager.set_token(Role.USER_B, "jwt_user_b", user_id="2")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            auth = request.headers.get("Authorization", "")
+            if "jwt_user_a" in auth:
+                return httpx.Response(status_code=200, json={"id": 1, "UserId": 1})
+            return httpx.Response(status_code=403, json={"error": "Access Denied"})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+        executor = RequestExecutor(scope_guard=scope_guard, session_manager=session_manager, client=client)
+        tester = AuthorizationTester(executor=executor, session_manager=session_manager, scope_guard=scope_guard)
+
+        result = tester.verify_potential_finding(
+            candidate=mock_idor_candidate,
+            owner_role=Role.USER_A,
+            test_roles=[Role.USER_B, Role.ANONYMOUS],
+            resource_id="1",
+        )
+
+        assert result.is_promoted is False
+        assert result.new_classification == FindingClassification.NOT_REPRODUCIBLE
+        assert result.status == FindingStatus.FALSE_POSITIVE.value
+        assert result.validation_status == "REJECTED"
+
+    def test_verify_potential_finding_suspicious_access_when_divergent(
+        self,
+        scope_guard: ScopeGuard,
+        session_manager: SessionManager,
+        mock_idor_candidate: SourceFinding,
+    ):
+        """Verifies that behavioral divergence without confirmed sensitive leakage is classified as SUSPICIOUS_ACCESS."""
+        session_manager.set_token(Role.USER_A, "jwt_user_a", user_id="1")
+        session_manager.set_token(Role.USER_B, "jwt_user_b", user_id="2")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            auth = request.headers.get("Authorization", "")
+            if "jwt_user_a" in auth:
+                return httpx.Response(status_code=200, json={"status": "ok", "user": "alice", "items": [1, 2]})
+            if "jwt_user_b" in auth:
+                # Returns 200 with divergent non-matching data
+                return httpx.Response(status_code=200, json={"status": "ok", "user": "bob", "items": []})
+            return httpx.Response(status_code=401, json={"error": "unauthorized"})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+        executor = RequestExecutor(scope_guard=scope_guard, session_manager=session_manager, client=client)
+        tester = AuthorizationTester(executor=executor, session_manager=session_manager, scope_guard=scope_guard)
+
+        result = tester.verify_potential_finding(
+            candidate=mock_idor_candidate,
+            owner_role=Role.USER_A,
+            test_roles=[Role.USER_B, Role.ANONYMOUS],
+            resource_id="1",
+        )
+
+        assert result.is_promoted is False
+        assert result.new_classification == FindingClassification.SUSPICIOUS_ACCESS
+        assert result.status == FindingStatus.SUSPECTED.value
+        assert result.validation_status == "SUSPICIOUS"
+
+    def test_verify_potential_finding_inconclusive_when_out_of_scope_or_source_only(
+        self,
+        scope_guard: ScopeGuard,
+        session_manager: SessionManager,
+    ):
+        """Verifies that out-of-scope targets and pure source patterns produce INCONCLUSIVE classifications."""
+        tester = AuthorizationTester(scope_guard=scope_guard, session_manager=session_manager)
+
+        # 1. Pure source code location without HTTP route
+        source_only_candidate = SourceFinding(
+            finding_id="src_only_001",
+            rule_id="AS-PY-BAC-001",
+            vulnerability_category="BROKEN_ACCESS_CONTROL",
+            severity=SeverityLevel.HIGH,
+            confidence=ConfidenceLevel.MEDIUM,
+            classification=FindingClassification.POTENTIAL_VULNERABILITY,
+            file_path="auth/decorators.py",
+            route_path=None,
+            start_line=5,
+            end_line=10,
+            code_snippet="def custom_helper(): pass",
+            detection_explanation="Source code pattern",
+            detection_method="python_ast",
+        )
+        res_source = tester.verify_potential_finding(source_only_candidate)
+        assert res_source.is_promoted is False
+        assert res_source.new_classification == FindingClassification.INCONCLUSIVE
+        assert "no resolvable HTTP route" in res_source.summary
+
+        # 2. Out of scope URL target
+        out_of_scope_candidate = {
+            "finding_id": "out_of_scope_001",
+            "endpoint": "http://169.254.169.254/latest/meta-data",
+            "http_method": "GET",
+            "classification": "POTENTIAL_VULNERABILITY",
+        }
+        res_scope = tester.verify_potential_finding(out_of_scope_candidate)
+        assert res_scope.is_promoted is False
+        assert res_scope.new_classification == FindingClassification.INCONCLUSIVE
+        assert "outside authorized testing scope" in res_scope.summary

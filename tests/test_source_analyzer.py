@@ -25,7 +25,10 @@ from pydantic import ValidationError
 from backend.agent.schemas import ConfidenceLevel, SeverityLevel
 from backend.scanner.source_analyzer import (
     DetectionMethod,
+    FindingClassification,
     InvalidSourcePathError,
+    ProjectDependencyAnalyzer,
+    ProjectDependencyGraph,
     RepositoryLimitExceededError,
     SourceAnalysisReport,
     SourceAnalyzer,
@@ -455,4 +458,165 @@ class TestFindingStructureAndGuardrails:
         assert fnd.detection_method == DetectionMethod.BANDIT.value
         assert fnd.is_runtime_confirmed is False
         assert fnd.classification == StaticFindingClassification.POTENTIAL_VULNERABILITY
+
+
+CROSS_FILE_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "cross_file_project"
+
+
+class TestCrossFileStaticAnalysis:
+    """Tests for Phase 5.1 Cross-File Static Analysis, Dependency Graphs, and Classification Guardrails."""
+
+    def test_module_discovery_and_import_relationship_graph(self):
+        """Verifies modules, imports, and symbols are accurately discovered across files."""
+        analyzer = SourceAnalyzer()
+        discovery = analyzer.discover_files(CROSS_FILE_FIXTURE_DIR)
+        py_files = [f for f in discovery.discovered_files if f.language == SupportedLanguage.PYTHON]
+
+        dep_analyzer = ProjectDependencyAnalyzer(root_path=CROSS_FILE_FIXTURE_DIR)
+        graph = dep_analyzer.analyze_project(py_files)
+
+        # 1. Module registration
+        assert "auth.decorators" in graph.modules
+        assert "auth.dependencies" in graph.modules
+        assert "auth.helpers" in graph.modules
+        assert "auth.middleware" in graph.modules
+        assert "routers.protected_routes" in graph.modules
+        assert "routers.unprotected_routes" in graph.modules
+        assert "routers.uncertain_routes" in graph.modules
+        assert "main" in graph.modules
+
+        # 2. Symbols recorded
+        auth_dec_symbols = [s.name for s in graph.symbols["auth.decorators"]]
+        assert "require_admin" in auth_dec_symbols
+        assert any(s.name == "require_admin" and s.is_auth_related for s in graph.symbols["auth.decorators"])
+
+        auth_dep_symbols = [s.name for s in graph.symbols["auth.dependencies"]]
+        assert "get_current_admin" in auth_dep_symbols
+        assert any(s.name == "get_current_admin" and s.is_auth_related for s in graph.symbols["auth.dependencies"])
+
+        # 3. Import relationships
+        protected_imports = [i for i in graph.imports if i.source_module == "routers.protected_routes"]
+        imported_targets = {i.imported_name: i.target_module for i in protected_imports}
+        assert imported_targets.get("require_admin") == "auth.decorators"
+        assert imported_targets.get("get_current_admin") == "auth.dependencies"
+        assert imported_targets.get("verify_admin_access") == "auth.helpers"
+
+    def test_fastapi_cross_file_route_protection_avoids_false_positives(self, analyzer: SourceAnalyzer):
+        """Verifies protected routes using cross-file decorators, dependencies, and helpers are not flagged."""
+        report = analyzer.analyze_repository(CROSS_FILE_FIXTURE_DIR)
+        assert report.dependency_graph is not None
+
+        # Collect rule IDs and files
+        bac_findings = [f for f in report.findings if f.rule_id == "AS-PY-BAC-001"]
+        # None of the protected routes should be flagged as AS-PY-BAC-001
+        protected_bac = [f for f in bac_findings if Path(f.file_path).name == "protected_routes.py"]
+        assert len(protected_bac) == 0, (
+            f"Protected routes in external modules must not be flagged as BFLA: {[f.route_path for f in protected_bac]}"
+        )
+
+        # Verify route security contexts in graph
+        routes_by_path = {r.route_path: r for r in report.dependency_graph.routes}
+        assert "/admin/protected/export-database" in routes_by_path
+        assert routes_by_path["/admin/protected/export-database"].is_protected is True
+        assert "auth.decorators:require_admin" in routes_by_path["/admin/protected/export-database"].resolved_auth_sources
+
+        assert "/admin/protected/system-settings" in routes_by_path
+        assert routes_by_path["/admin/protected/system-settings"].is_protected is True
+        assert "auth.dependencies:get_current_admin" in routes_by_path["/admin/protected/system-settings"].resolved_auth_sources
+
+        assert "/admin/protected/purge-users" in routes_by_path
+        assert routes_by_path["/admin/protected/purge-users"].is_protected is True
+        assert "auth.helpers:verify_admin_access" in routes_by_path["/admin/protected/purge-users"].resolved_auth_sources
+
+    def test_unprotected_route_correctly_flagged_as_potential_vulnerability(self, analyzer: SourceAnalyzer):
+        """Verifies truly unprotected privileged route is detected and classified as POTENTIAL_VULNERABILITY."""
+        report = analyzer.analyze_repository(CROSS_FILE_FIXTURE_DIR)
+
+        unprotected_findings = [
+            f for f in report.findings
+            if "unprotected_routes.py" in f.file_path and f.rule_id == "AS-PY-BAC-001"
+        ]
+        assert len(unprotected_findings) == 1
+        finding = unprotected_findings[0]
+        assert finding.vulnerability_category == SourceVulnerabilityCategory.BROKEN_ACCESS_CONTROL.value
+        assert finding.severity == SeverityLevel.HIGH
+        assert finding.confidence == ConfidenceLevel.MEDIUM
+        assert finding.classification == FindingClassification.POTENTIAL_VULNERABILITY
+        assert finding.is_runtime_confirmed is False
+
+    def test_explicit_uncertainty_reporting_on_external_dependencies(self, analyzer: SourceAnalyzer):
+        """Verifies routes with unresolved third-party security decorators report INCONCLUSIVE uncertainty."""
+        report = analyzer.analyze_repository(CROSS_FILE_FIXTURE_DIR)
+
+        # Must record analysis uncertainty in report
+        assert any("third_party_security_provider" in u for u in report.analysis_uncertainties)
+
+        uncertain_findings = [
+            f for f in report.findings
+            if "uncertain_routes.py" in f.file_path and f.rule_id == "AS-PY-BAC-UNCERTAIN"
+        ]
+        assert len(uncertain_findings) == 1
+        uf = uncertain_findings[0]
+        assert uf.classification == FindingClassification.INCONCLUSIVE
+        assert uf.confidence == ConfidenceLevel.LOW
+        assert uf.metadata.get("analysis_uncertainty") is True
+        assert "third_party_security_provider" in uf.detection_explanation
+
+    def test_strict_finding_classification_guardrails(self):
+        """Proves SourceFinding strictly rejects CONFIRMED_RUNTIME_VULNERABILITY and is_runtime_confirmed=True."""
+        # 1. Reject CONFIRMED_RUNTIME_VULNERABILITY classification
+        with pytest.raises(ValueError, match="Static Analysis Guardrail Violation"):
+            SourceFinding(
+                finding_id="fnd_guardrail_test",
+                rule_id="AS-PY-BAC-001",
+                vulnerability_category="BROKEN_ACCESS_CONTROL",
+                severity=SeverityLevel.HIGH,
+                confidence=ConfidenceLevel.HIGH,
+                source_type=SourceType.SOURCE_CODE.value,
+                classification=FindingClassification.CONFIRMED_RUNTIME_VULNERABILITY,
+                file_path="router.py",
+                start_line=1,
+                end_line=2,
+                code_snippet="def reset(): pass",
+                detection_explanation="Test pattern for guardrail",
+                detection_method="python_ast",
+            )
+
+        # 2. Reject is_runtime_confirmed=True on static source finding
+        with pytest.raises(ValueError, match="Static Analysis Guardrail Violation"):
+            SourceFinding(
+                finding_id="fnd_guardrail_test_2",
+                rule_id="AS-PY-BAC-001",
+                vulnerability_category="BROKEN_ACCESS_CONTROL",
+                severity=SeverityLevel.HIGH,
+                confidence=ConfidenceLevel.HIGH,
+                source_type=SourceType.SOURCE_CODE.value,
+                classification=FindingClassification.POTENTIAL_VULNERABILITY,
+                is_runtime_confirmed=True,
+                file_path="router.py",
+                start_line=1,
+                end_line=2,
+                code_snippet="def reset(): pass",
+                detection_explanation="Test pattern for guardrail",
+                detection_method="python_ast",
+            )
+
+        # 3. Verify to_finding_record preserves classification
+        valid_finding = SourceFinding(
+            finding_id="fnd_valid_test",
+            rule_id="AS-PY-BAC-001",
+            vulnerability_category="BROKEN_ACCESS_CONTROL",
+            severity=SeverityLevel.HIGH,
+            confidence=ConfidenceLevel.HIGH,
+            classification=FindingClassification.POTENTIAL_VULNERABILITY,
+            file_path="router.py",
+            start_line=1,
+            end_line=2,
+            code_snippet="def reset(): pass",
+            detection_explanation="Valid potential finding",
+            detection_method="python_ast",
+        )
+        rec = valid_finding.to_finding_record()
+        assert rec.classification == FindingClassification.POTENTIAL_VULNERABILITY.value
+        assert rec.status == FindingStatus.SUSPECTED.value
 

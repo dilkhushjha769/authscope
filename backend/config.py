@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     anthropic_max_tokens: int = Field(default=2048, alias="ANTHROPIC_MAX_TOKENS")
     anthropic_timeout: float = Field(default=30.0, alias="ANTHROPIC_TIMEOUT")
 
+    # AI Configuration (Google Gemini Brain & Agent Loop)
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    gemini_max_tokens: int = Field(default=2048, alias="GEMINI_MAX_TOKENS")
+    gemini_timeout: float = Field(default=30.0, alias="GEMINI_TIMEOUT")
+    agent_max_iterations: int = Field(default=8, alias="AGENT_MAX_ITERATIONS")
+    agent_max_tool_calls: int = Field(default=15, alias="AGENT_MAX_TOOL_CALLS")
+    agent_temperature: float = Field(default=0.2, alias="AGENT_TEMPERATURE")
+
     # Storage Configuration
     database_path: str = Field(default="data/authscope.db", alias="DATABASE_PATH")
 

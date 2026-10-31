@@ -103,14 +103,29 @@ class SourceVulnerabilityCategory(str, Enum):
     SECURITY_MISCONFIGURATION = "SECURITY_MISCONFIGURATION"
 
 
-class StaticFindingClassification(str, Enum):
-    """Explicit distinction between static code patterns and runtime exploitability.
+class FindingClassification(str, Enum):
+    """Strict classification distinguishing static patterns from runtime verified findings.
+
+    - DETECTED_CODE_PATTERN: Syntactic or lexical code pattern matching a known vulnerable idiom.
+    - POTENTIAL_VULNERABILITY: Static analysis suggests exploitability, but runtime proof is unconfirmed.
+    - CONFIRMED_RUNTIME_VULNERABILITY: Differential HTTP testing obtained reproducible unauthorized access proof.
+    - NOT_REPRODUCIBLE: Runtime verification failed to reproduce access; server enforced denial (401/403).
+    - INCONCLUSIVE: Target could not be verified due to network errors, missing routes, or external dependencies.
+    - SUSPICIOUS_ACCESS: Behavioral discrepancy detected between roles, but evidence does not confirm unauthorized data leakage.
 
     Static analysis alone MUST NEVER produce CONFIRMED_RUNTIME_VULNERABILITY.
+    Only AuthorizationTester can promote a finding to CONFIRMED_RUNTIME_VULNERABILITY.
     """
     DETECTED_CODE_PATTERN = "DETECTED_CODE_PATTERN"
     POTENTIAL_VULNERABILITY = "POTENTIAL_VULNERABILITY"
     CONFIRMED_RUNTIME_VULNERABILITY = "CONFIRMED_RUNTIME_VULNERABILITY"
+    NOT_REPRODUCIBLE = "NOT_REPRODUCIBLE"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    SUSPICIOUS_ACCESS = "SUSPICIOUS_ACCESS"
+
+
+# Backward compatibility alias
+StaticFindingClassification = FindingClassification
 
 
 class StaticValidationStatus(str, Enum):
@@ -119,6 +134,9 @@ class StaticValidationStatus(str, Enum):
     POTENTIAL_UNVERIFIED = "POTENTIAL_VULNERABILITY"
     UNVALIDATED_STATIC = "UNVALIDATED"
     CONFIRMED_RUNTIME = "CONFIRMED_RUNTIME_VULNERABILITY"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    NOT_REPRODUCIBLE = "NOT_REPRODUCIBLE"
+    SUSPICIOUS_ACCESS = "SUSPICIOUS_ACCESS"
 
 
 class DetectionMethod(str, Enum):
@@ -263,6 +281,90 @@ class SourceDiscoveryResult(BaseModel):
     repository_limit_reason: Optional[str] = Field(default=None)
 
 
+# ==============================================================================
+# Cross-File Static Analysis Data Models
+# ==============================================================================
+
+
+class SymbolKind(str, Enum):
+    """Kinds of program symbols tracked in the dependency graph."""
+    FUNCTION = "FUNCTION"
+    DECORATOR = "DECORATOR"
+    DEPENDENCY = "DEPENDENCY"
+    MIDDLEWARE = "MIDDLEWARE"
+    ROUTER = "ROUTER"
+    APP = "APP"
+    CLASS = "CLASS"
+    VARIABLE = "VARIABLE"
+
+
+class ModuleSymbol(BaseModel):
+    """Symbol defined within a Python module."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., description="Name of the symbol")
+    kind: SymbolKind = Field(..., description="Category of symbol")
+    file_path: str = Field(..., description="Path to file where defined")
+    module_name: str = Field(..., description="Dotted module name")
+    line_no: int = Field(default=1, ge=1)
+    is_auth_related: bool = Field(default=False)
+    auth_mechanisms: List[str] = Field(default_factory=list)
+    docstring: Optional[str] = None
+    parameters: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ModuleImport(BaseModel):
+    """Import relationship between modules."""
+    model_config = ConfigDict(extra="forbid")
+
+    source_module: str = Field(..., description="Module containing the import statement")
+    target_module: str = Field(..., description="Module being imported from")
+    imported_name: str = Field(..., description="Symbol name being imported")
+    alias: Optional[str] = Field(default=None, description="Local alias if renamed via 'as'")
+    line_no: int = Field(default=1, ge=1)
+    is_relative: bool = Field(default=False)
+    relative_level: int = Field(default=0)
+
+
+class RouteSecurityContext(BaseModel):
+    """Cross-file security and authorization context for a discovered HTTP route."""
+    model_config = ConfigDict(extra="forbid")
+
+    route_path: str = Field(..., description="Route URI path")
+    http_method: str = Field(default="GET", description="HTTP method")
+    file_path: str = Field(..., description="File where route handler is defined")
+    module_name: str = Field(..., description="Module where route handler is defined")
+    function_name: str = Field(..., description="Handler function name")
+    line_no: int = Field(default=1, ge=1)
+    router_variable: Optional[str] = None
+    router_prefix: str = Field(default="")
+    decorators: List[str] = Field(default_factory=list)
+    dependencies: List[str] = Field(default_factory=list)
+    in_body_calls: List[str] = Field(default_factory=list)
+    resolved_auth_sources: List[str] = Field(default_factory=list)
+    unresolved_symbols: List[str] = Field(default_factory=list)
+    is_protected: bool = Field(default=False)
+    has_uncertainty: bool = Field(default=False)
+    uncertainty_reasons: List[str] = Field(default_factory=list)
+
+
+class ProjectDependencyGraph(BaseModel):
+    """Lightweight dependency and security context graph for a scanned project."""
+    model_config = ConfigDict(extra="forbid")
+
+    modules: Dict[str, str] = Field(default_factory=dict, description="module_name -> file_path")
+    reverse_modules: Dict[str, str] = Field(default_factory=dict, description="file_path -> module_name")
+    imports: List[ModuleImport] = Field(default_factory=list)
+    symbols: Dict[str, List[ModuleSymbol]] = Field(default_factory=dict, description="module_name -> symbols")
+    routes: List[RouteSecurityContext] = Field(default_factory=list)
+    router_prefixes: Dict[str, str] = Field(default_factory=dict, description="router variable/name -> prefix")
+    router_dependencies: Dict[str, List[str]] = Field(default_factory=dict, description="router variable -> dependencies")
+    app_middlewares: List[str] = Field(default_factory=list)
+    unresolved_imports: List[str] = Field(default_factory=list)
+    analysis_uncertainties: List[str] = Field(default_factory=list)
+
+
 class SourceFinding(BaseModel):
     """Structured static source-code analysis finding.
 
@@ -277,8 +379,8 @@ class SourceFinding(BaseModel):
     severity: SeverityLevel = Field(..., description="Estimated severity rating")
     confidence: ConfidenceLevel = Field(..., description="Static detection confidence (never CONFIRMED)")
     source_type: str = Field(default=SourceType.SOURCE_CODE.value, description="Source type (source_code)")
-    classification: StaticFindingClassification = Field(
-        default=StaticFindingClassification.POTENTIAL_VULNERABILITY,
+    classification: FindingClassification = Field(
+        default=FindingClassification.POTENTIAL_VULNERABILITY,
         description="Distinguishes Detected Code Pattern vs Potential Vulnerability vs Confirmed Runtime Vulnerability",
     )
     validation_status: str = Field(
@@ -394,6 +496,7 @@ class SourceFinding(BaseModel):
             status=FindingStatus.SUSPECTED.value,
             validation_status="SUSPICIOUS",
             access_verdict="SUSPICIOUS_ACCESS",
+            classification=self.classification.value,
             severity=self.severity,
             description=self.detection_explanation,
             impact_explanation=self.detection_explanation,
@@ -433,6 +536,8 @@ class SourceAnalysisReport(BaseModel):
     findings_by_severity: Dict[str, int] = Field(default_factory=dict)
     external_tools_used: List[str] = Field(default_factory=list)
     errors: List[str] = Field(default_factory=list)
+    dependency_graph: Optional[ProjectDependencyGraph] = Field(default=None, description="Lightweight cross-file dependency graph")
+    analysis_uncertainties: List[str] = Field(default_factory=list, description="Explicitly documented analysis uncertainties")
     started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -589,9 +694,15 @@ class _PythonASTAnalyzer(ast.NodeVisitor):
         "todo",
     }
 
-    def __init__(self, file_path: str, source_lines: List[str]) -> None:
+    def __init__(
+        self,
+        file_path: str,
+        source_lines: List[str],
+        project_graph: Optional[ProjectDependencyGraph] = None,
+    ) -> None:
         self.file_path = file_path
         self.source_lines = source_lines
+        self.project_graph = project_graph
         self.findings: List[SourceFinding] = []
         self._class_stack: List[str] = []
         self._func_stack: List[str] = []
@@ -841,6 +952,19 @@ class _PythonASTAnalyzer(ast.NodeVisitor):
             "401" in body_lower or "403" in body_lower or "unauthorized" in body_lower or "forbidden" in body_lower
         )
 
+        # Cross-File Context Query: Check ProjectDependencyGraph if available
+        norm_file = self.file_path.replace("\\", "/")
+        route_ctx: Optional[RouteSecurityContext] = None
+        if self.project_graph:
+            for rc in self.project_graph.routes:
+                if (rc.file_path == norm_file or norm_file.endswith(rc.file_path) or rc.file_path.endswith(norm_file)) and rc.function_name == node.name:
+                    route_ctx = rc
+                    break
+
+        if route_ctx:
+            if route_ctx.is_protected:
+                has_auth_decorator = True
+
         # 1. Check for Admin / Privileged Route without AuthN/AuthZ check (BFLA / Broken Access Control)
         is_privileged_route = any(
             seg in route_path.lower() or seg in node.name.lower()
@@ -848,13 +972,41 @@ class _PythonASTAnalyzer(ast.NodeVisitor):
         )
         is_public_version = "version" in route_path.lower() or "health" in route_path.lower()
 
+        # Handle analysis uncertainty when dependencies are in external unresolvable modules
+        if route_ctx and route_ctx.has_uncertainty and not has_auth_decorator and not has_body_auth_check and is_privileged_route and not is_public_version:
+            self._add_finding(
+                rule_id="AS-PY-BAC-UNCERTAIN",
+                category=SourceVulnerabilityCategory.BROKEN_ACCESS_CONTROL,
+                severity=SeverityLevel.LOW,
+                confidence=ConfidenceLevel.LOW,
+                classification=FindingClassification.INCONCLUSIVE,
+                node=node,
+                explanation=(
+                    f"Privileged route '{http_method} {route_path}' in function '{node.name}' references "
+                    f"external or unresolvable security dependencies/decorators: {'; '.join(route_ctx.uncertainty_reasons)}. "
+                    f"Static analysis cannot determine authorization coverage without runtime verification."
+                ),
+                remediation=(
+                    "Verify server-side authorization enforcement across external module boundaries or via runtime differential testing."
+                ),
+                cwe_id="CWE-285",
+                route_path=route_path,
+                http_method=http_method,
+                extra_meta={
+                    "analysis_uncertainty": True,
+                    "uncertainty_reasons": route_ctx.uncertainty_reasons,
+                    "unresolved_symbols": route_ctx.unresolved_symbols,
+                },
+            )
+            return
+
         if is_privileged_route and not is_public_version and not has_auth_decorator and not has_body_auth_check:
             self._add_finding(
                 rule_id="AS-PY-BAC-001",
                 category=SourceVulnerabilityCategory.BROKEN_ACCESS_CONTROL,
                 severity=SeverityLevel.HIGH,
                 confidence=ConfidenceLevel.MEDIUM,
-                classification=StaticFindingClassification.POTENTIAL_VULNERABILITY,
+                classification=FindingClassification.POTENTIAL_VULNERABILITY,
                 node=node,
                 explanation=(
                     f"Privileged or administrative route '{http_method} {route_path}' in function '{node.name}' "
@@ -1058,6 +1210,8 @@ class _PythonASTAnalyzer(ast.NodeVisitor):
                 remediation="Restrict CORS origins to an explicit allowlist of trusted domains.",
                 cwe_id="CWE-942",
             )
+
+
 
     def visit_Call(self, node: ast.Call) -> None:
         """Inspects function and method calls for SQLi, XSS, Sensitive Data Exposure, and Misconfiguration."""
@@ -1888,6 +2042,431 @@ class _JSTSStructuralAnalyzer:
 
 
 # ==============================================================================
+# Cross-File Project Dependency Analyzer
+# ==============================================================================
+
+
+class ProjectDependencyAnalyzer:
+    """Builds a lightweight project-wide dependency graph for Python codebases.
+
+    Discovers:
+    1. Python modules and their import relationships.
+    2. FastAPI routes, middleware, dependencies and custom decorators.
+    3. Authorization-related function calls across imported modules.
+    4. Relationships between routes and authentication/authorization functions.
+    5. Discrepancies or uncertainties when external dependencies cannot be resolved.
+    """
+
+    AUTH_KEYWORDS: Set[str] = {
+        "auth", "admin", "role", "permission", "token", "session", "credential",
+        "verify", "require", "guard", "security", "check_access", "get_current_user",
+        "get_current_admin", "oauth2", "jwt", "authenticated", "login_required"
+    }
+
+    def __init__(self, root_path: Union[str, Path]) -> None:
+        self.root_path = Path(root_path).resolve()
+        self.modules: Dict[str, str] = {}  # module_name -> relative file path
+        self.reverse_modules: Dict[str, str] = {}  # rel_path -> module_name
+        self.imports: List[ModuleImport] = []
+        self.symbols: Dict[str, List[ModuleSymbol]] = {}  # module_name -> symbols
+        self.router_prefixes: Dict[str, str] = {}  # router variable -> prefix
+        self.router_dependencies: Dict[str, List[str]] = {}  # router variable -> list of dependency names
+        self.app_middlewares: List[str] = []
+        self.unresolved_imports: List[str] = []
+        self.analysis_uncertainties: List[str] = []
+
+    def _module_name_for_path(self, rel_path: str) -> str:
+        """Derives a dotted module name from a relative file path."""
+        p = Path(rel_path)
+        parts = [part for part in p.parts if part not in (".", "")]
+        if not parts:
+            return ""
+        if parts[-1].endswith(".py"):
+            parts[-1] = parts[-1][:-3]
+        if parts[-1] == "__init__":
+            parts.pop()
+        return ".".join(parts)
+
+    def _resolve_import_target(self, current_module: str, target: Optional[str], level: int) -> str:
+        """Resolves relative and absolute import target module names."""
+        if level == 0:
+            return target or ""
+        cur_parts = current_module.split(".") if current_module else []
+        cut = max(0, len(cur_parts) - level)
+        base_parts = cur_parts[:cut]
+        if target:
+            base_parts.append(target)
+        return ".".join(base_parts)
+
+    def _is_function_auth_related(self, node: Union[ast.FunctionDef, ast.AsyncFunctionDef]) -> bool:
+        """Determines if a function definition appears to perform authentication or authorization."""
+        name_lower = node.name.lower()
+        if any(k in name_lower for k in self.AUTH_KEYWORDS):
+            return True
+        doc = ast.get_docstring(node) or ""
+        if any(k in doc.lower() for k in ("authenticate", "permission", "admin role", "verify token", "check access", "authorization")):
+            return True
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, int) and sub.value in (401, 403):
+                return True
+            if isinstance(sub, ast.Attribute) and sub.attr in ("HTTP_401_UNAUTHORIZED", "HTTP_403_FORBIDDEN"):
+                return True
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                if any(tok in sub.value.lower() for tok in ("unauthorized", "forbidden", "access denied", "insufficient permissions")):
+                    return True
+        return False
+
+    def _is_class_auth_enforcing(self, node: ast.ClassDef) -> bool:
+        """Checks if a class implements genuine authorization / authentication enforcement."""
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, int) and sub.value in (401, 403):
+                return True
+            if isinstance(sub, ast.Attribute) and sub.attr in ("HTTP_401_UNAUTHORIZED", "HTTP_403_FORBIDDEN"):
+                return True
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                if any(tok in sub.value.lower() for tok in ("unauthorized", "forbidden", "access denied", "insufficient permissions")):
+                    return True
+        return False
+
+    def _get_call_name(self, call_node: ast.Call) -> Tuple[str, str]:
+        """Extracts (base_obj, method_name) from an ast.Call node."""
+        if isinstance(call_node.func, ast.Name):
+            return ("", call_node.func.id)
+        if isinstance(call_node.func, ast.Attribute):
+            base_str = ast.unparse(call_node.func.value) if hasattr(ast, "unparse") else ""
+            return (base_str, call_node.func.attr)
+        return ("", "")
+
+    def analyze_project(self, python_files: Sequence[DiscoveredSourceFile]) -> ProjectDependencyGraph:
+        """Performs two-pass project-wide AST dependency and route security analysis."""
+        parsed_trees: Dict[str, Tuple[ast.AST, str, str]] = {}  # rel_path -> (tree, mod_name, abs_path)
+
+        # ------------------------------------------------------------------
+        # Pass 1: Module registration, symbol extraction, import mapping
+        # ------------------------------------------------------------------
+        for sf in python_files:
+            rel_path = sf.file_path.replace("\\", "/")
+            mod_name = self._module_name_for_path(rel_path)
+            self.modules[mod_name] = rel_path
+            self.reverse_modules[rel_path] = mod_name
+            self.symbols[mod_name] = []
+
+            try:
+                content = Path(sf.absolute_path).read_text(encoding="utf-8", errors="replace")
+                tree = ast.parse(content, filename=rel_path)
+                parsed_trees[rel_path] = (tree, mod_name, sf.absolute_path)
+            except Exception as exc:
+                logger.warning(f"Could not parse AST for dependency graph in {rel_path}: {exc}")
+                continue
+
+            for node in tree.body:
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        self.imports.append(
+                            ModuleImport(
+                                source_module=mod_name,
+                                target_module=alias.name,
+                                imported_name=alias.name,
+                                alias=alias.asname,
+                                line_no=node.lineno,
+                                is_relative=False,
+                                relative_level=0,
+                            )
+                        )
+                elif isinstance(node, ast.ImportFrom):
+                    resolved_target = self._resolve_import_target(mod_name, node.module, node.level)
+                    for alias in node.names:
+                        self.imports.append(
+                            ModuleImport(
+                                source_module=mod_name,
+                                target_module=resolved_target,
+                                imported_name=alias.name,
+                                alias=alias.asname,
+                                line_no=node.lineno,
+                                is_relative=node.level > 0,
+                                relative_level=node.level,
+                            )
+                        )
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    is_auth = self._is_function_auth_related(node)
+                    self.symbols[mod_name].append(
+                        ModuleSymbol(
+                            name=node.name,
+                            kind=SymbolKind.FUNCTION,
+                            file_path=rel_path,
+                            module_name=mod_name,
+                            line_no=node.lineno,
+                            is_auth_related=is_auth,
+                            auth_mechanisms=["auth_function"] if is_auth else [],
+                            parameters=[a.arg for a in node.args.args],
+                        )
+                    )
+                elif isinstance(node, ast.ClassDef):
+                    is_auth = self._is_class_auth_enforcing(node)
+                    is_mw = any(k in node.name.lower() for k in ("middleware", "auth", "security", "guard"))
+                    kind = SymbolKind.MIDDLEWARE if is_mw else SymbolKind.CLASS
+                    self.symbols[mod_name].append(
+                        ModuleSymbol(
+                            name=node.name,
+                            kind=kind,
+                            file_path=rel_path,
+                            module_name=mod_name,
+                            line_no=node.lineno,
+                            is_auth_related=is_auth,
+                            auth_mechanisms=["middleware_class"] if is_auth else [],
+                        )
+                    )
+                elif isinstance(node, ast.Assign):
+                    # router = APIRouter(prefix="/admin", dependencies=[...])
+                    if isinstance(node.value, ast.Call):
+                        base, attr = self._get_call_name(node.value)
+                        if attr == "APIRouter" or "router" in attr.lower():
+                            target_names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                            prefix = ""
+                            deps: List[str] = []
+                            for kw in node.value.keywords:
+                                if kw.arg == "prefix" and isinstance(kw.value, ast.Constant):
+                                    prefix = str(kw.value.value)
+                                elif kw.arg == "dependencies" and isinstance(kw.value, ast.List):
+                                    for el in kw.value.elts:
+                                        dep_str = ast.unparse(el) if hasattr(ast, "unparse") else ""
+                                        if dep_str:
+                                            deps.append(dep_str)
+                            for tname in target_names:
+                                self.router_prefixes[f"{mod_name}:{tname}"] = prefix
+                                self.router_prefixes[f"{mod_name}.{tname}"] = prefix
+                                if deps:
+                                    self.router_dependencies[f"{mod_name}:{tname}"] = deps
+                                    self.router_dependencies[f"{mod_name}.{tname}"] = deps
+                elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                    base, attr = self._get_call_name(node.value)
+                    if attr == "include_router":
+                        r_name = node.value.args[0].id if node.value.args and isinstance(node.value.args[0], ast.Name) else ""
+                        prefix = ""
+                        deps = []
+                        for kw in node.value.keywords:
+                            if kw.arg == "prefix" and isinstance(kw.value, ast.Constant):
+                                prefix = str(kw.value.value)
+                            elif kw.arg == "dependencies" and isinstance(kw.value, ast.List):
+                                for el in kw.value.elts:
+                                    dep_str = ast.unparse(el) if hasattr(ast, "unparse") else ""
+                                    if dep_str:
+                                        deps.append(dep_str)
+                        if r_name:
+                            if prefix:
+                                self.router_prefixes[r_name] = prefix
+                            if deps:
+                                self.router_dependencies.setdefault(r_name, []).extend(deps)
+                    elif attr == "add_middleware":
+                        if node.value.args:
+                            mw_str = ast.unparse(node.value.args[0]) if hasattr(ast, "unparse") else ""
+                            if mw_str:
+                                self.app_middlewares.append(mw_str)
+
+        # ------------------------------------------------------------------
+        # Pass 2: Route discovery and security context synthesis
+        # ------------------------------------------------------------------
+        routes: List[RouteSecurityContext] = []
+        for rel_path, (tree, mod_name, abs_path) in parsed_trees.items():
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    route_info = self._analyze_route_context(node, mod_name, rel_path)
+                    if route_info:
+                        routes.append(route_info)
+
+        return ProjectDependencyGraph(
+            modules=self.modules,
+            reverse_modules=self.reverse_modules,
+            imports=self.imports,
+            symbols=self.symbols,
+            routes=routes,
+            router_prefixes=self.router_prefixes,
+            router_dependencies=self.router_dependencies,
+            app_middlewares=self.app_middlewares,
+            unresolved_imports=list(dict.fromkeys(self.unresolved_imports)),
+            analysis_uncertainties=list(dict.fromkeys(self.analysis_uncertainties)),
+        )
+
+    def _analyze_route_context(
+        self,
+        node: Union[ast.FunctionDef, ast.AsyncFunctionDef],
+        mod_name: str,
+        rel_path: str,
+    ) -> Optional[RouteSecurityContext]:
+        """Extracts and resolves route-level security context across modules."""
+        route_path: Optional[str] = None
+        http_method: str = "GET"
+        router_var: Optional[str] = None
+        decorators: List[str] = []
+        dependencies: List[str] = []
+        in_body_calls: List[str] = []
+
+        # Inspect decorators
+        for dec in node.decorator_list:
+            if isinstance(dec, ast.Call):
+                base, attr = self._get_call_name(dec)
+                if attr.lower() in {"get", "post", "put", "delete", "patch", "options", "head", "api_route"}:
+                    http_method = attr.upper()
+                    router_var = base
+                    if dec.args and isinstance(dec.args[0], ast.Constant) and isinstance(dec.args[0].value, str):
+                        route_path = dec.args[0].value
+                    for kw in dec.keywords:
+                        if kw.arg == "dependencies" and isinstance(kw.value, ast.List):
+                            for el in kw.value.elts:
+                                dep_str = ast.unparse(el) if hasattr(ast, "unparse") else ""
+                                if dep_str:
+                                    dependencies.append(dep_str)
+                else:
+                    dec_name = attr or base or (ast.unparse(dec) if hasattr(ast, "unparse") else "")
+                    if dec_name:
+                        decorators.append(dec_name)
+            elif isinstance(dec, ast.Name):
+                decorators.append(dec.id)
+            elif isinstance(dec, ast.Attribute):
+                decorators.append(dec.attr)
+
+        if route_path is None:
+            return None
+
+        # Inspect parameter dependencies: Depends(...), Security(...)
+        for default_expr in node.args.defaults + [d for d in node.args.kw_defaults if d is not None]:
+            if isinstance(default_expr, ast.Call):
+                base, attr = self._get_call_name(default_expr)
+                if attr in ("Depends", "Security"):
+                    dep_name = ast.unparse(default_expr.args[0]) if default_expr.args and hasattr(ast, "unparse") else ""
+                    if dep_name:
+                        dependencies.append(dep_name)
+
+        # Inspect in-body calls
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                base, attr = self._get_call_name(sub)
+                call_name = attr or base
+                if call_name:
+                    in_body_calls.append(call_name)
+
+        # Cross-file resolution
+        is_protected = False
+        resolved_auth_sources: List[str] = []
+        unresolved_symbols: List[str] = []
+        uncertainty_reasons: List[str] = []
+        has_uncertainty = False
+
+        # 1. Resolve custom decorators across imports
+        for dec in decorators:
+            if any(k in dec.lower() for k in self.AUTH_KEYWORDS):
+                imp = next((i for i in self.imports if i.source_module == mod_name and (i.imported_name == dec or i.alias == dec)), None)
+                if imp:
+                    target_mod = imp.target_module
+                    target_name = imp.imported_name
+                    if target_mod in self.symbols:
+                        target_sym = next((s for s in self.symbols[target_mod] if s.name == target_name), None)
+                        if target_sym and target_sym.is_auth_related:
+                            is_protected = True
+                            resolved_auth_sources.append(f"{target_mod}:{target_name}")
+                        else:
+                            is_protected = True
+                            resolved_auth_sources.append(f"{target_mod}:{target_name}")
+                    else:
+                        has_uncertainty = True
+                        reason = f"Route references external decorator '@{dec}' from module '{target_mod}'"
+                        uncertainty_reasons.append(reason)
+                        self.analysis_uncertainties.append(reason)
+                        unresolved_symbols.append(f"{target_mod}:{target_name}")
+                else:
+                    local_sym = next((s for s in self.symbols.get(mod_name, []) if s.name == dec), None)
+                    if local_sym and local_sym.is_auth_related:
+                        is_protected = True
+                        resolved_auth_sources.append(f"{mod_name}:{dec}")
+                    else:
+                        is_protected = True
+                        resolved_auth_sources.append(f"local:{dec}")
+
+        # 2. Resolve dependencies across imports
+        for dep in dependencies:
+            clean_dep = dep.replace("Depends(", "").replace("Security(", "").rstrip(")").strip()
+            if any(k in clean_dep.lower() for k in self.AUTH_KEYWORDS):
+                imp = next((i for i in self.imports if i.source_module == mod_name and (i.imported_name == clean_dep or i.alias == clean_dep)), None)
+                if imp:
+                    target_mod = imp.target_module
+                    target_name = imp.imported_name
+                    if target_mod in self.symbols:
+                        target_sym = next((s for s in self.symbols[target_mod] if s.name == target_name), None)
+                        if target_sym and target_sym.is_auth_related:
+                            is_protected = True
+                            resolved_auth_sources.append(f"{target_mod}:{target_name}")
+                        else:
+                            is_protected = True
+                            resolved_auth_sources.append(f"{target_mod}:{target_name}")
+                    else:
+                        has_uncertainty = True
+                        reason = f"Route references external dependency '{clean_dep}' from module '{target_mod}'"
+                        uncertainty_reasons.append(reason)
+                        self.analysis_uncertainties.append(reason)
+                        unresolved_symbols.append(f"{target_mod}:{target_name}")
+                else:
+                    local_sym = next((s for s in self.symbols.get(mod_name, []) if s.name == clean_dep), None)
+                    if local_sym and local_sym.is_auth_related:
+                        is_protected = True
+                        resolved_auth_sources.append(f"{mod_name}:{clean_dep}")
+                    else:
+                        is_protected = True
+                        resolved_auth_sources.append(f"local:{clean_dep}")
+
+        # 3. Resolve in-body function calls across imports
+        for call_name in in_body_calls:
+            if any(k in call_name.lower() for k in self.AUTH_KEYWORDS):
+                imp = next((i for i in self.imports if i.source_module == mod_name and (i.imported_name == call_name or i.alias == call_name)), None)
+                if imp and imp.target_module in self.symbols:
+                    target_sym = next((s for s in self.symbols[imp.target_module] if s.name == imp.imported_name), None)
+                    if target_sym and target_sym.is_auth_related:
+                        is_protected = True
+                        resolved_auth_sources.append(f"{imp.target_module}:{imp.imported_name}")
+
+        # 4. Check router-level dependencies
+        router_deps = self.router_dependencies.get(f"{mod_name}:{router_var}", []) or self.router_dependencies.get(router_var or "", [])
+        for rdep in router_deps:
+            clean_rdep = rdep.replace("Depends(", "").replace("Security(", "").rstrip(")").strip()
+            if any(k in clean_rdep.lower() for k in self.AUTH_KEYWORDS):
+                is_protected = True
+                resolved_auth_sources.append(f"router:{router_var}:{clean_rdep}")
+
+        # 5. Check global middleware (only if middleware class performs genuine auth enforcement)
+        for mw in self.app_middlewares:
+            is_mw_auth = False
+            for m_syms in self.symbols.values():
+                for s in m_syms:
+                    if s.name == mw and s.is_auth_related:
+                        is_mw_auth = True
+                        break
+            if is_mw_auth:
+                is_protected = True
+                resolved_auth_sources.append(f"middleware:{mw}")
+
+        effective_prefix = self.router_prefixes.get(f"{mod_name}:{router_var}") or self.router_prefixes.get(f"{mod_name}.{router_var}") or self.router_prefixes.get(router_var or "", "")
+        effective_path = f"{effective_prefix.rstrip('/')}/{route_path.lstrip('/')}" if effective_prefix else route_path
+
+        return RouteSecurityContext(
+            route_path=effective_path,
+            http_method=http_method,
+            file_path=rel_path,
+            module_name=mod_name,
+            function_name=node.name,
+            line_no=node.lineno,
+            router_variable=router_var,
+            router_prefix=effective_prefix,
+            decorators=decorators,
+            dependencies=dependencies,
+            in_body_calls=in_body_calls,
+            resolved_auth_sources=resolved_auth_sources,
+            unresolved_symbols=unresolved_symbols,
+            is_protected=is_protected,
+            has_uncertainty=has_uncertainty,
+            uncertainty_reasons=uncertainty_reasons,
+        )
+
+
+# ==============================================================================
 # Primary SourceAnalyzer Engine
 # ==============================================================================
 
@@ -2205,6 +2784,7 @@ class SourceAnalyzer:
         self,
         file_path: Union[str, Path],
         display_path: Optional[str] = None,
+        project_graph: Optional[ProjectDependencyGraph] = None,
     ) -> List[SourceFinding]:
         """Analyzes a single authorized source file and returns structured `SourceFinding` objects."""
         resolved = self._validate_target_path(file_path)
@@ -2235,6 +2815,7 @@ class SourceAnalyzer:
             source_code=source_text,
             language=lang,
             file_path=rel_display,
+            project_graph=project_graph,
         )
 
     def analyze_source_string(
@@ -2242,6 +2823,7 @@ class SourceAnalyzer:
         source_code: str,
         language: SupportedLanguage | str,
         file_path: str = "<memory>",
+        project_graph: Optional[ProjectDependencyGraph] = None,
     ) -> List[SourceFinding]:
         """Analyzes in-memory source code without executing it."""
         if not source_code or not source_code.strip():
@@ -2256,7 +2838,7 @@ class SourceAnalyzer:
             lang_enum = language
 
         if lang_enum == SupportedLanguage.PYTHON:
-            return self._analyze_python_source(source_code, file_path)
+            return self._analyze_python_source(source_code, file_path, project_graph=project_graph)
         if lang_enum in (SupportedLanguage.JAVASCRIPT, SupportedLanguage.TYPESCRIPT):
             analyzer = _JSTSStructuralAnalyzer(
                 file_path=file_path,
@@ -2267,7 +2849,12 @@ class SourceAnalyzer:
 
         return []
 
-    def _analyze_python_source(self, source_code: str, file_path: str) -> List[SourceFinding]:
+    def _analyze_python_source(
+        self,
+        source_code: str,
+        file_path: str,
+        project_graph: Optional[ProjectDependencyGraph] = None,
+    ) -> List[SourceFinding]:
         lines = source_code.splitlines()
         try:
             tree = ast.parse(source_code, filename=file_path)
@@ -2278,7 +2865,11 @@ class SourceAnalyzer:
             )
             return []
 
-        visitor = _PythonASTAnalyzer(file_path=file_path, source_lines=lines)
+        visitor = _PythonASTAnalyzer(
+            file_path=file_path,
+            source_lines=lines,
+            project_graph=project_graph,
+        )
         visitor.visit(tree)
         return visitor.findings
 
@@ -2297,11 +2888,26 @@ class SourceAnalyzer:
         errors: List[str] = []
         external_tools_used: List[str] = []
 
+        # Cross-File Static Analysis: Build lightweight ProjectDependencyGraph for Python codebases
+        dependency_graph: Optional[ProjectDependencyGraph] = None
+        analysis_uncertainties: List[str] = []
+        py_files = [f for f in discovery.discovered_files if f.language == SupportedLanguage.PYTHON]
+        if py_files:
+            try:
+                dep_analyzer = ProjectDependencyAnalyzer(root_path=discovery.root_path)
+                dependency_graph = dep_analyzer.analyze_project(py_files)
+                analysis_uncertainties.extend(dependency_graph.analysis_uncertainties)
+            except Exception as exc:
+                err_msg = f"Project dependency analysis failed: {exc}"
+                logger.warning(err_msg)
+                errors.append(err_msg)
+
         for src_file in discovery.discovered_files:
             try:
                 file_findings = self.analyze_file(
                     file_path=src_file.absolute_path,
                     display_path=src_file.file_path,
+                    project_graph=dependency_graph,
                 )
                 all_findings.extend(file_findings)
             except Exception as exc:
@@ -2336,6 +2942,8 @@ class SourceAnalyzer:
             findings_by_severity=by_sev,
             external_tools_used=external_tools_used,
             errors=errors,
+            dependency_graph=dependency_graph,
+            analysis_uncertainties=analysis_uncertainties,
             started_at=started_at,
             completed_at=datetime.now(timezone.utc),
         )

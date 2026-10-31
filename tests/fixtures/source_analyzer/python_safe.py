@@ -70,3 +70,4 @@ def safe_helpers(args_list: list[str], yaml_payload: str, token: str, pub_key: s
     data = yaml.safe_load(yaml_payload)
     claims = jwt.decode(token, pub_key, algorithms=["RS256"])
     return data, claims
+
