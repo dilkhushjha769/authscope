@@ -30,8 +30,11 @@ from backend.ai_agent import GeminiAgentConfig, GeminiAuthScopeAgent
 from backend.analysis.code_mapper import CodeMapper, MappingStatus
 from backend.analysis.remediation import RemediationEngine
 from backend.analysis.finding_review import FindingReviewService, ReviewProvider
+from backend.analysis.finding_chat import FindingChatRequest, FindingChatResponse, FindingChatService
 from backend.analysis.explanation_engine import ExplanationEngine
 from backend.config import settings
+from backend.ai_agent.config import GeminiAgentConfig
+from backend.ai_agent.gemini_client import GeminiClient, GeminiClientException
 from backend.core.assessment_engine import (
     AssessmentEngine,
     AssessmentQueryAdapter,
@@ -2481,6 +2484,45 @@ def get_finding_verification_history(assessment_id: str, finding_id: str) -> Lis
     if not finding or finding.scan_id != assessment_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found in this assessment.")
     return [entry.model_dump(mode="json") for entry in repo.get_retest_history(finding_id)]
+
+
+@app.post(
+    "/api/assessments/{assessment_id}/findings/{finding_id}/chat",
+    response_model=FindingChatResponse,
+)
+async def chat_about_finding(
+    assessment_id: str,
+    finding_id: str,
+    request: FindingChatRequest,
+) -> FindingChatResponse:
+    """Answers a question using only the finding and its sanitized stored evidence."""
+    repo = _get_repository()
+    if not repo.get_scan_session(assessment_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assessment not found.")
+    finding = repo.get_finding(finding_id)
+    if finding is None or finding.scan_id != assessment_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found in this assessment.")
+
+    service = getattr(app.state, "finding_chat_service", None)
+    if service is None:
+        config = GeminiAgentConfig.from_env()
+        if not config.is_configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Gemini is not configured. Set GEMINI_API_KEY on the backend to enable finding Q&A.",
+            )
+        service = FindingChatService(generator=GeminiClient(config=config), model=config.model)
+    try:
+        return await asyncio.to_thread(service.answer, finding, request)
+    except GeminiClientException as exc:
+        logger.warning(
+            "Finding Q&A provider unavailable",
+            extra={"finding_id": finding_id, "error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini could not answer right now. Please retry in a moment.",
+        ) from exc
 
 
 @app.get("/api/assessments/{assessment_id}/findings")

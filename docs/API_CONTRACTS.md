@@ -466,6 +466,12 @@ def stream_assessment(
 
 # POST /api/assessments/{assessment_id}/stop
 # Response 200: {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
+
+# POST /api/assessments/{assessment_id}/findings/{finding_id}/chat
+# Request: {"question": "Why is this considered an IDOR?", "history": [{"role": "user", "content": "..."}]}
+# Response 200: {"answer": "...", "provider": "Google Gemini", "model": "..."}
+# Conversation roles are limited to user/assistant; question and history sizes are bounded.
+# This endpoint is explanatory only and cannot change finding status or invoke security tools.
 ```
 
 

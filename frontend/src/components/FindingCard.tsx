@@ -17,6 +17,8 @@ import {
   MinusCircle,
   Copy,
   Check,
+  Send,
+  Loader2,
 } from "lucide-react";
 import { BeginnerExplanation, FindingItem, FindingValidationStatus, FixVerificationRecord } from "@/types/assessment";
 
@@ -134,6 +136,10 @@ function getStatusMeta(status: FindingValidationStatus): {
 export function FindingCard({ finding, onVerifyFix, verificationPending = false, verificationError }: FindingCardProps) {
   const [showRawEvidence, setShowRawEvidence] = useState(false);
   const [fixCopied, setFixCopied] = useState(false);
+  const [chatQuestion, setChatQuestion] = useState("");
+  const [chatMessages, setChatMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [chatPending, setChatPending] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
 
   // Never display a suspicious finding as confirmed
   const rawStatus = (finding.validation_status || "SUSPICIOUS").toUpperCase();
@@ -345,6 +351,33 @@ export function FindingCard({ finding, onVerifyFix, verificationPending = false,
       window.setTimeout(() => setFixCopied(false), 1800);
     } catch {
       setFixCopied(false);
+    }
+  };
+
+  const askAboutFinding = async () => {
+    const question = chatQuestion.trim();
+    if (!question || chatPending) return;
+    setChatPending(true);
+    setChatError(null);
+    try {
+      const response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/assessments/${finding.scan_id}/findings/${finding.id}/chat`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question, history: chatMessages.slice(-8) }),
+        },
+      );
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "The finding assistant could not answer.");
+      const userMessage: { role: "user"; content: string } = { role: "user", content: question };
+      const assistantMessage: { role: "assistant"; content: string } = { role: "assistant", content: String(payload.answer || "") };
+      setChatMessages((current) => [...current, userMessage, assistantMessage].slice(-10));
+      setChatQuestion("");
+    } catch (error: unknown) {
+      setChatError(error instanceof Error ? error.message : "The finding assistant could not answer.");
+    } finally {
+      setChatPending(false);
     }
   };
 
@@ -739,6 +772,16 @@ export function FindingCard({ finding, onVerifyFix, verificationPending = false,
           )}
         </section>
       )}
+      <section className="mt-4 border-t border-zinc-800 pt-3">
+        <h5 className="text-sm font-semibold text-zinc-100">Ask Gemini about this finding</h5>
+        <p className="mt-1 text-xs text-zinc-400">Answers use this finding’s sanitized evidence. Gemini cannot change the security engine’s result.</p>
+        {chatMessages.length > 0 && <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">{chatMessages.map((message, index) => <div key={`${index}-${message.role}`} className={`rounded-md p-2 text-xs ${message.role === "assistant" ? "bg-zinc-800 text-zinc-200" : "bg-blue-950/50 text-blue-100"}`}><strong>{message.role === "assistant" ? "Gemini" : "You"}: </strong>{message.content}</div>)}</div>}
+        {chatError && <p role="alert" className="mt-2 text-xs text-red-300">{chatError}</p>}
+        <form className="mt-3 flex gap-2" onSubmit={(event) => { event.preventDefault(); void askAboutFinding(); }}>
+          <input value={chatQuestion} onChange={(event) => setChatQuestion(event.target.value)} maxLength={2000} placeholder="Ask what this means or how to fix it…" className="min-w-0 flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-white" aria-label="Ask a question about this finding" />
+          <button type="submit" disabled={!chatQuestion.trim() || chatPending} className="inline-flex items-center gap-1 rounded-md bg-violet-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{chatPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}{chatPending ? "Asking" : "Ask"}</button>
+        </form>
+      </section>
     </div>
   );
 }
