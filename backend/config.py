@@ -37,11 +37,22 @@ class Settings(BaseSettings):
     admin_password: str = Field(default="admin_password_placeholder", alias="ADMIN_PASSWORD")
     admin_token: str = Field(default="", alias="ADMIN_TOKEN")
 
-    # AI Configuration (Claude)
+    # AI Configuration (Gemini & Claude)
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_MODEL")
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-3-5-sonnet-20241022", alias="ANTHROPIC_MODEL")
     anthropic_max_tokens: int = Field(default=2048, alias="ANTHROPIC_MAX_TOKENS")
     anthropic_timeout: float = Field(default=30.0, alias="ANTHROPIC_TIMEOUT")
+
+    # AI Configuration (Google Gemini Brain & Agent Loop)
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.5-flash", alias="GEMINI_MODEL")
+    gemini_max_tokens: int = Field(default=2048, alias="GEMINI_MAX_TOKENS")
+    gemini_timeout: float = Field(default=30.0, alias="GEMINI_TIMEOUT")
+    agent_max_iterations: int = Field(default=8, alias="AGENT_MAX_ITERATIONS")
+    agent_max_tool_calls: int = Field(default=15, alias="AGENT_MAX_TOOL_CALLS")
+    agent_temperature: float = Field(default=0.2, alias="AGENT_TEMPERATURE")
 
     # Storage Configuration
     database_path: str = Field(default="data/authscope.db", alias="DATABASE_PATH")

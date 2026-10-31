@@ -190,6 +190,7 @@ class DatabaseManager:
             ("scan_sessions", "failure_reason", "TEXT DEFAULT ''"),
             ("findings", "target_identifier", "TEXT DEFAULT ''"),
             ("findings", "validation_status", "TEXT DEFAULT 'CONFIRMED'"),
+            ("findings", "classification", "TEXT DEFAULT ''"),
             ("findings", "access_verdict", "TEXT DEFAULT 'CONFIRMED_UNAUTHORIZED_ACCESS'"),
             ("findings", "resource_id", "TEXT"),
             ("findings", "expected_behavior", "TEXT DEFAULT ''"),

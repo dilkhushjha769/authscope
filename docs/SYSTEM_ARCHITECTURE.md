@@ -79,8 +79,10 @@ flowchart TB
 - `backend.core.scope_guard.ScopeGuard`: First line of defense. Evaluates every URL before any socket is opened. Checks hostname, IP resolution, port, and URL scheme against strict allowlists.
 - `backend.core.target_manager.TargetManager`: Manages application metadata, base URLs, and active test paths.
 - `backend.core.session_manager.SessionManager`: Automates role authentication, manages JWTs/cookies, and keeps identities completely isolated.
+- `backend.scanner.source_analyzer.SourceAnalyzer`: Offline multi-language static code analyzer (Python, JS, TS). Never executes target code, never makes network calls. Enforces hard file and repo size bounds, excludes secrets/private keys. Outputs `DETECTED_CODE_PATTERN` or `POTENTIAL_VULNERABILITY`, NEVER confirmed vulnerabilities.
+- `backend.scanner.source_analyzer.ProjectDependencyAnalyzer`: Builds lightweight cross-file dependency graph (`ProjectDependencyGraph`) across Python modules, resolving imports, custom decorators, FastAPI dependencies (`Depends`, `Security`), router prefixes, and middleware to prevent false positives when auth checks live in external files, and explicitly flagging `INCONCLUSIVE` uncertainty when external dependencies cannot be resolved.
 - `backend.scanner.request_executor.RequestExecutor`: Low-level HTTP executor using `httpx`. Sets request timeouts, enforces disabled redirects, and intercepts response headers and body.
-- `backend.scanner.authorization_tester.AuthorizationTester`: Executes cross-role comparative matrix tests on target endpoints and generates raw diff metrics.
+- `backend.scanner.authorization_tester.AuthorizationTester`: Executes cross-role comparative matrix tests on target endpoints, generates raw diff metrics, and uniquely holds the authority to promote potential findings to `CONFIRMED_RUNTIME_VULNERABILITY` via `verify_potential_finding`.
 - `backend.analysis.evidence_validator.EvidenceValidator`: Sanitizes sensitive tokens, evaluates response status differences, and computes an SHA-256 checksum across request/response pairs.
 - `backend.analysis.severity_engine.SeverityEngine`: Applies an objective risk rubric based on data sensitivity and access level.
 

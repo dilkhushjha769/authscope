@@ -32,6 +32,15 @@ class FindingStatus(str, Enum):
     REMEDIATED = "remediated"
     FALSE_POSITIVE = "false_positive"
 
+class FindingClassification(str, Enum):
+    """Strict lifecycle classification distinguishing static patterns from verified runtime findings."""
+    DETECTED_CODE_PATTERN = "DETECTED_CODE_PATTERN"
+    POTENTIAL_VULNERABILITY = "POTENTIAL_VULNERABILITY"
+    CONFIRMED_RUNTIME_VULNERABILITY = "CONFIRMED_RUNTIME_VULNERABILITY"
+    NOT_REPRODUCIBLE = "NOT_REPRODUCIBLE"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    SUSPICIOUS_ACCESS = "SUSPICIOUS_ACCESS"
+
 class SeverityLevel(str, Enum):
     CRITICAL = "CRITICAL"
     HIGH = "HIGH"
@@ -107,6 +116,112 @@ class DifferentialResult(BaseModel):
     evidence_artifacts: List[EvidenceArtifact] = Field(default_factory=list)
     summary: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class VerifiedPromotionResult(BaseModel):
+    """Result of runtime differential verification and potential promotion of a candidate finding."""
+    finding_id: str
+    target_endpoint: str
+    http_method: str
+    previous_classification: str
+    new_classification: FindingClassification
+    is_promoted: bool
+    status: str
+    validation_status: str
+    summary: str
+    owner_role: Role = Role.USER_A
+    test_roles: List[Role] = Field(default_factory=list)
+    reproduction_steps: List[str] = Field(default_factory=list)
+    evidence: Optional[EvidenceArtifact] = None
+    finding_record: Optional[FindingRecord] = None
+    confidence: ConfidenceLevel = ConfidenceLevel.MEDIUM
+    severity: SeverityLevel = SeverityLevel.HIGH
+    recommended_fix: str = ""
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+```
+
+### Cross-File Static Analysis & Dependency Models
+```python
+class SymbolKind(str, Enum):
+    FUNCTION = "FUNCTION"
+    DECORATOR = "DECORATOR"
+    DEPENDENCY = "DEPENDENCY"
+    MIDDLEWARE = "MIDDLEWARE"
+    ROUTER = "ROUTER"
+    APP = "APP"
+    CLASS = "CLASS"
+    VARIABLE = "VARIABLE"
+
+class ModuleSymbol(BaseModel):
+    name: str
+    kind: SymbolKind
+    file_path: str
+    module_name: str
+    line_no: int = 1
+    is_auth_related: bool = False
+    auth_mechanisms: List[str] = Field(default_factory=list)
+    docstring: Optional[str] = None
+    parameters: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class ModuleImport(BaseModel):
+    source_module: str
+    target_module: str
+    imported_name: str
+    alias: Optional[str] = None
+    line_no: int = 1
+    is_relative: bool = False
+    relative_level: int = 0
+
+class RouteSecurityContext(BaseModel):
+    route_path: str
+    http_method: str = "GET"
+    file_path: str
+    module_name: str
+    function_name: str
+    line_no: int = 1
+    router_variable: Optional[str] = None
+    router_prefix: str = ""
+    decorators: List[str] = Field(default_factory=list)
+    dependencies: List[str] = Field(default_factory=list)
+    in_body_calls: List[str] = Field(default_factory=list)
+    resolved_auth_sources: List[str] = Field(default_factory=list)
+    unresolved_symbols: List[str] = Field(default_factory=list)
+    is_protected: bool = False
+    has_uncertainty: bool = False
+    uncertainty_reasons: List[str] = Field(default_factory=list)
+
+class ProjectDependencyGraph(BaseModel):
+    modules: Dict[str, str] = Field(default_factory=dict)
+    reverse_modules: Dict[str, str] = Field(default_factory=dict)
+    imports: List[ModuleImport] = Field(default_factory=list)
+    symbols: Dict[str, List[ModuleSymbol]] = Field(default_factory=dict)
+    routes: List[RouteSecurityContext] = Field(default_factory=list)
+    router_prefixes: Dict[str, str] = Field(default_factory=dict)
+    router_dependencies: Dict[str, List[str]] = Field(default_factory=dict)
+    app_middlewares: List[str] = Field(default_factory=list)
+    unresolved_imports: List[str] = Field(default_factory=list)
+    analysis_uncertainties: List[str] = Field(default_factory=list)
+
+class SourceFinding(BaseModel):
+    finding_id: str
+    rule_id: str
+    vulnerability_category: str
+    severity: SeverityLevel
+    confidence: ConfidenceLevel
+    source_type: str = "source_code"
+    classification: FindingClassification = FindingClassification.POTENTIAL_VULNERABILITY
+    validation_status: str = "POTENTIAL_VULNERABILITY"
+    is_runtime_confirmed: bool = False
+    file_path: str
+    function_name: Optional[str] = None
+    route_path: Optional[str] = None
+    http_method: Optional[str] = None
+    start_line: int
+    end_line: int
+    code_snippet: str
+    detection_explanation: str
+    detection_method: str
+    remediation_hint: str = ""
 ```
 
 ### Evidence & Findings
@@ -145,6 +260,7 @@ class FindingRecord(BaseModel):
     vulnerability_type: VulnerabilityType
     severity: SeverityLevel
     status: FindingStatus
+    classification: Optional[str] = Field(default=None, description="Finding classification lifecycle state")
     target_endpoint: str
     http_method: str
     affected_roles: List[Role]
@@ -283,6 +399,23 @@ def retest_finding(finding_id: str) -> RetestResult:
     """
     Re-executes the exact non-destructive differential test sequence recorded in
     the finding's evidence artifact to determine if the vulnerability has been remediated.
+    """
+    ...
+```
+
+### 8. `AuthorizationTester.verify_potential_finding`
+```python
+def verify_potential_finding(
+    candidate: Union[SourceFinding, FindingRecord, Dict[str, Any]],
+    owner_role: Role = Role.USER_A,
+    test_roles: Optional[List[Role]] = None,
+    resource_id: Optional[str] = None,
+) -> VerifiedPromotionResult:
+    """
+    Executes scoped runtime differential testing to verify potential authorization findings.
+    Strictly promotes to CONFIRMED_RUNTIME_VULNERABILITY only when reproducible unauthorized
+    access is proven with cryptographic evidence. Classifies denied access as NOT_REPRODUCIBLE,
+    divergences as SUSPICIOUS_ACCESS, and unresolvable targets as INCONCLUSIVE.
     """
     ...
 ```
