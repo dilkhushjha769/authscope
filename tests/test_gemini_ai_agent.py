@@ -522,7 +522,7 @@ class TestMemoryInterfaceIntegration:
         custom_memory = MockMember3Memory()
         assert isinstance(custom_memory, MemorySystemInterface)
 
-        agent = GeminiAgent(memory=custom_memory, max_iterations=4, max_tool_calls=6)
+        agent = GeminiAgent(api_key=chr(34)*0, memory=custom_memory, max_iterations=4, max_tool_calls=6)
         req = AssessmentRequest(
             target_url="http://localhost:3000",
             objective="Test BOLA with Member 3 memory",
@@ -546,7 +546,7 @@ class TestEvidenceValidationWorkflow:
     """Verifies that vulnerabilities require independent evidence validation before confirmation."""
 
     def test_complete_evidence_validation_workflow_confirms_validated_finding(self) -> None:
-        agent = GeminiAgent(max_iterations=5, max_tool_calls=8)
+        agent = GeminiAgent(api_key=chr(34)*0, max_iterations=5, max_tool_calls=8)
         req = AssessmentRequest(
             target_url="http://localhost:3000",
             objective="Assess BOLA on /rest/basket/1",

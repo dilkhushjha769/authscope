@@ -110,7 +110,7 @@ def test_assessment_review_uses_gemini_when_configured(
 ) -> None:
     config = type("Config", (), {"is_configured": configured})()
     sentinel = object()
-    monkeypatch.setattr(api_module.GeminiAgentConfig, "from_env", staticmethod(lambda: config))
+    monkeypatch.setattr(api_module.GeminiAgentConfig, "from_env", staticmethod(lambda *a, **kw: config))
     monkeypatch.setattr(api_module, "GeminiClient", lambda config: sentinel)
 
     provider = api_module.AssessmentTaskManager._default_finding_review_provider()

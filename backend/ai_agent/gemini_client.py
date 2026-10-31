@@ -164,6 +164,29 @@ class GeminiClient:
         """Returns True if an active SDK client or valid API key is present."""
         return self._client is not None
 
+    @classmethod
+    def for_qa(cls) -> "GeminiClient":
+        """Constructs Gemini API #1 client for Text Generation & Bug Question-Answer."""
+        return cls(config=GeminiAgentConfig.for_qa())
+
+    @classmethod
+    def for_code_analysis(cls) -> "GeminiClient":
+        """Constructs Gemini API #2 client for Bug Impact, Remediation & Code Generation."""
+        return cls(config=GeminiAgentConfig.for_code_analysis())
+
+    @staticmethod
+    def _strip_additional_properties(schema_obj: Any) -> Any:
+        """Recursively removes 'additionalProperties' for Gemini Developer API compatibility."""
+        if isinstance(schema_obj, dict):
+            return {
+                k: GeminiClient._strip_additional_properties(v)
+                for k, v in schema_obj.items()
+                if k != "additionalProperties"
+            }
+        if isinstance(schema_obj, list):
+            return [GeminiClient._strip_additional_properties(i) for i in schema_obj]
+        return schema_obj
+
     def __repr__(self) -> str:
         """Safe representation that never exposes the raw API key."""
         return (
@@ -441,11 +464,33 @@ class GeminiClient:
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                response = self._client.models.generate_content(
-                    model=target_model,
-                    contents=prompt,
-                    config=gen_config,
-                )
+                try:
+                    response = self._client.models.generate_content(
+                        model=target_model,
+                        contents=prompt,
+                        config=gen_config,
+                    )
+                except ValueError as val_exc:
+                    if "additionalProperties" in str(val_exc) and hasattr(
+                        response_schema, "model_json_schema"
+                    ):
+                        clean_schema = self._strip_additional_properties(
+                            response_schema.model_json_schema()
+                        )
+                        fallback_config = self._build_generate_config(
+                            system_instruction=system_instruction,
+                            temperature=temperature,
+                            max_output_tokens=max_output_tokens,
+                            response_mime_type="application/json",
+                            response_schema=clean_schema,
+                        )
+                        response = self._client.models.generate_content(
+                            model=target_model,
+                            contents=prompt,
+                            config=fallback_config,
+                        )
+                    else:
+                        raise
                 self._record_usage(response)
 
                 parsed_obj = getattr(response, "parsed", None)

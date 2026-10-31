@@ -470,7 +470,7 @@ class GitHubAppService:
         if client is None:
             from backend.ai_agent.gemini_client import GeminiClient
 
-            client = GeminiClient()
+            client = GeminiClient.for_code_analysis()
         if not client.is_configured:
             return {"status": "unavailable", "message": "Gemini is not configured; static analysis facts are shown without AI explanation."}
         facts = {
