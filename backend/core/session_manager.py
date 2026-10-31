@@ -12,7 +12,7 @@ an explicit AuthenticationAdapter. Never invents credentials or resource ownersh
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from enum import Enum
 from pydantic import BaseModel, Field
 
@@ -107,6 +107,14 @@ class RoleSession(BaseModel):
         default_factory=dict,
         description="Explicitly registered resource IDs owned by this role (e.g. {'basket': {'1'}})"
     )
+    accessible_resources: Set[str] = Field(
+        default_factory=set,
+        description="Verified endpoints or resource URIs legitimately accessible by this role"
+    )
+    permissions: Set[str] = Field(
+        default_factory=set,
+        description="Recorded permissions or allowed operations observed for this role"
+    )
     is_authenticated: bool = False
 
     def get_headers(self) -> Dict[str, str]:
@@ -131,9 +139,23 @@ class RoleSession(BaseModel):
         key = resource_type.strip().lower()
         return str(resource_id).strip() in self.owned_resources.get(key, set())
 
+    def record_accessible_resource(self, endpoint_or_resource: str) -> None:
+        """Records an endpoint or resource path legitimately accessible by this role."""
+        clean = (endpoint_or_resource or "").strip()
+        if clean:
+            self.accessible_resources.add(clean)
+
+    def record_permission(self, permission: str) -> None:
+        """Records an observed or configured permission for this role."""
+        clean = (permission or "").strip()
+        if clean:
+            self.permissions.add(clean)
+
 
 class SessionManager:
     """Manages role sessions, credential bindings, token isolation, and header generation."""
+
+    ALL_FOUR_ROLES: List[Role] = [Role.ANONYMOUS, Role.USER_A, Role.USER_B, Role.ADMIN]
 
     def __init__(
         self,
@@ -199,10 +221,12 @@ class SessionManager:
             "user_b_authenticated": user_b_ready,
             "admin_authenticated": admin_ready,
             "multi_role_ready": user_a_ready and user_b_ready,
+            "four_role_ready": user_a_ready and user_b_ready and admin_ready,
             "authenticated_roles": [
                 r.value for r in (Role.USER_A, Role.USER_B, Role.ADMIN)
                 if self.is_authenticated(r)
             ],
+            "all_roles": [r.value for r in self.ALL_FOUR_ROLES],
             "anonymous_baseline_ready": True,
         }
 
@@ -348,3 +372,17 @@ class SessionManager:
         """Returns True if the role has an active authentication session."""
         session = self.get_session(role)
         return session.is_authenticated
+
+    def record_accessible_resource(self, role: Role | str, endpoint_or_resource: str) -> None:
+        """Records an endpoint or resource legitimately accessible by the specified role."""
+        session = self.get_session(role)
+        session.record_accessible_resource(endpoint_or_resource)
+
+    def record_permission(self, role: Role | str, permission: str) -> None:
+        """Records an observed or configured permission for the specified role."""
+        session = self.get_session(role)
+        session.record_permission(permission)
+
+    def get_four_role_sessions(self) -> Dict[Role, RoleSession]:
+        """Returns all four role session containers (Anonymous, User A, User B, Admin)."""
+        return {role: self.get_session(role) for role in self.ALL_FOUR_ROLES}

@@ -12,7 +12,7 @@ Adheres strictly to evidence-driven verification:
 """
 
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 import time
 import uuid
 from pydantic import BaseModel, Field
@@ -43,10 +43,25 @@ from backend.storage.models import FindingRecord, FindingStatus
 from backend.utils.helpers import (
     HumanApprovalRequiredError,
     InvalidTargetURLError,
+    UnsupportedMethodError,
+    redact_sensitive_text,
 )
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+DESTRUCTIVE_MODIFICATION_KEYS = {
+    "delete",
+    "drop",
+    "destroy",
+    "truncate",
+    "purge",
+    "wipe",
+    "remove_account",
+    "delete_order",
+    "delete_basket",
+    "close_account",
+}
 
 
 class RoleProbeOutcome(BaseModel):
@@ -56,6 +71,9 @@ class RoleProbeOutcome(BaseModel):
     verdict: AccessVerdict
     comparison: Optional[ComparisonAnalysis] = None
     evidence: Optional[EvidenceArtifact] = None
+    vulnerability_type: Optional[str] = None
+    extracted_resource_ids: List[str] = Field(default_factory=list)
+    exposed_sensitive_fields: List[str] = Field(default_factory=list)
 
 
 class DifferentialResult(BaseModel):
@@ -65,13 +83,22 @@ class DifferentialResult(BaseModel):
     method: str = "GET"
     resource_id: Optional[str] = None
     owner_role: Role = Role.USER_A
+    admin_policy: str = "policy_dependent"
     role_responses: Dict[Role, HttpResponseModel] = Field(default_factory=dict)
     probe_outcomes: Dict[Role, RoleProbeOutcome] = Field(default_factory=dict)
     overall_verdict: AccessVerdict = AccessVerdict.CORRECTLY_DENIED
     is_discrepancy_detected: bool = False
     is_confirmed: bool = False
     vulnerability_candidate: Optional[str] = None
+    detected_vulnerabilities: List[str] = Field(default_factory=list)
+    status_codes_by_role: Dict[str, int] = Field(default_factory=dict)
+    resource_ids_by_role: Dict[str, List[str]] = Field(default_factory=dict)
+    sensitive_fields_by_role: Dict[str, List[str]] = Field(default_factory=dict)
+    permissions_by_role: Dict[str, List[str]] = Field(default_factory=dict)
+    permission_differences: List[str] = Field(default_factory=list)
+    response_behaviors_by_role: Dict[str, str] = Field(default_factory=dict)
     evidence_artifacts: List[EvidenceArtifact] = Field(default_factory=list)
+    finding_records: List[FindingRecord] = Field(default_factory=list)
     summary: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -189,18 +216,39 @@ class AuthorizationTester:
     @staticmethod
     def _classify_vulnerability_type(
         endpoint: DiscoveredEndpoint,
-        test_role: Role
+        test_role: Role,
+        owner_role: Optional[Role] = None,
     ) -> str:
         """Determines the specific authorization vulnerability classification."""
         if test_role == Role.ANONYMOUS and endpoint.requires_auth:
-            if endpoint.category == EndpointCategory.USER_OBJECT:
-                return "BOLA_IDOR"
             return "MISSING_AUTH"
-        if endpoint.category == EndpointCategory.ADMIN_FUNCTION:
+        if owner_role == Role.ADMIN or endpoint.category == EndpointCategory.ADMIN_FUNCTION:
             return "BFLA"
         if endpoint.category == EndpointCategory.USER_OBJECT or endpoint.requires_owner_match:
             return "BOLA_IDOR"
         return "BROKEN_ACCESS_CONTROL"
+
+    @staticmethod
+    def _validate_safe_modification_payload(payload: Optional[Dict[str, Any]]) -> None:
+        """Ensures modification payloads are benign and contain no destructive directives."""
+        if not payload:
+            return
+        for k, v in payload.items():
+            k_lower = str(k).strip().lower()
+            v_lower = str(v).strip().lower()
+            if k_lower in DESTRUCTIVE_MODIFICATION_KEYS or any(
+                d in k_lower for d in ("delete", "drop", "destroy", "truncate", "purge")
+            ):
+                raise UnsupportedMethodError(
+                    f"Destructive modification payload key '{k}' is forbidden by non-destructive testing rules."
+                )
+            if any(
+                d in v_lower
+                for d in ("drop table", "delete from", "rm -rf", "destroy_account", "delete_all")
+            ):
+                raise UnsupportedMethodError(
+                    f"Destructive modification payload value in '{k}' is forbidden by non-destructive testing rules."
+                )
 
     def test_resource_access(
         self,
@@ -210,6 +258,11 @@ class AuthorizationTester:
         resource_id: Optional[str] = None,
         method: str = "GET",
         human_approved: bool = False,
+        json_body: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        safe_test_fixture: bool = False,
+        admin_policy: str = "policy_dependent",
+        scan_id: str = "default_scan",
     ) -> DifferentialResult:
         """Executes a full authorization-differential test on an endpoint.
 
@@ -217,16 +270,28 @@ class AuthorizationTester:
         1. Validates scope, method, and human approval boundaries.
         2. Verifies required sessions are authenticated in SessionManager.
         3. Requests the resource using the legitimate `owner_role` and records baseline.
-        4. Requests the same resource using each `test_role` (e.g. User B, Anonymous).
+        4. Requests the same resource using each `test_role` (e.g. User B, Anonymous, Admin).
         5. Compares responses via ResponseAnalyzer (status, JSON structure, ownership, sensitive fields).
         6. Validates and signs cryptographic EvidenceArtifact for suspicious or confirmed findings.
         """
+        norm_method = method.strip().upper()
+        if norm_method == "DELETE":
+            raise UnsupportedMethodError(
+                "HTTP DELETE is strictly forbidden by AuthScope non-destructive testing rules."
+            )
+        if json_body is not None:
+            self._validate_safe_modification_payload(json_body)
+
+        effective_human_approved = human_approved or (
+            safe_test_fixture and norm_method in ("GET", "HEAD", "POST", "PUT", "PATCH")
+        )
+
         disc_ep, resolved_url, effective_res_id = self._resolve_target_endpoint(
             endpoint=endpoint,
-            method=method,
+            method=norm_method,
             resource_id=resource_id,
             owner_role=owner_role,
-            human_approved=human_approved,
+            human_approved=effective_human_approved,
         )
 
         # Default comparison roles depending on endpoint category
@@ -253,6 +318,7 @@ class AuthorizationTester:
                 method=disc_ep.method,
                 resource_id=effective_res_id,
                 owner_role=owner_role,
+                admin_policy=admin_policy,
                 overall_verdict=AccessVerdict.INCONCLUSIVE,
                 is_discrepancy_detected=False,
                 is_confirmed=False,
@@ -276,6 +342,13 @@ class AuthorizationTester:
         role_responses: Dict[Role, HttpResponseModel] = {}
         probe_outcomes: Dict[Role, RoleProbeOutcome] = {}
         evidence_list: List[EvidenceArtifact] = []
+        status_codes_by_role: Dict[str, int] = {}
+        resource_ids_by_role: Dict[str, List[str]] = {}
+        sensitive_fields_by_role: Dict[str, List[str]] = {}
+        permissions_by_role: Dict[str, List[str]] = {}
+        permission_differences: List[str] = []
+        response_behaviors_by_role: Dict[str, str] = {}
+        detected_vulns: List[str] = []
 
         # Step 1: Request resource using legitimate owner
         self._apply_rate_limit()
@@ -283,6 +356,8 @@ class AuthorizationTester:
             role=owner_role,
             method=disc_ep.method,
             url=resolved_url,
+            json_body=json_body,
+            params=params,
         )
         role_responses[owner_role] = owner_resp
         owner_insp = self.analyzer.inspect_response(owner_resp)
@@ -291,10 +366,24 @@ class AuthorizationTester:
             if (owner_insp.is_http_success and not owner_insp.is_empty_payload and not owner_insp.is_spa_html_fallback)
             else AccessVerdict.CORRECTLY_DENIED
         )
+        if owner_verdict == AccessVerdict.ALLOWED_ACCESS:
+            self.session_manager.record_accessible_resource(owner_role, disc_ep.path)
+            self.session_manager.record_permission(owner_role, f"{disc_ep.method}:{disc_ep.path}")
+
+        status_codes_by_role[owner_role.value] = owner_resp.status_code
+        resource_ids_by_role[owner_role.value] = list(owner_insp.extracted_resource_ids)
+        sensitive_fields_by_role[owner_role.value] = list(owner_insp.sensitive_fields_found)
+        permissions_by_role[owner_role.value] = [
+            f"{'ALLOWED' if owner_verdict == AccessVerdict.ALLOWED_ACCESS else 'DENIED'}:{disc_ep.method}:{disc_ep.path}"
+        ]
+        response_behaviors_by_role[owner_role.value] = owner_verdict.value
+
         probe_outcomes[owner_role] = RoleProbeOutcome(
             role=owner_role,
             response=owner_resp,
             verdict=owner_verdict,
+            extracted_resource_ids=list(owner_insp.extracted_resource_ids),
+            exposed_sensitive_fields=list(owner_insp.sensitive_fields_found),
         )
 
         # Step 2: Probe same resource across each unauthorized / peer test role
@@ -304,6 +393,8 @@ class AuthorizationTester:
         vuln_candidate: Optional[str] = None
         summary_parts: List[str] = []
 
+        norm_admin_policy = (admin_policy or "policy_dependent").strip().lower()
+
         for trole in test_roles:
             self._apply_rate_limit()
             test_session = self.session_manager.require_authenticated_session(trole)
@@ -311,21 +402,38 @@ class AuthorizationTester:
                 role=trole,
                 method=disc_ep.method,
                 url=resolved_url,
+                json_body=json_body,
+                params=params,
             )
             role_responses[trole] = test_resp
+            test_insp = self.analyzer.inspect_response(test_resp)
 
-            # Check whether this role is legitimately expected to have access
-            role_allowed_by_policy = (
-                disc_ep.category == EndpointCategory.PUBLIC
-                or (trole in disc_ep.expected_allowed_roles and not disc_ep.requires_owner_match)
-                or (trole == owner_role)
-                or (
-                    disc_ep.requires_owner_match
-                    and disc_ep.resource_type
-                    and effective_res_id
-                    and test_session.owns_resource(disc_ep.resource_type, effective_res_id)
+            # Check whether this role is legitimately expected to have access according to policy
+            if trole == Role.ADMIN and owner_role != Role.ADMIN:
+                if norm_admin_policy == "allowed":
+                    role_allowed_by_policy = True
+                elif norm_admin_policy == "denied":
+                    role_allowed_by_policy = False
+                else:
+                    # policy_dependent: Admin is allowed on ADMIN_FUNCTION or PUBLIC or when in expected_allowed_roles
+                    # and not flagged as unauthorized on user objects unless admin_policy == "denied"
+                    role_allowed_by_policy = (
+                        disc_ep.category in (EndpointCategory.PUBLIC, EndpointCategory.ADMIN_FUNCTION)
+                        or Role.ADMIN in disc_ep.expected_allowed_roles
+                        or norm_admin_policy == "policy_dependent"
+                    )
+            else:
+                role_allowed_by_policy = (
+                    disc_ep.category == EndpointCategory.PUBLIC
+                    or (trole in disc_ep.expected_allowed_roles and not disc_ep.requires_owner_match)
+                    or (trole == owner_role)
+                    or (
+                        disc_ep.requires_owner_match
+                        and disc_ep.resource_type
+                        and effective_res_id
+                        and test_session.owns_resource(disc_ep.resource_type, effective_res_id)
+                    )
                 )
-            )
 
             comparison = self.analyzer.compare_responses(
                 owner_response=owner_resp,
@@ -340,10 +448,17 @@ class AuthorizationTester:
 
             artifact: Optional[EvidenceArtifact] = None
             final_role_verdict = comparison.verdict
+            role_vuln_type: Optional[str] = None
+
+            if final_role_verdict == AccessVerdict.ALLOWED_ACCESS:
+                self.session_manager.record_accessible_resource(trole, disc_ep.path)
+                self.session_manager.record_permission(trole, f"{disc_ep.method}:{disc_ep.path}")
+
             if comparison.verdict in (
                 AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS,
                 AccessVerdict.SUSPICIOUS_ACCESS,
             ):
+                role_vuln_type = self._classify_vulnerability_type(disc_ep, trole, owner_role=owner_role)
                 val_status = (
                     EvidenceValidationStatus.CONFIRMED
                     if comparison.verdict == AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
@@ -386,17 +501,41 @@ class AuthorizationTester:
                 evidence_list.append(artifact)
                 is_discrepancy = True
 
+                if role_vuln_type and role_vuln_type not in detected_vulns:
+                    detected_vulns.append(role_vuln_type)
+                if (
+                    role_vuln_type == "BFLA"
+                    and trole in (Role.USER_A, Role.USER_B)
+                    and "PRIVILEGE_ESCALATION" not in detected_vulns
+                ):
+                    detected_vulns.append("PRIVILEGE_ESCALATION")
+
+                permission_differences.append(
+                    f"Role '{trole.value}' unexpectedly accessed '{disc_ep.method} {disc_ep.path}' "
+                    f"(HTTP {test_resp.status_code}, verdict={final_role_verdict.value}, "
+                    f"classification={role_vuln_type})."
+                )
+
                 if final_role_verdict == AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS:
                     is_confirmed = True
                     overall_verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
-                    vuln_candidate = self._classify_vulnerability_type(disc_ep, trole)
+                    if vuln_candidate is None or trole != Role.ANONYMOUS:
+                        vuln_candidate = role_vuln_type
                 elif overall_verdict != AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS:
                     overall_verdict = AccessVerdict.SUSPICIOUS_ACCESS
                     if not vuln_candidate:
-                        vuln_candidate = self._classify_vulnerability_type(disc_ep, trole)
+                        vuln_candidate = role_vuln_type
 
             elif final_role_verdict == AccessVerdict.ALLOWED_ACCESS and overall_verdict == AccessVerdict.CORRECTLY_DENIED:
                 overall_verdict = AccessVerdict.ALLOWED_ACCESS
+
+            status_codes_by_role[trole.value] = test_resp.status_code
+            resource_ids_by_role[trole.value] = list(test_insp.extracted_resource_ids)
+            sensitive_fields_by_role[trole.value] = list(test_insp.sensitive_fields_found)
+            permissions_by_role[trole.value] = [
+                f"{'ALLOWED' if final_role_verdict in (AccessVerdict.ALLOWED_ACCESS, AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS) else 'DENIED'}:{disc_ep.method}:{disc_ep.path}"
+            ]
+            response_behaviors_by_role[trole.value] = final_role_verdict.value
 
             probe_outcomes[trole] = RoleProbeOutcome(
                 role=trole,
@@ -404,6 +543,9 @@ class AuthorizationTester:
                 verdict=final_role_verdict,
                 comparison=comparison,
                 evidence=artifact,
+                vulnerability_type=role_vuln_type,
+                extracted_resource_ids=list(test_insp.extracted_resource_ids),
+                exposed_sensitive_fields=list(test_insp.sensitive_fields_found),
             )
             summary_parts.append(f"[{trole.value}: {final_role_verdict.value}]")
 
@@ -413,21 +555,31 @@ class AuthorizationTester:
             + ", ".join(summary_parts)
         )
 
-        return DifferentialResult(
+        diff_result = DifferentialResult(
             endpoint=disc_ep.path,
             resolved_url=resolved_url,
             method=disc_ep.method,
             resource_id=effective_res_id,
             owner_role=owner_role,
+            admin_policy=norm_admin_policy,
             role_responses=role_responses,
             probe_outcomes=probe_outcomes,
             overall_verdict=overall_verdict,
             is_discrepancy_detected=is_discrepancy,
             is_confirmed=is_confirmed,
             vulnerability_candidate=vuln_candidate,
+            detected_vulnerabilities=detected_vulns,
+            status_codes_by_role=status_codes_by_role,
+            resource_ids_by_role=resource_ids_by_role,
+            sensitive_fields_by_role=sensitive_fields_by_role,
+            permissions_by_role=permissions_by_role,
+            permission_differences=permission_differences,
+            response_behaviors_by_role=response_behaviors_by_role,
             evidence_artifacts=evidence_list,
             summary=summary_str,
         )
+        diff_result.finding_records = self.build_finding_records(diff_result, scan_id=scan_id)
+        return diff_result
 
     def test_endpoint(
         self,
@@ -636,6 +788,361 @@ class AuthorizationTester:
                 evidence_artifacts=evidence_list,
                 summary=f"BFLA probe for '{disc_ep.path}' completed across {len(roles_to_probe)} roles without admin baseline."
             )
+
+    def test_four_role_access(
+        self,
+        endpoint: DiscoveredEndpoint | str,
+        owner_role: Optional[Role] = None,
+        resource_id: Optional[str] = None,
+        method: str = "GET",
+        json_body: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        admin_policy: str = "policy_dependent",
+        safe_test_fixture: bool = False,
+        human_approved: bool = False,
+        scan_id: str = "default_scan",
+    ) -> DifferentialResult:
+        """Executes cross-role request comparison across all four testing roles:
+        Anonymous, User A, User B, and Admin.
+
+        Evaluates:
+        - Status codes across all four roles.
+        - Response bodies, resource IDs, and sensitive field exposure.
+        - Permission differences across Anonymous, User A, User B, and Admin.
+        - Admin access behavior according to `admin_policy` ('allowed', 'denied', or 'policy_dependent').
+        - Authentication failures (MISSING_AUTH), horizontal escalation (BOLA_IDOR),
+          and vertical privilege escalation (BFLA / PRIVILEGE_ESCALATION).
+        """
+        if isinstance(endpoint, str) and endpoint.strip().startswith(("http://", "https://")):
+            self.scope_guard.assert_in_scope(endpoint.strip(), method=method)
+        raw_ep = endpoint if isinstance(endpoint, DiscoveredEndpoint) else self.discovery.register_endpoint(str(endpoint), method=method)
+        effective_owner = owner_role or (
+            Role.ADMIN if raw_ep.category == EndpointCategory.ADMIN_FUNCTION else Role.USER_A
+        )
+
+        all_four = [Role.ANONYMOUS, Role.USER_A, Role.USER_B, Role.ADMIN]
+        candidate_test_roles: List[Role] = []
+        unauthenticated_roles: List[Role] = []
+
+        for r in all_four:
+            if r == effective_owner:
+                continue
+            if r == Role.ANONYMOUS or self.session_manager.is_authenticated(r):
+                candidate_test_roles.append(r)
+            else:
+                unauthenticated_roles.append(r)
+
+        if not self.session_manager.is_authenticated(effective_owner):
+            if effective_owner == Role.ADMIN:
+                res = self.test_bfla(
+                    endpoint=raw_ep,
+                    admin_role=Role.ADMIN,
+                    test_roles=candidate_test_roles or [Role.ANONYMOUS],
+                    human_approved=human_approved,
+                )
+                for ur in unauthenticated_roles + [Role.ADMIN]:
+                    res.response_behaviors_by_role[ur.value] = AccessVerdict.NOT_TESTED.value
+                res.finding_records = self.build_finding_records(res, scan_id=scan_id)
+                return res
+            return DifferentialResult(
+                endpoint=raw_ep.path,
+                method=raw_ep.method,
+                owner_role=effective_owner,
+                admin_policy=admin_policy,
+                overall_verdict=AccessVerdict.NOT_TESTED,
+                is_discrepancy_detected=False,
+                is_confirmed=False,
+                response_behaviors_by_role={
+                    r.value: (
+                        AccessVerdict.NOT_TESTED.value
+                        if not self.session_manager.is_authenticated(r) and r != Role.ANONYMOUS
+                        else AccessVerdict.NOT_TESTED.value
+                    )
+                    for r in all_four
+                },
+                summary=f"Owner role '{effective_owner.value}' does not have an authenticated session; 4-role test not executed.",
+            )
+
+        result = self.test_resource_access(
+            endpoint=raw_ep,
+            owner_role=effective_owner,
+            test_roles=candidate_test_roles,
+            resource_id=resource_id,
+            method=method,
+            human_approved=human_approved,
+            json_body=json_body,
+            params=params,
+            safe_test_fixture=safe_test_fixture,
+            admin_policy=admin_policy,
+            scan_id=scan_id,
+        )
+        for ur in unauthenticated_roles:
+            result.response_behaviors_by_role[ur.value] = AccessVerdict.NOT_TESTED.value
+            result.permissions_by_role[ur.value] = [f"NOT_TESTED:{raw_ep.method}:{raw_ep.path}"]
+        return result
+
+    def compare_four_roles(
+        self,
+        endpoint: DiscoveredEndpoint | str,
+        owner_role: Optional[Role] = None,
+        resource_id: Optional[str] = None,
+        method: str = "GET",
+        json_body: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        admin_policy: str = "policy_dependent",
+        safe_test_fixture: bool = False,
+        human_approved: bool = False,
+        scan_id: str = "default_scan",
+    ) -> DifferentialResult:
+        """Alias for `test_four_role_access`."""
+        return self.test_four_role_access(
+            endpoint=endpoint,
+            owner_role=owner_role,
+            resource_id=resource_id,
+            method=method,
+            json_body=json_body,
+            params=params,
+            admin_policy=admin_policy,
+            safe_test_fixture=safe_test_fixture,
+            human_approved=human_approved,
+            scan_id=scan_id,
+        )
+
+    def test_unauthorized_modification(
+        self,
+        endpoint: DiscoveredEndpoint | str,
+        method: str = "PUT",
+        safe_payload: Optional[Dict[str, Any]] = None,
+        resource_id: Optional[str] = None,
+        owner_role: Role = Role.USER_A,
+        attacker_role: Role = Role.USER_B,
+        include_anonymous: bool = True,
+        admin_policy: str = "policy_dependent",
+        scan_id: str = "default_scan",
+    ) -> DifferentialResult:
+        """Tests whether an unauthorized role (e.g. User B or Anonymous) can modify a resource
+        owned by User A (or perform a privileged Admin mutation) using non-destructive test fixtures.
+
+        Strictly enforces:
+        - HTTP DELETE is forbidden.
+        - Destructive payload keys/values are rejected.
+        - Only controlled non-destructive modification verbs (POST, PUT, PATCH) are allowed.
+        """
+        norm_method = method.strip().upper()
+        if norm_method == "DELETE" or norm_method not in ("POST", "PUT", "PATCH"):
+            raise UnsupportedMethodError(
+                f"HTTP method '{norm_method}' is not permitted for safe modification testing. "
+                "Only non-destructive POST, PUT, or PATCH with safe test fixtures are allowed."
+            )
+
+        payload = safe_payload if safe_payload is not None else {
+            "test_fixture": True,
+            "note": "authscope_non_destructive_probe",
+        }
+        self._validate_safe_modification_payload(payload)
+
+        roles_to_test: List[Role] = [attacker_role]
+        if include_anonymous and Role.ANONYMOUS not in roles_to_test and owner_role != Role.ANONYMOUS:
+            roles_to_test.append(Role.ANONYMOUS)
+
+        prev_allowed_methods = list(self.scope_guard.allowed_methods)
+        try:
+            if norm_method not in self.scope_guard.allowed_methods:
+                self.scope_guard.allowed_methods.append(norm_method)
+
+            return self.test_resource_access(
+                endpoint=endpoint,
+                owner_role=owner_role,
+                test_roles=roles_to_test,
+                resource_id=resource_id,
+                method=norm_method,
+                human_approved=True,
+                json_body=payload,
+                safe_test_fixture=True,
+                admin_policy=admin_policy,
+                scan_id=scan_id,
+            )
+        finally:
+            self.scope_guard.allowed_methods = prev_allowed_methods
+
+    @staticmethod
+    def build_finding_records(
+        result: DifferentialResult,
+        scan_id: str = "default_scan",
+    ) -> List[FindingRecord]:
+        """Builds structured `FindingRecord` objects with full sanitized evidence,
+        expected vs actual behavior, explanation, reproducibility steps, and risk assessment.
+        """
+        records: List[FindingRecord] = []
+        if not result.evidence_artifacts:
+            return records
+
+        from backend.analysis.remediation import RemediationEngine
+
+        rem_engine = RemediationEngine()
+        owner_resp = result.role_responses.get(result.owner_role)
+        owner_status = owner_resp.status_code if owner_resp else 200
+
+        for artifact in result.evidence_artifacts:
+            trole = artifact.test_role
+            outcome = result.probe_outcomes.get(trole)
+            vuln_type = (
+                (outcome.vulnerability_type if outcome and outcome.vulnerability_type else None)
+                or result.vulnerability_candidate
+                or "BROKEN_ACCESS_CONTROL"
+            )
+            is_conf = artifact.validation_status == EvidenceValidationStatus.CONFIRMED
+
+            if vuln_type == "MISSING_AUTH":
+                title = f"Missing Authentication on Protected Endpoint ({result.method} {result.endpoint})"
+                explanation = (
+                    f"Unauthenticated role '{trole.value}' was able to access protected endpoint "
+                    f"'{result.method} {result.endpoint}' without valid credentials, exposing protected data."
+                )
+                impact = (
+                    "Unauthenticated attackers can read or interact with protected application data "
+                    "without logging in, bypassing authentication controls."
+                )
+                severity = SeverityLevel.HIGH if is_conf else SeverityLevel.MEDIUM
+            elif vuln_type in ("BFLA", "PRIVILEGE_ESCALATION"):
+                title = f"Vertical Privilege Escalation / BFLA ({result.method} {result.endpoint})"
+                explanation = (
+                    f"Non-administrative role '{trole.value}' accessed administrative or privileged endpoint "
+                    f"'{result.method} {result.endpoint}' normally restricted to '{result.owner_role.value}'."
+                )
+                impact = (
+                    "Lower-privilege users can invoke administrative functions or retrieve tenant-wide "
+                    "configuration and user records (Vertical Privilege Escalation)."
+                )
+                severity = SeverityLevel.CRITICAL if is_conf else SeverityLevel.HIGH
+            else:
+                is_mod = result.method.upper() in ("POST", "PUT", "PATCH")
+                action_word = "modify" if is_mod else "read"
+                title = f"Horizontal Privilege Escalation / BOLA-IDOR ({result.method} {result.endpoint})"
+                explanation = (
+                    f"Authenticated role '{trole.value}' was able to {action_word} resource "
+                    f"'{result.resource_id or result.endpoint}' owned by '{result.owner_role.value}' "
+                    f"via '{result.method} {result.endpoint}'."
+                )
+                impact = (
+                    f"Authenticated users can {action_word} private resources belonging to other users "
+                    "(Horizontal Privilege Escalation / Broken Object Level Authorization)."
+                )
+                severity = SeverityLevel.HIGH if is_conf else SeverityLevel.MEDIUM
+
+            confidence = ConfidenceLevel.CONFIRMED if is_conf else ConfidenceLevel.MEDIUM
+            rem_rec = rem_engine.generate_recommendation(
+                vulnerability_type=vuln_type,
+                endpoint=result.endpoint,
+                resource_type=None,
+            )
+
+            repro_steps = [
+                f"1. Authenticate as baseline owner role '{result.owner_role.value}' and send '{result.method} {result.resolved_url}' -> HTTP {owner_status}.",
+                f"2. Switch session to testing role '{trole.value}' and send identical '{result.method} {result.resolved_url}' -> HTTP {artifact.response_status}.",
+                f"3. Compare responses: '{trole.value}' received protected data/operation response matching '{result.owner_role.value}' baseline instead of HTTP 401/403.",
+                f"4. Verify cryptographic evidence SHA-256 signature: {artifact.evidence_sha256}.",
+            ]
+
+            risk_assessment = {
+                "severity": severity.value,
+                "confidence": confidence.value,
+                "vulnerability_type": vuln_type,
+                "exploitability": "High — reproducible via standard HTTP requests with role session switching.",
+                "business_impact": impact,
+                "cwe_reference": rem_rec.cwe_reference,
+                "owasp_reference": rem_rec.owasp_reference,
+            }
+
+            request_details = {
+                "method": artifact.request_method,
+                "url": artifact.request_url,
+                "testing_role": trole.value,
+                "authorized_owner_role": result.owner_role.value,
+                "headers": artifact.request_headers,
+                "body_excerpt": redact_sensitive_text(str(getattr(artifact, "request_body_excerpt", "") or "")),
+            }
+
+            sanitized_response_details = {
+                "status_code": artifact.response_status,
+                "headers": artifact.response_headers,
+                "sanitized_body_excerpt": artifact.sanitized_response_evidence,
+                "evidence_sha256": artifact.evidence_sha256,
+            }
+
+            rec = FindingRecord(
+                id=artifact.finding_id,
+                scan_id=scan_id,
+                title=title,
+                vulnerability_category=vuln_type,
+                vulnerability_type=vuln_type,
+                severity=severity,
+                confidence=confidence,
+                status=FindingStatus.CONFIRMED.value if is_conf else FindingStatus.SUSPECTED.value,
+                confirmation_status=FindingStatus.CONFIRMED.value if is_conf else FindingStatus.SUSPECTED.value,
+                validation_status="CONFIRMED" if is_conf else "SUSPICIOUS",
+                endpoint=result.endpoint,
+                target_endpoint=result.endpoint,
+                http_method=result.method,
+                resource_id=result.resource_id,
+                affected_roles=[trole],
+                affected_role=trole.value,
+                access_verdict=(
+                    AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS.value
+                    if is_conf
+                    else AccessVerdict.SUSPICIOUS_ACCESS.value
+                ),
+                classification=(
+                    FindingClassification.CONFIRMED_RUNTIME_VULNERABILITY.value
+                    if is_conf
+                    else FindingClassification.SUSPICIOUS_ACCESS.value
+                ),
+                description=explanation,
+                impact_explanation=impact,
+                expected_behavior=artifact.expected_behavior,
+                actual_behavior=artifact.actual_behavior,
+                remediation_guidance=rem_rec.code_Patch_example,
+                remediation_recommendation=rem_rec.remediation_steps,
+                evidence=artifact,
+                evidence_reference=artifact.evidence_id,
+                technical_details={
+                    "vulnerability_type": vuln_type,
+                    "affected_endpoint": result.endpoint,
+                    "http_method": result.method,
+                    "testing_role": trole.value,
+                    "request_details": request_details,
+                    "sanitized_response_details": sanitized_response_details,
+                    "expected_behavior": artifact.expected_behavior,
+                    "actual_behavior": artifact.actual_behavior,
+                    "explanation": explanation,
+                    "reproducibility_steps": repro_steps,
+                    "risk_assessment": risk_assessment,
+                    "status_codes_by_role": result.status_codes_by_role,
+                    "response_behaviors_by_role": result.response_behaviors_by_role,
+                    "permission_differences": result.permission_differences,
+                },
+            )
+            records.append(rec)
+
+        return records
+
+    def save_findings_to_repository(
+        self,
+        result: DifferentialResult,
+        repository: Any,
+        scan_id: str = "default_scan",
+        confirmed_only: bool = False,
+    ) -> List[str]:
+        """Persists generated FindingRecord and EvidenceArtifact objects to FindingRepository."""
+        records = result.finding_records or self.build_finding_records(result, scan_id=scan_id)
+        saved_ids: List[str] = []
+        for rec in records:
+            if confirmed_only and rec.validation_status != "CONFIRMED":
+                continue
+            rec.scan_id = scan_id
+            repository.save_finding(rec)
+            saved_ids.append(rec.id)
+        return saved_ids
 
     @staticmethod
     def build_canonical_finding(
@@ -976,6 +1483,9 @@ def compare_access(
     executor: Optional[RequestExecutor] = None,
     session_manager: Optional[SessionManager] = None,
     scope_guard: Optional[ScopeGuard] = None,
+    json_body: Optional[Dict[str, Any]] = None,
+    admin_policy: str = "policy_dependent",
+    safe_test_fixture: bool = False,
 ) -> DifferentialResult:
     """Top-level contract function to execute authorization-differential testing."""
     tester = AuthorizationTester(
@@ -989,4 +1499,7 @@ def compare_access(
         test_roles=roles_to_test,
         resource_id=resource_id,
         method=method,
+        json_body=json_body,
+        admin_policy=admin_policy,
+        safe_test_fixture=safe_test_fixture,
     )

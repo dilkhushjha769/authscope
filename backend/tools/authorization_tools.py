@@ -13,6 +13,7 @@ from backend.scanner.authorization_tester import AuthorizationTester
 from backend.scanner.endpoint_discovery import EndpointDiscovery
 from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict, ResponseAnalyzer
+from backend.storage.finding_repository import FindingRepository
 from backend.tools.schemas import (
     CompareEndpointAccessInput,
     CompareEndpointAccessOutput,
@@ -23,7 +24,15 @@ from backend.tools.schemas import (
     TestAccessControlOutput,
     TestBflaInput,
     TestBflaOutput,
+    TestUnauthorizedModificationInput,
+    TestUnauthorizedModificationOutput,
     ToolExecutionContext,
+    ValidateAttackChainInput,
+    ValidateAttackChainOutput,
+    ExecuteAttackChainInput,
+    ExecuteAttackChainOutput,
+    RetestAttackChainInput,
+    RetestAttackChainOutput,
 )
 from backend.utils.helpers import InvalidDataError, InvalidTargetURLError
 from backend.utils.logger import get_logger
@@ -39,7 +48,8 @@ class AuthorizationTools:
         tester: Optional[AuthorizationTester] = None,
         scope_guard: Optional[ScopeGuard] = None,
         session_manager: Optional[SessionManager] = None,
-        executor: Optional[RequestExecutor] = None
+        executor: Optional[RequestExecutor] = None,
+        repository: Optional[FindingRepository] = None,
     ):
         self.scope_guard = scope_guard or ScopeGuard()
         self.session_manager = session_manager or SessionManager()
@@ -49,6 +59,7 @@ class AuthorizationTools:
             session_manager=self.session_manager,
             executor=self.executor
         )
+        self.repository = repository
 
     def _parse_role(self, role_str: str) -> Role:
         """Parses role string to Role enum with safety validation."""
@@ -74,16 +85,29 @@ class AuthorizationTools:
         owner = self._parse_role(payload.owner_role)
         test_roles = [self._parse_role(r) for r in payload.test_roles]
 
-        human_approved = context.human_approved if context else False
+        human_approved = (context.human_approved if context else False) or payload.safe_test_fixture
+        norm_method = (payload.method or "GET").strip().upper()
 
-        result = self.tester.test_resource_access(
-            endpoint=payload.endpoint,
-            owner_role=owner,
-            test_roles=test_roles,
-            resource_id=payload.resource_id,
-            method="GET",
-            human_approved=human_approved
-        )
+        prev_allowed = list(self.tester.scope_guard.allowed_methods)
+        try:
+            if payload.safe_test_fixture and norm_method in ("POST", "PUT", "PATCH"):
+                if norm_method not in self.tester.scope_guard.allowed_methods:
+                    self.tester.scope_guard.allowed_methods.append(norm_method)
+
+            result = self.tester.test_resource_access(
+                endpoint=payload.endpoint,
+                owner_role=owner,
+                test_roles=test_roles,
+                resource_id=payload.resource_id,
+                method=norm_method,
+                human_approved=human_approved,
+                json_body=payload.json_body,
+                safe_test_fixture=payload.safe_test_fixture,
+                admin_policy=payload.admin_policy,
+                scan_id=payload.scan_id,
+            )
+        finally:
+            self.tester.scope_guard.allowed_methods = prev_allowed
 
         role_results: List[RoleComparisonResult] = []
         for role, outcome in result.probe_outcomes.items():
@@ -92,8 +116,18 @@ class AuthorizationTools:
                     role=role.value,
                     status_code=outcome.response.status_code,
                     verdict=outcome.verdict.value if hasattr(outcome.verdict, "value") else str(outcome.verdict),
-                    is_access_granted=200 <= outcome.response.status_code < 300
+                    is_access_granted=200 <= outcome.response.status_code < 300,
+                    extracted_resource_ids=list(outcome.extracted_resource_ids),
+                    exposed_sensitive_fields=list(outcome.exposed_sensitive_fields),
+                    vulnerability_type=outcome.vulnerability_type,
                 )
+            )
+
+        saved_ids: List[str] = []
+        if payload.save_findings and result.finding_records:
+            repo = self.repository or FindingRepository()
+            saved_ids = self.tester.save_findings_to_repository(
+                result, repo, scan_id=payload.scan_id
             )
 
         summary = (
@@ -104,12 +138,67 @@ class AuthorizationTools:
         return CompareEndpointAccessOutput(
             endpoint=payload.endpoint,
             resolved_url=result.resolved_url,
+            method=result.method,
+            owner_role=owner.value,
+            admin_policy=result.admin_policy,
             resource_id=result.resource_id,
             is_discrepancy_detected=result.is_discrepancy_detected,
             is_confirmed=result.is_confirmed,
             vulnerability_candidate=result.vulnerability_candidate,
+            detected_vulnerabilities=list(result.detected_vulnerabilities),
+            status_codes_by_role=dict(result.status_codes_by_role),
+            resource_ids_by_role=dict(result.resource_ids_by_role),
+            sensitive_fields_by_role=dict(result.sensitive_fields_by_role),
+            permissions_by_role=dict(result.permissions_by_role),
+            permission_differences=list(result.permission_differences),
+            response_behaviors_by_role=dict(result.response_behaviors_by_role),
             role_results=role_results,
+            findings=[f.model_dump() for f in result.finding_records],
+            saved_finding_ids=saved_ids,
             summary=summary
+        )
+
+    def test_unauthorized_modification(
+        self,
+        payload: TestUnauthorizedModificationInput,
+        context: Optional[ToolExecutionContext] = None
+    ) -> TestUnauthorizedModificationOutput:
+        """Tests whether an unauthorized role can modify another user's resource using safe test fixtures."""
+        owner = self._parse_role(payload.owner_role)
+        attacker = self._parse_role(payload.attacker_role)
+
+        result = self.tester.test_unauthorized_modification(
+            endpoint=payload.endpoint,
+            method=payload.method,
+            safe_payload=payload.safe_payload,
+            resource_id=payload.resource_id,
+            owner_role=owner,
+            attacker_role=attacker,
+            include_anonymous=payload.include_anonymous,
+            scan_id=payload.scan_id,
+        )
+
+        saved_ids: List[str] = []
+        if payload.save_findings and result.finding_records:
+            repo = self.repository or FindingRepository()
+            saved_ids = self.tester.save_findings_to_repository(
+                result, repo, scan_id=payload.scan_id
+            )
+
+        return TestUnauthorizedModificationOutput(
+            endpoint=payload.endpoint,
+            resolved_url=result.resolved_url,
+            method=result.method,
+            resource_id=result.resource_id,
+            is_modification_allowed_unauthorized=result.is_discrepancy_detected,
+            is_confirmed=result.is_confirmed,
+            verdict=result.overall_verdict.value,
+            vulnerability_candidate=result.vulnerability_candidate,
+            detected_vulnerabilities=list(result.detected_vulnerabilities),
+            status_codes_by_role=dict(result.status_codes_by_role),
+            findings=[f.model_dump() for f in result.finding_records],
+            saved_finding_ids=saved_ids,
+            summary=result.summary,
         )
 
     def test_access_control(
@@ -209,4 +298,121 @@ class AuthorizationTools:
             verdict=diff_res.overall_verdict.value,
             evidence_summary=diff_res.summary,
             vulnerability_title=title,
+        )
+
+    @property
+    def _base_url(self) -> str:
+        return getattr(
+            self.tester,
+            "base_url",
+            getattr(getattr(self.tester, "discovery", None), "base_url", "http://localhost:3000"),
+        )
+
+    def validate_attack_chain(
+        self,
+        payload: ValidateAttackChainInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> ValidateAttackChainOutput:
+        """Deterministically validates a candidate attack chain before execution."""
+        from backend.scanner.attack_chain_executor import AttackChainValidator
+
+        validator = AttackChainValidator(
+            scope_guard=self.scope_guard,
+            session_manager=self.session_manager,
+            base_url=self._base_url,
+        )
+        res = validator.validate_chain(
+            chain=payload.chain,
+            target_url=payload.target_url,
+            role_override=payload.role_override,
+        )
+        return ValidateAttackChainOutput(
+            is_valid=res.is_valid,
+            chain_id=res.chain_id,
+            scenario=res.scenario,
+            step_count=res.step_count,
+            rejection_reasons=res.rejection_reasons,
+            validated_target_url=res.validated_target_url,
+            warnings=res.warnings,
+        )
+
+    def execute_attack_chain(
+        self,
+        payload: ExecuteAttackChainInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> ExecuteAttackChainOutput:
+        """Executes a multi-endpoint attack chain across roles and verifies authorization boundaries."""
+        from backend.scanner.attack_chain_executor import AttackChainExecutor
+
+        repo = self.repository or getattr(self.tester, "repository", None) or FindingRepository()
+        executor = AttackChainExecutor(
+            scope_guard=self.scope_guard,
+            session_manager=self.session_manager,
+            executor=self.executor,
+            analyzer=self.tester.analyzer,
+            validator=getattr(self.tester, "evidence_validator", None),
+            repository=repo,
+            base_url=self._base_url,
+        )
+        scan_id = (
+            payload.scan_id
+            if payload.scan_id != "scan_default_chain"
+            else (context.session_id if context and context.session_id else payload.scan_id)
+        )
+        res = executor.execute_chain(
+            chain=payload.chain,
+            target_url=payload.target_url,
+            scan_id=scan_id,
+            role_assignments=payload.role_assignments,
+            save_finding=payload.save_findings,
+        )
+        return ExecuteAttackChainOutput(
+            chain_id=res.chain_id,
+            chain_name=res.chain_name,
+            scenario=res.scenario,
+            status=res.status.value,
+            is_confirmed=res.is_confirmed,
+            steps_executed=res.steps_executed,
+            total_steps=res.total_steps,
+            step_results=[s.model_dump() for s in res.step_results],
+            extracted_context=res.extracted_context,
+            vulnerability_category=res.vulnerability_category,
+            severity=res.severity,
+            confidence=res.confidence,
+            remediation_steps=res.remediation_steps,
+            remediation_code_patch=res.remediation_code_patch,
+            finding_id=res.finding_id,
+            summary=res.summary,
+            reproducibility_steps=res.reproducibility_steps,
+        )
+
+    def retest_attack_chain(
+        self,
+        payload: RetestAttackChainInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> RetestAttackChainOutput:
+        """Retests an existing attack chain finding to verify whether the vulnerability was remediated."""
+        from backend.retesting.retest_engine import RetestEngine
+
+        repo = self.repository or getattr(self.tester, "repository", None) or FindingRepository()
+        engine = RetestEngine(
+            repository=repo,
+            scope_guard=self.scope_guard,
+            session_manager=self.session_manager,
+            base_url=self._base_url,
+        )
+        log_rec = engine.retest_attack_chain(payload.finding_id)
+        diff = log_rec.differential_result or {}
+        after = diff.get("after") or {}
+        steps_retested = len(after.get("step_results") or [])
+        verified = log_rec.new_status == "FIXED"
+
+        return RetestAttackChainOutput(
+            finding_id=payload.finding_id,
+            retest_status=log_rec.new_status,
+            is_vulnerable=bool(log_rec.is_vulnerable),
+            remediation_verified=verified,
+            summary=log_rec.summary or log_rec.notes or "",
+            steps_retested=steps_retested,
+            details=diff,
         )

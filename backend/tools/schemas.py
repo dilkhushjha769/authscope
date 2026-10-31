@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Union
 import uuid
 from pydantic import BaseModel, ConfigDict, Field
+from backend.agent.attack_chain import AttackChainPlan
 
 
 # ==============================================================================
@@ -162,6 +163,18 @@ class DiscoverEndpointsOutput(BaseModel):
     endpoints: List[DiscoveredEndpointSummary]
 
 
+class PlanAttackChainsInput(BaseModel):
+    """Bounded deterministic chain planning request for a persisted assessment."""
+    max_steps: int = Field(default=5, ge=2, le=5)
+    max_candidates: int = Field(default=25, ge=1, le=100)
+
+
+class PlanAttackChainsOutput(BaseModel):
+    """Unverified candidate plans; never an authorization or execution result."""
+    assessment_id: str
+    plan: AttackChainPlan
+
+
 class InspectEndpointInput(BaseModel):
     """Input for safely inspecting a permitted GET/HEAD endpoint."""
     url: str = Field(..., description="Full URL or relative path on authorized target")
@@ -224,6 +237,24 @@ class CompareEndpointAccessInput(BaseModel):
         description="Roles to test against primary owner"
     )
     owner_role: str = Field(default="USER_A", description="Legitimate resource owner role")
+    method: str = Field(default="GET", description="HTTP method (GET, POST, PUT, PATCH)")
+    json_body: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional non-destructive JSON payload for safe modification testing"
+    )
+    admin_policy: str = Field(
+        default="policy_dependent",
+        description="Admin access policy: 'allowed', 'denied', or 'policy_dependent'"
+    )
+    safe_test_fixture: bool = Field(
+        default=False,
+        description="True when testing a controlled non-destructive modification fixture"
+    )
+    save_findings: bool = Field(
+        default=False,
+        description="Whether to persist generated FindingRecords to FindingRepository"
+    )
+    scan_id: str = Field(default="default_scan", description="Assessment/scan session identifier")
 
 
 class RoleComparisonResult(BaseModel):
@@ -232,17 +263,67 @@ class RoleComparisonResult(BaseModel):
     status_code: int
     verdict: str
     is_access_granted: bool
+    extracted_resource_ids: List[str] = Field(default_factory=list)
+    exposed_sensitive_fields: List[str] = Field(default_factory=list)
+    vulnerability_type: Optional[str] = None
 
 
 class CompareEndpointAccessOutput(BaseModel):
     """Output of multi-role authorization-differential testing."""
     endpoint: str
     resolved_url: str
+    method: str = "GET"
+    owner_role: str = "user_a"
+    admin_policy: str = "policy_dependent"
     resource_id: Optional[str] = None
     is_discrepancy_detected: bool
     is_confirmed: bool
     vulnerability_candidate: Optional[str] = None
+    detected_vulnerabilities: List[str] = Field(default_factory=list)
+    status_codes_by_role: Dict[str, int] = Field(default_factory=dict)
+    resource_ids_by_role: Dict[str, List[str]] = Field(default_factory=dict)
+    sensitive_fields_by_role: Dict[str, List[str]] = Field(default_factory=dict)
+    permissions_by_role: Dict[str, List[str]] = Field(default_factory=dict)
+    permission_differences: List[str] = Field(default_factory=list)
+    response_behaviors_by_role: Dict[str, str] = Field(default_factory=dict)
     role_results: List[RoleComparisonResult]
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    saved_finding_ids: List[str] = Field(default_factory=list)
+    summary: str
+
+
+class TestUnauthorizedModificationInput(BaseModel):
+    """Input for non-destructive modification authorization testing using safe test fixtures."""
+    __test__ = False
+    endpoint: str = Field(..., description="Target endpoint path (e.g. /api/BasketItems/1)")
+    method: str = Field(default="PUT", description="Non-destructive modification verb: POST, PUT, or PATCH")
+    safe_payload: Dict[str, Any] = Field(
+        default_factory=lambda: {"test_fixture": True, "note": "authscope_non_destructive_probe"},
+        description="Benign non-destructive modification payload"
+    )
+    resource_id: Optional[str] = Field(default=None, description="Resource ID owned by owner_role")
+    owner_role: str = Field(default="USER_A", description="Legitimate owner role")
+    attacker_role: str = Field(default="USER_B", description="Unauthorized role attempting modification")
+    include_anonymous: bool = Field(default=True, description="Also test unauthenticated modification")
+    save_findings: bool = Field(default=False, description="Whether to persist findings to SQLite")
+    scan_id: str = Field(default="default_scan", description="Assessment/scan session ID")
+
+
+class TestUnauthorizedModificationOutput(BaseModel):
+    """Output of non-destructive modification authorization test."""
+    __test__ = False
+    endpoint: str
+    resolved_url: str
+    method: str
+    resource_id: Optional[str] = None
+    is_modification_allowed_unauthorized: bool
+    is_confirmed: bool
+    verdict: str
+    vulnerability_candidate: Optional[str] = None
+    detected_vulnerabilities: List[str] = Field(default_factory=list)
+    status_codes_by_role: Dict[str, int] = Field(default_factory=dict)
+    findings: List[Dict[str, Any]] = Field(default_factory=list)
+    saved_finding_ids: List[str] = Field(default_factory=list)
     summary: str
 
 
@@ -451,6 +532,65 @@ class GetAssessmentSummaryOutput(BaseModel):
     endpoints_tested: int
 
 
+class SaveFindingInput(BaseModel):
+    """Input for persisting a validated finding and its sanitized evidence to SQLite."""
+    finding_id: Optional[str] = Field(default=None, description="Unique finding ID")
+    scan_id: str = Field(default="default_scan", description="Scan session identifier")
+    title: str = Field(..., description="Finding title")
+    vulnerability_type: str = Field(default="BOLA_IDOR", description="Vulnerability classification")
+    endpoint: str = Field(..., description="Affected endpoint path")
+    http_method: str = Field(default="GET", description="HTTP method tested")
+    testing_role: str = Field(default="user_b", description="Role that triggered the finding")
+    owner_role: str = Field(default="user_a", description="Legitimate resource owner role")
+    resource_id: Optional[str] = Field(default=None, description="Tested resource ID")
+    status_code: int = Field(default=200, description="Observed HTTP status code")
+    request_url: Optional[str] = Field(default=None, description="Full request URL")
+    request_headers: Dict[str, str] = Field(default_factory=dict, description="Request headers (will be redacted)")
+    response_headers: Dict[str, str] = Field(default_factory=dict, description="Response headers (will be redacted)")
+    response_excerpt: str = Field(default="", description="Response body excerpt (will be sanitized)")
+    expected_behavior: str = Field(
+        default="Unauthorized role should be denied with HTTP 401/403.",
+        description="Expected authorization behavior"
+    )
+    actual_behavior: str = Field(
+        default="Unauthorized role received protected resource payload.",
+        description="Observed authorization behavior"
+    )
+    explanation: Optional[str] = Field(default=None, description="Explanation of the security issue")
+    reproducibility_steps: List[str] = Field(default_factory=list, description="Steps to reproduce")
+    severity: str = Field(default="HIGH", description="Risk severity rating")
+    is_confirmed: bool = Field(default=True, description="Whether evidence is confirmed")
+
+
+class SaveFindingOutput(BaseModel):
+    """Output of persisting a finding and evidence to SQLite."""
+    finding_id: str
+    evidence_id: str
+    evidence_sha256: str
+    scan_id: str
+    saved: bool
+    validation_status: str
+    summary: str
+
+
+class RetestFindingInput(BaseModel):
+    """Input for retesting an existing finding to verify remediation."""
+    finding_id: str = Field(..., description="ID of the persisted finding to retest")
+
+
+class RetestFindingOutput(BaseModel):
+    """Output of automated finding retest."""
+    finding_id: str
+    target_endpoint: str
+    retested_roles: List[str] = Field(default_factory=list)
+    previous_status: str
+    new_finding_status: str
+    new_verdict: str
+    remediation_verified: bool
+    is_still_vulnerable: bool
+    summary: str
+
+
 # --- 5. Sprint 2: Auth, Session, Headers, CORS & Transport Schemas ---
 
 
@@ -559,3 +699,77 @@ class RunMisconfigurationScanOutput(BaseModel):
     suppressed_duplicates_count: int
     categories: Dict[str, Any]
     findings: List[Dict[str, Any]]
+
+
+
+# ==============================================================================
+# Attack Chain Execution & Verification Schemas (Member 2)
+# ==============================================================================
+
+
+class ValidateAttackChainInput(BaseModel):
+    """Input for deterministic pre-execution validation of an attack chain."""
+    chain: Dict[str, Any] = Field(..., description="Candidate attack chain structure from planner or generator")
+    target_url: Optional[str] = Field(default=None, description="Explicit target base URL override")
+    role_override: Optional[str] = Field(default=None, description="Optional role session override to validate")
+
+
+class ValidateAttackChainOutput(BaseModel):
+    """Output of pre-execution chain validation."""
+    is_valid: bool
+    chain_id: str
+    scenario: str
+    step_count: int
+    rejection_reasons: List[str] = Field(default_factory=list)
+    validated_target_url: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+
+
+class ExecuteAttackChainInput(BaseModel):
+    """Input for executing a validated multi-step attack chain across roles."""
+    chain: Dict[str, Any] = Field(..., description="Validated candidate attack chain from planner")
+    target_url: Optional[str] = Field(default=None, description="Target base URL override")
+    scan_id: str = Field(default="scan_default_chain", description="Active assessment scan ID")
+    role_assignments: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Optional mapping of step_id to testing role (e.g. {'step-1': 'user_a', 'step-2': 'user_b'})"
+    )
+    save_findings: bool = Field(default=True, description="Whether to persist confirmed findings and evidence to SQLite")
+
+
+class ExecuteAttackChainOutput(BaseModel):
+    """Output of multi-step attack chain execution and authorization verification."""
+    chain_id: str
+    chain_name: str
+    scenario: str
+    status: str
+    is_confirmed: bool
+    steps_executed: int
+    total_steps: int
+    step_results: List[Dict[str, Any]] = Field(default_factory=list)
+    extracted_context: Dict[str, str] = Field(default_factory=dict)
+    vulnerability_category: str
+    severity: str
+    confidence: str
+    remediation_steps: List[str] = Field(default_factory=list)
+    remediation_code_patch: Optional[str] = None
+    finding_id: Optional[str] = None
+    summary: str
+    reproducibility_steps: List[str] = Field(default_factory=list)
+
+
+class RetestAttackChainInput(BaseModel):
+    """Input for retesting an existing attack chain finding."""
+    finding_id: str = Field(..., description="ID of the chain finding to retest")
+    scan_id: Optional[str] = Field(default=None, description="Assessment scan ID context")
+
+
+class RetestAttackChainOutput(BaseModel):
+    """Output of attack chain retest verification."""
+    finding_id: str
+    retest_status: str
+    is_vulnerable: bool
+    remediation_verified: bool
+    summary: str
+    steps_retested: int
+    details: Dict[str, Any] = Field(default_factory=dict)

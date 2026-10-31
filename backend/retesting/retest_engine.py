@@ -48,6 +48,13 @@ class RetestEngine:
         if finding is None:
             return self._record(finding_id, "NOT_TESTED", "The original finding could not be loaded.")
 
+        # Dispatch multi-step attack chains to chain retest engine
+        if (
+            finding.vulnerability_category == "MULTI_STEP_CHAIN"
+            or (finding.technical_details and "chain_id" in finding.technical_details)
+        ):
+            return self.retest_attack_chain(finding_id)
+
         original = finding.evidence
         if not original or not original.request_url or not original.evidence_sha256:
             return self._record(
@@ -162,6 +169,128 @@ class RetestEngine:
             "regression_checks": regression_checks,
         }
         summary = self._explanation(status, before, after)
+        return self._record(finding_id, status, summary, previous_status=finding.status, detail=details)
+
+    def retest_attack_chain(self, finding_id: str) -> RetestLogRecord:
+        """Replays a multi-endpoint attack chain sequence to verify whether the vulnerability is fixed."""
+        finding = self.repository.get_finding(finding_id)
+        if finding is None:
+            return self._record(finding_id, "NOT_TESTED", "The original finding could not be loaded.")
+
+        tech_details = finding.technical_details or {}
+        steps_data = tech_details.get("steps") or []
+        chain_id = tech_details.get("chain_id") or finding_id
+        if not steps_data or len(steps_data) < 2:
+            return self._record(
+                finding_id,
+                "INCONCLUSIVE",
+                "Original attack chain step telemetry is incomplete or missing.",
+                previous_status=finding.status,
+            )
+
+        assessment_scope = self._assessment_scope(finding)
+        if assessment_scope is None:
+            return self._record(
+                finding_id,
+                "NOT_TESTED",
+                "The assessment has no active authorized target profile; no request was sent.",
+                previous_status=finding.status,
+            )
+
+        from backend.scanner.attack_chain_executor import (
+            AttackChainExecutor,
+            ChainExecutionStatus,
+            StepExecutionStatus,
+        )
+
+        target_base_url = getattr(
+            self.tester,
+            "base_url",
+            getattr(getattr(self.tester, "discovery", None), "base_url", "http://localhost:3000"),
+        )
+        executor = AttackChainExecutor(
+            scope_guard=assessment_scope,
+            session_manager=self.session_manager,
+            executor=self.tester.executor,
+            analyzer=self.tester.analyzer,
+            validator=getattr(self.tester, "evidence_validator", None),
+            repository=self.repository,
+            base_url=target_base_url,
+        )
+
+        candidate_dict = {
+            "candidate_id": chain_id,
+            "scenario": tech_details.get("scenario") or finding.vulnerability_type,
+            "chain_name": tech_details.get("chain_name") or finding.title,
+            "steps": steps_data,
+        }
+
+        retest_run = executor.execute_chain(
+            chain=candidate_dict,
+            target_url=target_base_url,
+            scan_id=finding.scan_id,
+            save_finding=False,
+        )
+
+        vulnerable_step_id = tech_details.get("vulnerable_step_id")
+        orig_vulnerable_step = next(
+            (s for s in steps_data if s.get("step_id") == vulnerable_step_id),
+            steps_data[-1] if steps_data else None,
+        )
+
+        before_summary = {
+            "chain_id": chain_id,
+            "vulnerable_step_id": vulnerable_step_id,
+            "vulnerable_endpoint": orig_vulnerable_step.get("endpoint_path") if orig_vulnerable_step else None,
+            "method": orig_vulnerable_step.get("method") if orig_vulnerable_step else None,
+            "role_used": orig_vulnerable_step.get("role_used") if orig_vulnerable_step else None,
+            "original_status": orig_vulnerable_step.get("status_code") if orig_vulnerable_step else None,
+            "finding_status": str(getattr(finding.status, "value", finding.status)),
+        }
+
+        after_summary = {
+            "status": retest_run.status.value,
+            "steps_executed": retest_run.steps_executed,
+            "step_results": [
+                {
+                    "step_id": s.step_id,
+                    "endpoint": s.endpoint_path,
+                    "role": s.role_used,
+                    "status_code": s.status_code,
+                    "verdict": s.verdict.value,
+                }
+                for s in retest_run.step_results
+            ],
+        }
+
+        if retest_run.status == ChainExecutionStatus.CONFIRMED:
+            status = "STILL VULNERABLE"
+            summary = "The tested attack chain still demonstrated unauthorized cross-user access. The vulnerability remains."
+        elif retest_run.status == ChainExecutionStatus.NOT_VULNERABLE:
+            status = "FIXED"
+            summary = "The attack chain baseline was validated, but subsequent unauthorized requests were correctly denied. The attack chain issue is fixed."
+        elif retest_run.status in (ChainExecutionStatus.BLOCKED_BY_SCOPE, ChainExecutionStatus.BLOCKED_BY_SAFETY):
+            status = "NOT_TESTED"
+            summary = f"Chain retest was blocked: {retest_run.summary}"
+        else:
+            status = "INCONCLUSIVE"
+            summary = "The chain retest did not collect conclusive evidence."
+
+        if status == "FIXED":
+            finding.status = "remediated"
+            finding.confirmation_status = "remediated"
+            finding.retest_status = "fixed"
+        elif status in {"STILL VULNERABLE", "PARTIALLY FIXED"}:
+            finding.retest_status = status.lower()
+        else:
+            finding.retest_status = status.lower()
+        self.repository.save_finding(finding)
+
+        details = {
+            "before": before_summary,
+            "after": after_summary,
+            "chain_execution": retest_run.model_dump(),
+        }
         return self._record(finding_id, status, summary, previous_status=finding.status, detail=details)
 
     def _sign_denial_evidence(self, finding: Any, original: Any, owner: Role, tester_role: Role, probe: Any) -> dict[str, Any] | None:

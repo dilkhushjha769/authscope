@@ -27,13 +27,21 @@ CANONICAL_ALIASES: Dict[str, str] = {
     "compare_authorization": "compare_endpoint_access",
     "test_authorization": "compare_endpoint_access",
     "compare_access": "compare_endpoint_access",
+    "test_four_role_access": "compare_endpoint_access",
+    "compare_four_roles": "compare_endpoint_access",
     "test_access": "test_access_control",
     "check_scope": "validate_target",
     "verify_scope": "validate_target",
     "test_idor": "detect_idor",
     "test_bola": "detect_idor",
     "test_bfla": "test_bfla",
+    "test_modification": "test_unauthorized_modification",
+    "test_unauthorized_modification": "test_unauthorized_modification",
     "verify_evidence": "validate_evidence",
+    "save_evidence": "save_finding",
+    "persist_finding": "save_finding",
+    "retest": "retest_finding",
+    "verify_remediation": "retest_finding",
     "test_authentication": "check_authentication_weaknesses",
     "inspect_authentication": "check_authentication_weaknesses",
     "test_session_security": "check_session_security",
@@ -46,6 +54,9 @@ CANONICAL_ALIASES: Dict[str, str] = {
     "test_https": "check_transport_security",
     "check_transport": "check_transport_security",
     "scan_misconfigurations": "run_security_misconfiguration_scan",
+    "run_attack_chain": "execute_attack_chain",
+    "test_attack_chain": "execute_attack_chain",
+    "verify_attack_chain": "retest_attack_chain",
 }
 
 
@@ -104,9 +115,9 @@ class ToolRegistryAdapter:
         if context is None and assessment_id:
             context = {"assessment_id": assessment_id}
 
-        if context is None and assessment_id:
-            context = {"assessment_id": assessment_id}
-
+        if context is None and assessment_id:
+            context = {"assessment_id": assessment_id}
+
         # Resolve aliases
         effective_name = CANONICAL_ALIASES.get(tool_name, tool_name)
 

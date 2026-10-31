@@ -39,6 +39,8 @@ from backend.tools.schemas import (
     DetectIdorOutput,
     DiscoverEndpointsInput,
     DiscoverEndpointsOutput,
+    PlanAttackChainsInput,
+    PlanAttackChainsOutput,
     EvidenceValidatedEvent,
     ExplainFindingInput,
     ExplainFindingOutput,
@@ -54,10 +56,22 @@ from backend.tools.schemas import (
     MapEndpointToCodeOutput,
     ProbeAccessControlInput,
     ProbeAccessControlOutput,
+    RetestFindingInput,
+    RetestFindingOutput,
+    SaveFindingInput,
+    SaveFindingOutput,
     TestAccessControlInput,
     TestAccessControlOutput,
     TestBflaInput,
     TestBflaOutput,
+    TestUnauthorizedModificationInput,
+    TestUnauthorizedModificationOutput,
+    ValidateAttackChainInput,
+    ValidateAttackChainOutput,
+    ExecuteAttackChainInput,
+    ExecuteAttackChainOutput,
+    RetestAttackChainInput,
+    RetestAttackChainOutput,
     ToolCategory,
     ToolCompletedEvent,
     ToolEventBase,
@@ -396,6 +410,28 @@ class ToolRegistry:
             })
         return declarations
 
+    def _handle_plan_attack_chains(
+        self,
+        payload: PlanAttackChainsInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> PlanAttackChainsOutput:
+        """Plans only over persisted endpoints for the caller's active scan session."""
+        assessment_id = context.session_id if context else None
+        if not assessment_id:
+            raise InvalidDataError("An active assessment session is required to plan attack chains.")
+        session = self.report_tools.repository.get_scan_session(assessment_id)
+        if session is None:
+            raise InvalidDataError("The active assessment session was not found.")
+        endpoints = self.report_tools.repository.list_discovered_endpoints(assessment_id)
+        from backend.agent.attack_chain import AttackChainPlanner
+
+        plan = AttackChainPlanner().plan(
+            endpoints,
+            max_steps=payload.max_steps,
+            max_candidates=payload.max_candidates,
+        )
+        return PlanAttackChainsOutput(assessment_id=assessment_id, plan=plan)
+
     # --------------------------------------------------------------------------
     # Default Tool Registration
     # --------------------------------------------------------------------------
@@ -435,6 +471,16 @@ class ToolRegistry:
                 output_model=DiscoverEndpointsOutput,
                 handler=lambda args, ctx: self.website_tools.discover_endpoints(args, ctx),
                 requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="plan_attack_chains",
+                description="Builds ranked, unverified authorization chain candidates from endpoints discovered in the active assessment. Does not authorize or execute requests.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=PlanAttackChainsInput,
+                output_model=PlanAttackChainsOutput,
+                handler=self._handle_plan_attack_chains,
             )
         )
         self.register_tool(
@@ -605,6 +651,60 @@ class ToolRegistry:
                 requires_scope_check=True
             )
         )
+        self.register_tool(
+            ToolDefinition(
+                name="test_four_role_access",
+                description="Executes four-role authorization-differential testing across Anonymous, User A, User B, and Admin.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=CompareEndpointAccessInput,
+                output_model=CompareEndpointAccessOutput,
+                handler=lambda args, ctx: self.authorization_tools.compare_endpoint_access(args, ctx),
+                requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="test_unauthorized_modification",
+                description="Tests whether an unauthorized role can modify another user's resource using safe non-destructive test fixtures.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=TestUnauthorizedModificationInput,
+                output_model=TestUnauthorizedModificationOutput,
+                handler=lambda args, ctx: self.authorization_tools.test_unauthorized_modification(args, ctx),
+                requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="validate_attack_chain",
+                description="Deterministically validates an attack chain's endpoints, scope, methods, and dependencies prior to execution.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=ValidateAttackChainInput,
+                output_model=ValidateAttackChainOutput,
+                handler=lambda args, ctx: self.authorization_tools.validate_attack_chain(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="execute_attack_chain",
+                description="Executes a multi-endpoint attack chain across the four testing roles, binds parameters, and verifies authorization violations with evidence.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=ExecuteAttackChainInput,
+                output_model=ExecuteAttackChainOutput,
+                handler=lambda args, ctx: self.authorization_tools.execute_attack_chain(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="retest_attack_chain",
+                description="Replays an attack chain sequence to verify whether a previously confirmed finding has been fixed.",
+                category=ToolCategory.REPORTING,
+                input_model=RetestAttackChainInput,
+                output_model=RetestAttackChainOutput,
+                handler=lambda args, ctx: self.authorization_tools.retest_attack_chain(args, ctx),
+            )
+        )
 
         # 3. Source Analysis Tools
         self.register_tool(
@@ -667,5 +767,25 @@ class ToolRegistry:
                 input_model=GetAssessmentSummaryInput,
                 output_model=GetAssessmentSummaryOutput,
                 handler=lambda args, ctx: self.report_tools.get_assessment_summary(args, ctx)
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="save_finding",
+                description="Persists a validated finding and its signed, sanitized evidence artifact to SQLite.",
+                category=ToolCategory.REPORTING,
+                input_model=SaveFindingInput,
+                output_model=SaveFindingOutput,
+                handler=lambda args, ctx: self.report_tools.save_finding(args, ctx)
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="retest_finding",
+                description="Retests an existing finding across roles to verify whether remediation resolved the vulnerability.",
+                category=ToolCategory.REPORTING,
+                input_model=RetestFindingInput,
+                output_model=RetestFindingOutput,
+                handler=lambda args, ctx: self.report_tools.retest_finding(args, ctx)
             )
         )
