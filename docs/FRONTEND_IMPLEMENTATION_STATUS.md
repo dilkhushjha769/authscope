@@ -1,18 +1,22 @@
 # Frontend implementation status
 
-## GitHub repository scanning
+## GitHub source scanning
 
-**Status: waiting on backend contracts.** The current frontend shows a GitHub setup card, but the backend does not expose GitHub authorization, connection status, repository/branch discovery, source-scan creation, source-scan SSE, repository-scoped findings, or scan-history APIs. The existing `/api/assessments` and `/api/assessments/{assessment_id}/stream` contracts operate website assessments; `github_repo` is optional source context and is not an authenticated repository download flow.
+The main assessment screen includes `GitHubCodeScanPanel`, wired to the implemented FastAPI GitHub App endpoints. It supports:
 
-The frontend therefore does not initiate a fake OAuth flow, invent repository records, or reinterpret website-assessment SSE as source-scan progress. Once the backend developer publishes typed routes and response/event schemas, the UI can connect those contracts to the repository picker, commit-pinned scan, source finding cards, and history.
+- GitHub user authorization and connected-account display.
+- Separate GitHub App installation/repository authorization.
+- Accessible installation repositories, visibility and description, branch selection, and branch commit SHA.
+- Commit-pinned source scan creation and the real source-scan SSE activity stream.
+- Per-user scan history and commit-specific report loading.
+- Static source finding cards with source locations, exact GitHub commit links, AI explanations when available, copyable fixes, and an explicit `Runtime NOT TESTED` label.
+- Disconnect, reconnect, installation update, and readable configuration/permission/rate-limit/scan errors.
 
-## Available frontend behavior
+## Verified local URLs
 
-- Website assessments use the existing assessment API and real SSE events.
-- Finding cards display backend-provided plain-language explanations, status, risk, evidence, remediation and verified source locations when present.
-- A source archive may be supplied as optional assessment context.
-- The GitHub setup card explains the required read-only GitHub App permissions and deployment configuration. The repository URL input is explicitly marked as context only.
+- Next.js dev/start scripts bind port `3001`.
+- FastAPI run instructions bind port `8000`.
+- Default GitHub callback: `http://localhost:8000/api/github/callback`.
+- Default frontend origin: `http://localhost:3001`.
 
-## Contract checklist for the backend integration
-
-Before wiring the GitHub workflow, document and expose the actual authorization start/callback/disconnect contract, connection status, repository and branch response models, commit-pinned source scan request, scan progress and terminal SSE events, source finding model, history list/detail endpoints, and safe user-facing error codes. Include user isolation and token-handling guarantees. Then update this status document with the concrete routes and event schemas consumed by the frontend.
+Live OAuth still requires a GitHub App configured with the callback/setup URL and backend-only App credentials, slug, and Fernet key. The checked-in `.env.example` contains empty secret fields. Mocked integration tests do not use real credentials.

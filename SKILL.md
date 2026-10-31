@@ -23,7 +23,7 @@ Traditional web vulnerability scanners rely on brute-force fuzzing and signature
 
 ### Expected Outcomes
 - **Evidence-Driven Security:** Every reported vulnerability contains verified, reproducible HTTP request/response payloads and SHA-256 evidence integrity hashes.
-- **Strictly Contained:** Zero egress risk outside the explicit, authorized test target (default: local OWASP Juice Shop).
+- **Strictly Contained:** Assessment traffic stays within the explicit, authorized test target (default: local OWASP Juice Shop). Explicit account integrations use separate fixed-host provider allowlists and never expand assessment target scope.
 - **Actionable Remediation:** Pinpoint differential root cause analysis and concrete code remediation guidance.
 
 ---

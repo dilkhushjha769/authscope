@@ -85,6 +85,7 @@ flowchart TB
 - `backend.scanner.authorization_tester.AuthorizationTester`: Executes cross-role comparative matrix tests on target endpoints, generates raw diff metrics, and uniquely holds the authority to promote potential findings to `CONFIRMED_RUNTIME_VULNERABILITY` via `verify_potential_finding`.
 - `backend.analysis.evidence_validator.EvidenceValidator`: Sanitizes sensitive tokens, evaluates response status differences, and computes an SHA-256 checksum across request/response pairs.
 - `backend.analysis.severity_engine.SeverityEngine`: Applies an objective risk rubric based on data sensitivity and access level.
+- `backend.github_integration.GitHubAppService`: Separate fixed-host account provider client. It authorizes GitHub App users, validates installation access, retrieves bounded source blobs at a pinned commit, and invokes the existing offline source analyzer. Its GitHub-only `ScopeGuard` does not change target scan scope.
 
 ### Layer 3: AI Reasoning Layer
 - `backend.agent.agent.AuthScopeAgent`: Manages the agent loop, calling Claude 3.5 Sonnet with tool descriptions and system instructions.

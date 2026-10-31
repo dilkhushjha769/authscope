@@ -10,17 +10,22 @@ Provides HTTP REST and Server-Sent Events (SSE) endpoints streaming structured
 agent operational telemetry, thoughts, plans, tool actions, and validated findings.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import logging
+import re
 import uuid
 import asyncio
+import secrets
+import sqlite3
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.agent.gemini_agent import GeminiAgent
@@ -33,6 +38,14 @@ from backend.analysis.finding_review import FindingReviewService, ReviewProvider
 from backend.analysis.finding_chat import FindingChatRequest, FindingChatResponse, FindingChatService
 from backend.analysis.explanation_engine import ExplanationEngine
 from backend.config import settings
+from backend.github_integration import (
+    SESSION_COOKIE,
+    STATE_COOKIE,
+    GITHUB_API,
+    GitHubAppService,
+    GitHubIntegrationError,
+    new_random_value,
+)
 from backend.ai_agent.config import GeminiAgentConfig
 from backend.ai_agent.gemini_client import GeminiClient, GeminiClientException
 from backend.core.assessment_engine import (
@@ -49,6 +62,7 @@ from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict
 from backend.storage.database import DatabaseManager
 from backend.storage.finding_repository import FindingRepository
+from backend.storage.github_repository import GitHubRepository
 from backend.storage.models import (
     AssessmentEvent,
     AssessmentStage,
@@ -66,6 +80,25 @@ from backend.utils.helpers import redact_sensitive_text, sanitize_dict_or_list
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+class _GitHubCallbackAccessLogFilter(logging.Filter):
+    """Redacts one-time OAuth authorization codes and state from Uvicorn access logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        arguments = record.args
+        if isinstance(arguments, tuple):
+            record.args = tuple(
+                re.sub(r"(/api/github/callback)\?[^\s\"]*", r"\1?[REDACTED]", item)
+                if isinstance(item, str) else item
+                for item in arguments
+            )
+        return True
+
+
+_uvicorn_access_logger = logging.getLogger("uvicorn.access")
+if not any(isinstance(item, _GitHubCallbackAccessLogFilter) for item in _uvicorn_access_logger.filters):
+    _uvicorn_access_logger.addFilter(_GitHubCallbackAccessLogFilter())
 
 # Active background runners and cancellation tokens indexed by assessment_id
 active_tokens: Dict[str, CancellationToken] = {}
@@ -2100,6 +2133,384 @@ def health_check() -> Dict[str, Any]:
         "allowed_schemes": sorted(scope_guard.allowed_schemes),
         "ai_provider": _get_ai_provider_info(),
     }
+
+
+class GitHubScanRequest(BaseModel):
+    installation_id: int = Field(gt=0)
+    owner: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9-]+$")
+    repository: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    branch: str = Field(min_length=1, max_length=255)
+
+
+def _github_service() -> GitHubAppService:
+    service = getattr(app.state, "github_service", None)
+    if service is None:
+        service = GitHubAppService(repository=GitHubRepository())
+        app.state.github_service = service
+    return service
+
+
+def _github_repository() -> GitHubRepository:
+    repository = getattr(app.state, "github_repository", None)
+    if repository is None:
+        repository = GitHubRepository()
+        app.state.github_repository = repository
+    return repository
+
+
+def _github_user_id(request: Request) -> str:
+    session_value = request.cookies.get(SESSION_COOKIE, "")
+    if not session_value:
+        raise HTTPException(status_code=401, detail={"code": "GITHUB_NOT_CONNECTED", "message": "Connect GitHub to continue."})
+    user_id = _github_repository().get_session_user(GitHubAppService.hash_value(session_value))
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "GITHUB_SESSION_EXPIRED", "message": "Your GitHub session expired. Connect again."})
+    return user_id
+
+
+def _require_frontend_origin(request: Request) -> None:
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    expected = settings.github_frontend_url.rstrip("/")
+    if not origin or origin != expected:
+        raise HTTPException(status_code=403, detail={"code": "CSRF_REJECTED", "message": "Request origin was not accepted."})
+
+
+def _github_cookie_secure() -> bool:
+    return settings.github_session_cookie_secure or settings.authscope_env.lower() not in {"development", "dev", "local"}
+
+
+def _raise_github_error(exc: GitHubIntegrationError) -> None:
+    raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+def _github_redirect(status_value: str) -> RedirectResponse:
+    return RedirectResponse(f"{settings.github_frontend_url.rstrip('/')}/?github_status={quote(status_value)}", status_code=303)
+
+
+@app.get("/api/github/connect")
+async def github_connect() -> RedirectResponse:
+    """Starts the GitHub App user authorization flow with one-time, browser-bound state."""
+    service = _github_service()
+    try:
+        service.ensure_configured()
+    except GitHubIntegrationError:
+        return _github_redirect("not_configured")
+    state_value = new_random_value()
+    _github_repository().save_oauth_state(
+        service.hash_value(state_value), "oauth", (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    )
+    params = {
+        "client_id": settings.github_client_id,
+        "redirect_uri": settings.github_callback_url,
+        "state": state_value,
+        "scope": "offline_access",
+    }
+    response = RedirectResponse(f"https://github.com/login/oauth/authorize?{urlencode(params)}", status_code=302)
+    response.set_cookie(
+        STATE_COOKIE, state_value, max_age=600, httponly=True, secure=_github_cookie_secure(),
+        samesite="lax", path="/api/github",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/github/install")
+async def github_install(request: Request) -> RedirectResponse:
+    """Starts the distinct GitHub App installation flow for repository selection."""
+    user_id = _github_user_id(request)
+    service = _github_service()
+    try:
+        service.ensure_configured(require_app_slug=True)
+    except GitHubIntegrationError:
+        return _github_redirect("install_not_configured")
+    state_value = new_random_value()
+    _github_repository().save_oauth_state(
+        service.hash_value(state_value), "install", (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(), user_id
+    )
+    url = f"https://github.com/apps/{quote(settings.github_app_slug, safe='')}/installations/new?{urlencode({'state': state_value})}"
+    response = RedirectResponse(url, status_code=302)
+    response.set_cookie(
+        STATE_COOKIE, state_value, max_age=600, httponly=True, secure=_github_cookie_secure(),
+        samesite="lax", path="/api/github",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/github/callback")
+async def github_callback(
+    request: Request,
+    state: str = "",
+    code: Optional[str] = None,
+    error: Optional[str] = None,
+    installation_id: Optional[int] = None,
+    setup_action: Optional[str] = None,
+) -> RedirectResponse:
+    """Handles both the OAuth callback and GitHub App's separate install callback."""
+    state_cookie = request.cookies.get(STATE_COOKIE, "")
+    if not state or not state_cookie or not secrets.compare_digest(state, state_cookie):
+        response = _github_redirect("state_error")
+        response.delete_cookie(STATE_COOKIE, path="/api/github")
+        return response
+    service = _github_service()
+    repository = _github_repository()
+    state_hash = service.hash_value(state)
+    if installation_id is not None:
+        github_user_id = repository.consume_oauth_state(state_hash, "install")
+        if not github_user_id:
+            result = _github_redirect("install_state_error")
+        elif setup_action in {"install", "update"}:
+            try:
+                installs = await service.installations(github_user_id)
+                if not any(item["id"] == installation_id for item in installs):
+                    raise GitHubIntegrationError("GITHUB_INSTALLATION_UNAVAILABLE", "The completed installation is not accessible to this account.", 403)
+                result = _github_redirect("installed")
+            except GitHubIntegrationError:
+                result = _github_redirect("install_failed")
+        else:
+            result = _github_redirect("install_cancelled")
+        result.delete_cookie(STATE_COOKIE, path="/api/github")
+        return result
+    if error:
+        repository.consume_oauth_state(state_hash, "oauth")
+        result = _github_redirect("denied")
+        result.delete_cookie(STATE_COOKIE, path="/api/github")
+        return result
+    if not code:
+        result = _github_redirect("callback_error")
+        result.delete_cookie(STATE_COOKIE, path="/api/github")
+        return result
+    if not repository.consume_oauth_state(state_hash, "oauth"):
+        result = _github_redirect("state_error")
+        result.delete_cookie(STATE_COOKIE, path="/api/github")
+        return result
+    try:
+        token_data = await service.exchange_code(code)
+        access_token = str(token_data["access_token"])
+        profile = await service._profile(access_token)
+        user_id = str(profile["id"])
+        expires_in = int(token_data.get("expires_in") or 0)
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat() if expires_in else None
+        repository.save_connection(
+            user_id,
+            str(profile["login"]),
+            str(profile.get("avatar_url") or ""),
+            service.encrypt_credentials(access_token, str(token_data.get("refresh_token") or "")),
+            expires_at,
+        )
+        session_value = new_random_value()
+        repository.create_session(
+            service.hash_value(session_value), user_id,
+            (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        )
+        result = _github_redirect("connected")
+        result.set_cookie(
+            SESSION_COOKIE, session_value, max_age=7 * 24 * 60 * 60, httponly=True,
+            secure=_github_cookie_secure(), samesite="lax", path="/api/github",
+        )
+    except GitHubIntegrationError:
+        result = _github_redirect("connect_failed")
+    result.delete_cookie(STATE_COOKIE, path="/api/github")
+    result.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@app.get("/api/github/status")
+async def github_status(request: Request) -> Dict[str, Any]:
+    session_value = request.cookies.get(SESSION_COOKIE, "")
+    if not session_value:
+        return {"connected": False, "account": None, "installations": []}
+    user_id = _github_repository().get_session_user(GitHubAppService.hash_value(session_value))
+    if not user_id:
+        return {"connected": False, "account": None, "installations": []}
+    connection = _github_repository().get_connection(user_id)
+    if not connection:
+        return {"connected": False, "account": None, "installations": []}
+    expired = False
+    try:
+        installs = await _github_service().installations(user_id)
+    except GitHubIntegrationError as exc:
+        installs = _github_repository().list_installations(user_id)
+        expired = exc.code == "GITHUB_AUTH_EXPIRED"
+    return {
+        "connected": True,
+        "expired": expired,
+        "account": {"id": user_id, "login": connection["login"], "avatar_url": connection["avatar_url"]},
+        "installations": installs,
+    }
+
+
+@app.delete("/api/github/disconnect")
+async def github_disconnect(request: Request) -> Dict[str, Any]:
+    _require_frontend_origin(request)
+    user_id = _github_user_id(request)
+    service = _github_service()
+    connection = _github_repository().get_connection(user_id)
+    revoked = False
+    if connection:
+        try:
+            credentials = service.decrypt_credentials(str(connection["encrypted_credentials"]))
+            await service._request(
+                "DELETE", f"{GITHUB_API}/applications/{quote(settings.github_client_id, safe='')}/grant",
+                json_body={"access_token": credentials["access_token"]},
+                basic_auth=httpx.BasicAuth(settings.github_client_id, settings.github_client_secret),
+            )
+            revoked = True
+        except GitHubIntegrationError:
+            revoked = False
+        _github_repository().delete_connection(user_id)
+    response = JSONResponse({"connected": False, "revoked": revoked})
+    response.delete_cookie(SESSION_COOKIE, path="/api/github")
+    return response
+
+
+@app.get("/api/github/installations/{installation_id}/repositories")
+async def github_repositories(installation_id: int, request: Request) -> Dict[str, Any]:
+    user_id = _github_user_id(request)
+    try:
+        return {"repositories": await _github_service().list_repositories(user_id, installation_id)}
+    except GitHubIntegrationError as exc:
+        _raise_github_error(exc)
+
+
+@app.get("/api/github/installations/{installation_id}/repositories/{owner}/{repository}/branches")
+async def github_branches(installation_id: int, owner: str, repository: str, request: Request) -> Dict[str, Any]:
+    user_id = _github_user_id(request)
+    try:
+        return {"branches": await _github_service().branches(user_id, installation_id, owner, repository)}
+    except GitHubIntegrationError as exc:
+        _raise_github_error(exc)
+
+
+_github_background_tasks: Set[asyncio.Task[Any]] = set()
+
+
+async def _run_github_scan(scan: Dict[str, Any]) -> None:
+    repository = _github_repository()
+    service = _github_service()
+    scan_id = str(scan["id"])
+    user_id = str(scan["github_user_id"])
+
+    def event(event_type: str, stage: str, message: str, metadata: Dict[str, Any]) -> None:
+        repository.save_scan_event(scan_id, event_type, stage, redact_sensitive_text(message), metadata)
+
+    try:
+        event("activity", "repository_validation", "Connecting to GitHub...", {})
+        event("activity", "authorization", "Checking repository installation access...", {})
+        event("activity", "analysis", "Checking authentication and authorization...", {})
+        result = await asyncio.wait_for(
+            service.scan_repository(
+                user_id, int(scan["installation_id"]), str(scan["owner"]), str(scan["repository"]),
+                str(scan["branch"]), str(scan["commit_sha"]), scan_id, event,
+            ),
+            timeout=settings.assessment_timeout_seconds,
+        )
+        event("activity", "fixes", "Generating recommended fixes...", {"findings": len(result["findings"])})
+        repository.update_scan(
+            scan_id, user_id, "COMPLETED", findings=result["findings"], languages=result["languages"],
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        event("done", "completed", "Scan completed.", {"findings": len(result["findings"]), "commit_sha": scan["commit_sha"]})
+    except asyncio.TimeoutError:
+        repository.update_scan(
+            scan_id, user_id, "FAILED", error_code="SCAN_TIMEOUT",
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        event("error", "failed", "The scan exceeded the allowed duration.", {"code": "SCAN_TIMEOUT"})
+    except GitHubIntegrationError as exc:
+        repository.update_scan(
+            scan_id, user_id, "FAILED", error_code=exc.code,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        event("error", "failed", str(exc), {"code": exc.code})
+    except Exception as exc:
+        repository.update_scan(
+            scan_id, user_id, "FAILED", error_code="SCAN_FAILED",
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        event("error", "failed", "The source scan could not be completed.", {"code": "SCAN_FAILED"})
+        logger.error("GitHub source scan failed", extra={"scan_id": scan_id, "error_type": type(exc).__name__})
+
+
+@app.post("/api/github/scans", status_code=status.HTTP_202_ACCEPTED)
+async def github_start_scan(payload: GitHubScanRequest, request: Request) -> Dict[str, Any]:
+    _require_frontend_origin(request)
+    user_id = _github_user_id(request)
+    github_repository = _github_repository()
+    if github_repository.has_running_scan(user_id):
+        raise HTTPException(status_code=429, detail={"code": "SCAN_ALREADY_RUNNING", "message": "Wait for the current source scan to finish before starting another."})
+    service = _github_service()
+    try:
+        branches = await service.branches(user_id, payload.installation_id, payload.owner, payload.repository)
+    except GitHubIntegrationError as exc:
+        _raise_github_error(exc)
+    branch = next((item for item in branches if item["name"] == payload.branch), None)
+    if not branch:
+        raise HTTPException(status_code=404, detail={"code": "BRANCH_NOT_FOUND", "message": "The selected branch is no longer available."})
+    try:
+        repo_info = await service._assert_repo_installed(user_id, payload.installation_id, payload.owner, payload.repository)
+    except GitHubIntegrationError as exc:
+        _raise_github_error(exc)
+    scan_id = f"gscan_{uuid.uuid4().hex}"
+    scan = {
+        "id": scan_id, "github_user_id": user_id, "installation_id": payload.installation_id,
+        "repository_id": int(repo_info["id"]), "owner": payload.owner, "repository": payload.repository,
+        "branch": payload.branch, "commit_sha": branch["commit_sha"], "status": "RUNNING",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        github_repository.create_scan(scan)
+    except sqlite3.IntegrityError as exc:
+        if "idx_github_one_active_scan_per_user" in str(exc):
+            raise HTTPException(status_code=429, detail={"code": "SCAN_ALREADY_RUNNING", "message": "Wait for the current source scan to finish before starting another."}) from exc
+        raise
+    github_repository.save_scan_event(scan_id, "activity", "queued", "Scan queued.", {"commit_sha": branch["commit_sha"]})
+    task = asyncio.create_task(_run_github_scan(scan))
+    _github_background_tasks.add(task)
+    task.add_done_callback(_github_background_tasks.discard)
+    return {"scan_id": scan_id, "status": "RUNNING", "repository": repo_info["full_name"], "branch": payload.branch, "commit_sha": branch["commit_sha"]}
+
+
+@app.get("/api/github/scans")
+async def github_scan_history(request: Request) -> Dict[str, Any]:
+    user_id = _github_user_id(request)
+    return {"scans": _github_repository().list_scans(user_id)}
+
+
+@app.get("/api/github/scans/{scan_id}")
+async def github_scan_detail(scan_id: str, request: Request) -> Dict[str, Any]:
+    user_id = _github_user_id(request)
+    scan = _github_repository().get_scan(scan_id, user_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail={"code": "SCAN_NOT_FOUND", "message": "Source scan not found."})
+    return scan
+
+
+@app.get("/api/github/scans/{scan_id}/stream")
+async def github_scan_stream(scan_id: str, request: Request) -> StreamingResponse:
+    user_id = _github_user_id(request)
+    if not _github_repository().get_scan(scan_id, user_id):
+        raise HTTPException(status_code=404, detail={"code": "SCAN_NOT_FOUND", "message": "Source scan not found."})
+    try:
+        last_event_id = max(0, int(request.headers.get("last-event-id", "0")))
+    except ValueError:
+        last_event_id = 0
+
+    async def stream() -> AsyncGenerator[str, None]:
+        nonlocal last_event_id
+        while True:
+            if await request.is_disconnected():
+                break
+            for item in _github_repository().list_scan_events(scan_id, last_event_id):
+                last_event_id = int(item["id"])
+                yield f"id: {last_event_id}\nevent: {item['event_type']}\ndata: {json.dumps(item, ensure_ascii=True)}\n\n"
+            scan = _github_repository().get_scan(scan_id, user_id)
+            if not scan or scan["status"] in {"COMPLETED", "FAILED"}:
+                break
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/assessments", response_model=CreateAssessmentResponse, status_code=status.HTTP_201_CREATED)

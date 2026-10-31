@@ -474,4 +474,36 @@ def stream_assessment(
 # This endpoint is explanatory only and cannot change finding status or invoke security tools.
 ```
 
+### 10. GitHub App account and source scan APIs
+
+GitHub connection is a separate backend-authenticated user session. OAuth tokens and the client secret never appear in frontend responses. All connection-specific endpoints use an HTTP-only session cookie; mutating scan/disconnect requests require the configured frontend `Origin`.
+
+```text
+GET    /api/github/connect
+       Redirects to GitHub authorization with random one-use state.
+GET    /api/github/callback?code=...&state=...
+       Exchanges the code server-side, stores encrypted tokens and creates the user session.
+GET    /api/github/install
+       Redirects a connected user to the GitHub App installation page with separate state.
+GET    /api/github/callback?installation_id=...&setup_action=install&state=...
+       Validates the App installation callback against the user's accessible installations.
+GET    /api/github/status
+       {"connected": true, "expired": false, "account": {"id": "...", "login": "...", "avatar_url": "..."}, "installations": [...]}
+GET    /api/github/installations/{installation_id}/repositories
+       {"repositories": [{"id", "name", "full_name", "owner", "private", "description", "default_branch", "html_url"}]}
+GET    /api/github/installations/{installation_id}/repositories/{owner}/{repository}/branches
+       {"branches": [{"name": "main", "commit_sha": "..."}]}
+POST   /api/github/scans
+       {"installation_id": 1, "owner": "org", "repository": "repo", "branch": "main"}
+       202 {"scan_id": "gscan_...", "status": "RUNNING", "repository": "org/repo", "branch": "main", "commit_sha": "..."}
+GET    /api/github/scans/{scan_id}/stream
+       SSE event names: activity, done, error. Events are persisted and support Last-Event-ID.
+GET    /api/github/scans
+GET    /api/github/scans/{scan_id}
+DELETE /api/github/disconnect
+       Revokes the user authorization when possible, deletes local GitHub data, clears the session.
+```
+
+Source scan findings use the existing `SourceFinding` contract plus repository, branch, commit SHA, verified file/line link, advisory `ai_review`, `source_type=SOURCE_CODE_FINDING`, and immutable static status. `runtime_status` is `NOT_TESTED` until separately established by the runtime authorization engine. See `docs/GITHUB_SECURITY_SCANNING.md` for limits, error codes, and trust boundaries.
+
 

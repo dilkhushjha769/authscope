@@ -7,7 +7,8 @@ These rules represent immutable security requirements for AuthScope. No coding a
 ## 1. Absolute Scope Confinement
 - **Allowlist Enforced:** Every network request must pass through `ScopeGuard.validate_url()`.
 - **Default Target:** `http://localhost:3000` (OWASP Juice Shop).
-- **Prohibited Egress:** Any request attempting to contact cloud metadata services (`169.254.169.254`, `metadata.google.internal`), external networks, unapproved domains, or arbitrary local ports is blocked and logged as a security event.
+- **Prohibited Egress:** Any request attempting to contact cloud metadata services (`169.254.169.254`, `metadata.google.internal`), unapproved domains, or arbitrary local ports is blocked and logged as a security event.
+- **GitHub App Provider Exception:** The separate account-integration client may contact only `https://github.com` for OAuth and `https://api.github.com` for the GitHub App API. Each request passes through its dedicated exact-host `ScopeGuard`, uses HTTPS/443, disables redirects, and permits only the OAuth/API methods needed for this integration. This provider allowlist never expands the website assessment target scope.
 
 ## 2. No Dynamic Arbitrary Code Execution
 - The AI Agent is strictly prohibited from running shell commands, executing scripts, or evaluating arbitrary Python strings (`eval`, `exec`).

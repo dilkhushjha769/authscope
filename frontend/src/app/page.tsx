@@ -38,6 +38,7 @@ import {
 } from "@/types/assessment";
 import { AgentActivityPanel } from "@/components/AgentActivityPanel";
 import { FindingCard } from "@/components/FindingCard";
+import { GitHubCodeScanPanel } from "@/components/GitHubCodeScanPanel";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -141,7 +142,6 @@ export default function Home() {
   const [githubRepo, setGithubRepo] = useState<string>("");
   const [sourceArchive, setSourceArchive] = useState<File | null>(null);
   const [showAdvancedInputs, setShowAdvancedInputs] = useState<boolean>(false);
-  const [showGitHubSetup, setShowGitHubSetup] = useState<boolean>(false);
 
   // Assessment lifecycle states
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
@@ -1008,44 +1008,7 @@ export default function Home() {
                 </button>
               </div>
 
-              <section className="mt-4 rounded-xl border border-[#1E293B] bg-[#0F172A]/70 p-4 space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-100">
-                      <GitBranch className="h-4 w-4 text-blue-400" />
-                      Connect your GitHub repository
-                    </h2>
-                    <p className="mt-1 text-xs text-gray-400">
-                      Let AuthScope inspect your project&apos;s source code and find potential security problems.
-                    </p>
-                  </div>
-                  <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-medium text-amber-300">
-                    Not connected · backend setup required
-                  </span>
-                </div>
-                <p className="text-[11px] leading-relaxed text-gray-400">
-                  GitHub authorization and repository APIs are not available in the current backend. No password or personal access token is requested.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => setShowGitHubSetup((visible) => !visible)}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-blue-500/30 bg-blue-600/10 px-3 py-1.5 text-xs font-medium text-blue-300 transition-colors hover:bg-blue-600/20"
-                  aria-expanded={showGitHubSetup}
-                >
-                  <HelpCircle className="h-3.5 w-3.5" />
-                  {showGitHubSetup ? "Hide setup steps" : "Connect GitHub"}
-                </button>
-                {showGitHubSetup && (
-                  <ol className="list-decimal space-y-1.5 pl-5 text-[11px] leading-relaxed text-gray-300">
-                    <li>Create a GitHub App owned by your organization or account.</li>
-                    <li>Grant only <span className="font-mono text-gray-100">Metadata: read-only</span> and <span className="font-mono text-gray-100">Contents: read-only</span>; enable user authorization for repository discovery.</li>
-                    <li>Set the App callback URL to the backend OAuth callback URL for your deployment.</li>
-                    <li>Configure the App ID, client ID/secret, private key, and a token-encryption key as backend environment secrets. Never paste these into this form or commit them.</li>
-                    <li>Have the deployment owner explicitly allow the required GitHub OAuth/API hosts for this integration. AuthScope&apos;s current network policy only permits configured assessment targets.</li>
-                    <li>After backend OAuth and repository APIs are deployed, authorize, choose a repository and branch, then scan the displayed commit.</li>
-                  </ol>
-                )}
-              </section>
+              <GitHubCodeScanPanel apiBaseUrl={API_BASE_URL} />
 
               {/* Example URLs & Optional Source Context */}
               <div className="flex flex-wrap items-center justify-between gap-2 mt-3 text-xs text-gray-400">
