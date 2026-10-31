@@ -1,8 +1,7 @@
 """Deterministic Severity Assessment Engine for AuthScope.
 
 Calculates objective, evidence-supported vulnerability risk scores based on a
-transparent multi-factor scoring rubric.
-
+transparent multi-factor scoring rubric.   
 Scoring Factors:
 1. Data Sensitivity (0 - 4)
 2. Privilege Gained (0 - 3)
