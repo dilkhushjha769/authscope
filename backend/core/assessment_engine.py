@@ -890,7 +890,7 @@ class AssessmentEngine:
                         {
                             "finding_id": fnd.id,
                             "endpoint": fnd.target_endpoint,
-                            "severity": fnd.severity.value,
+                            "severity": fnd.severity.value if hasattr(fnd.severity, "value") else str(fnd.severity),
                             "sha256": fnd.evidence.evidence_sha256 if fnd.evidence else "",
                         },
                     )
@@ -1123,7 +1123,9 @@ class AssessmentQueryAdapter:
                 lines.append(f"- **Endpoint:** `{f.http_method} {f.target_endpoint}` (Resource ID: `{f.resource_id or 'N/A'}`)")
                 lines.append(f"- **Validation Status:** `{f.validation_status}` | **Verdict:** `{f.access_verdict}`")
                 if evi:
-                    lines.append(f"- **Roles:** Tested as `{evi.test_role.value}` vs. Authorized `{evi.authorized_role.value}`")
+                    t_role = evi.test_role.value if hasattr(evi.test_role, "value") else str(evi.test_role)
+                    a_role = evi.authorized_role.value if hasattr(evi.authorized_role, "value") else str(evi.authorized_role)
+                    lines.append(f"- **Roles:** Tested as `{t_role}` vs. Authorized `{a_role}`")
                     lines.append(f"- **Evidence SHA-256:** `{evi.evidence_sha256}`")
                     lines.append(f"- **Sanitized Response Excerpt (HTTP {evi.response_status}):**")
                     lines.append(f"```json\n{evi.sanitized_response_evidence[:600]}\n```")
@@ -1152,11 +1154,12 @@ class AssessmentQueryAdapter:
                 ),
             )
             top = ordered[0]
+            top_sev = top.severity.value if hasattr(top.severity, "value") else str(top.severity)
             lines = [
                 "**Remediation Priority Plan:**",
                 "",
                 f"1. **Top Priority:** `{top.title}` (`{top.http_method} {top.target_endpoint}`)",
-                f"   - **Severity:** `{top.severity.value}` | **Status:** `{top.validation_status}` (`{top.access_verdict}`)",
+                f"   - **Severity:** `{top_sev}` | **Status:** `{top.validation_status}` (`{top.access_verdict}`)",
                 f"   - **Issue:** {top.actual_behavior or top.description}",
                 "   - **Recommended Code Fix:**",
                 f"```javascript\n{top.remediation_guidance}\n```",
@@ -1165,8 +1168,9 @@ class AssessmentQueryAdapter:
                 lines.append("")
                 lines.append("**Subsequent Items:**")
                 for idx, item in enumerate(ordered[1:], start=2):
+                    item_sev = item.severity.value if hasattr(item.severity, "value") else str(item.severity)
                     lines.append(
-                        f"{idx}. `{item.http_method} {item.target_endpoint}` — `{item.severity.value}` (`{item.validation_status}`)"
+                        f"{idx}. `{item.http_method} {item.target_endpoint}` — `{item_sev}` (`{item.validation_status}`)"
                     )
             return "\n".join(lines)
 
@@ -1261,8 +1265,9 @@ class AssessmentQueryAdapter:
         if not confirmed:
             md.append("_No confirmed cross-account authorization vulnerabilities recorded in this run._")
         for f in confirmed:
+            f_sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
             md.extend([
-                f"### [{f.severity.value}] {f.title}",
+                f"### [{f_sev}] {f.title}",
                 f"- **Finding ID:** `{f.id}`",
                 f"- **Endpoint:** `{f.http_method} {f.target_endpoint}` (Resource ID: `{f.resource_id or 'N/A'}`)",
                 f"- **Access Verdict:** `{f.access_verdict}` (`Validation: {f.validation_status}`)",
@@ -1282,8 +1287,9 @@ class AssessmentQueryAdapter:
         if not suspicious:
             md.append("_No suspicious access behaviors recorded in this run._")
         for f in suspicious:
+            f_sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
             md.extend([
-                f"### [{f.severity.value}] {f.title}",
+                f"### [{f_sev}] {f.title}",
                 f"- **Finding ID:** `{f.id}`",
                 f"- **Endpoint:** `{f.http_method} {f.target_endpoint}`",
                 f"- **Access Verdict:** `{f.access_verdict}` (`Validation: {f.validation_status}`)",

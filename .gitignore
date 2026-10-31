@@ -32,8 +32,9 @@ venv.bak/
 
 # Environment Variables & Secrets
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+*.env
 *.pem
 *.key
 *.cert
@@ -67,4 +68,3 @@ Thumbs.db
 # Logs
 logs/
 *.log
-

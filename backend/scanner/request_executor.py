@@ -73,6 +73,26 @@ class RequestExecutor:
             headers={"User-Agent": "AuthScope-Security-Engine/0.1"}
         )
 
+    def execute(
+        self,
+        method: str = "GET",
+        url: str = "",
+        role: Role | str = Role.ANONYMOUS,
+        headers: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        json_body: Optional[Any] = None,
+        **kwargs,
+    ) -> HttpResponseModel:
+        """Alias for send_request for general execution."""
+        return self.send_request(
+            role=role,
+            method=method,
+            url=url,
+            params=params,
+            custom_headers=headers,
+            json_body=json_body,
+        )
+
     def send_request(
         self,
         role: Role | str = Role.ANONYMOUS,
