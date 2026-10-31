@@ -94,7 +94,9 @@ CREATE TABLE IF NOT EXISTS evidence_artifacts (
     id TEXT PRIMARY KEY,
     finding_id TEXT NOT NULL UNIQUE REFERENCES findings(id) ON DELETE CASCADE,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    testing_role TEXT NOT NULL,
+    captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    testing_role TEXT NOT NULL DEFAULT 'user_b',
+    test_role TEXT DEFAULT 'user_b',
     authorized_role TEXT,
     request_metadata_json TEXT DEFAULT '{}',
     request_method TEXT NOT NULL,
@@ -120,6 +122,29 @@ CREATE TABLE IF NOT EXISTS retest_logs (
     differential_result_json TEXT,
     retested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS target_profiles (
+    id TEXT PRIMARY KEY,
+    hostname TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    allowed_schemes_json TEXT DEFAULT '["https"]',
+    allowed_ports_json TEXT DEFAULT '[443]',
+    allowed_paths_json TEXT DEFAULT '[]',
+    allowed_methods_json TEXT DEFAULT '["GET", "HEAD"]',
+    authorization_basis TEXT NOT NULL,
+    permission_reference TEXT DEFAULT '',
+    approval_status TEXT NOT NULL DEFAULT 'PENDING',
+    approved_by TEXT DEFAULT '',
+    approved_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    revoked_at TIMESTAMP,
+    revocation_reason TEXT DEFAULT '',
+    verification_token TEXT DEFAULT '',
+    verified_at TIMESTAMP,
+    is_local_test BOOLEAN DEFAULT 0,
+    notes TEXT DEFAULT ''
+);
 """
 
 INDEXES_SQL = """
@@ -129,6 +154,8 @@ CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status);
 CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
 CREATE INDEX IF NOT EXISTS idx_evidence_finding_id ON evidence_artifacts(finding_id);
 CREATE INDEX IF NOT EXISTS idx_retest_finding_id ON retest_logs(finding_id);
+CREATE INDEX IF NOT EXISTS idx_target_profiles_hostname ON target_profiles(hostname);
+CREATE INDEX IF NOT EXISTS idx_target_profiles_status ON target_profiles(approval_status);
 """
 
 SCHEMA_SQL = TABLES_SQL + "\n" + INDEXES_SQL
@@ -177,7 +204,12 @@ class DatabaseManager:
                 conn.close()
 
     def _ensure_columns(self, conn: sqlite3.Connection) -> None:
-        """Safely migrates older SQLite tables if columns were added."""
+        """Safely and idempotently migrates older SQLite tables if columns were added.
+
+        Uses PRAGMA table_info to inspect existing columns. For SQLite compatibility,
+        ALTER TABLE ADD COLUMN is executed without non-constant expressions such as
+        CURRENT_TIMESTAMP, followed by safe row backfills.
+        """
         migrations = [
             ("scan_sessions", "endpoints_discovered_count", "INTEGER DEFAULT 0"),
             ("scan_sessions", "endpoints_tested_count", "INTEGER DEFAULT 0"),
@@ -186,7 +218,7 @@ class DatabaseManager:
             ("scan_sessions", "stages_json", "TEXT DEFAULT '{}'"),
             ("scan_sessions", "summary_text", "TEXT DEFAULT ''"),
             ("scan_sessions", "config_json", "TEXT DEFAULT '{}'"),
-            ("scan_sessions", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("scan_sessions", "updated_at", "TIMESTAMP"),
             ("scan_sessions", "failure_reason", "TEXT DEFAULT ''"),
             ("findings", "target_identifier", "TEXT DEFAULT ''"),
             ("findings", "validation_status", "TEXT DEFAULT 'CONFIRMED'"),
@@ -206,12 +238,12 @@ class DatabaseManager:
             ("findings", "confirmation_status", "TEXT DEFAULT 'confirmed'"),
             ("findings", "impact_explanation", "TEXT DEFAULT ''"),
             ("findings", "remediation_recommendation", "TEXT DEFAULT ''"),
-            ("findings", "created_timestamp", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("findings", "created_timestamp", "TIMESTAMP"),
             ("findings", "last_retested_timestamp", "TIMESTAMP"),
             ("findings", "technical_details_json", "TEXT DEFAULT '{}'"),
-            ("findings", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-            ("evidence_artifacts", "timestamp", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-            ("evidence_artifacts", "captured_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("findings", "updated_at", "TIMESTAMP"),
+            ("evidence_artifacts", "timestamp", "TIMESTAMP"),
+            ("evidence_artifacts", "captured_at", "TIMESTAMP"),
             ("evidence_artifacts", "testing_role", "TEXT DEFAULT 'user_b'"),
             ("evidence_artifacts", "test_role", "TEXT DEFAULT 'user_b'"),
             ("evidence_artifacts", "request_metadata_json", "TEXT DEFAULT '{}'"),
@@ -225,11 +257,62 @@ class DatabaseManager:
             ("retest_logs", "notes", "TEXT"),
             ("retest_logs", "differential_result_json", "TEXT"),
         ]
+
+        # Cache existing table columns using PRAGMA table_info
+        table_columns_cache: Dict[str, Set[str]] = {}
         for table, col, col_def in migrations:
-            try:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
-            except sqlite3.OperationalError:
-                pass
+            if table not in table_columns_cache:
+                try:
+                    cursor = conn.execute(f"PRAGMA table_info({table})")
+                    table_columns_cache[table] = {row[1] for row in cursor.fetchall()}
+                except sqlite3.OperationalError as e:
+                    logger.warning(f"Could not read PRAGMA table_info for {table}: {e}")
+                    table_columns_cache[table] = set()
+
+            if col not in table_columns_cache[table]:
+                try:
+                    logger.info(f"Applying migration: ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+                    table_columns_cache[table].add(col)
+                except sqlite3.OperationalError as exc:
+                    # Ignore only if column already exists (race condition)
+                    if "duplicate column name" in str(exc).lower():
+                        table_columns_cache[table].add(col)
+                    else:
+                        logger.error(f"Migration failed for {table}.{col}: {exc}")
+                        raise
+
+        # Safe backfills for newly added columns across existing rows
+        try:
+            if "evidence_artifacts" in table_columns_cache:
+                ev_cols = table_columns_cache["evidence_artifacts"]
+                if "timestamp" in ev_cols and "captured_at" in ev_cols:
+                    conn.execute("UPDATE evidence_artifacts SET timestamp = COALESCE(captured_at, datetime('now')) WHERE timestamp IS NULL")
+                    conn.execute("UPDATE evidence_artifacts SET captured_at = COALESCE(timestamp, datetime('now')) WHERE captured_at IS NULL")
+                elif "timestamp" in ev_cols:
+                    conn.execute("UPDATE evidence_artifacts SET timestamp = datetime('now') WHERE timestamp IS NULL")
+
+                if "testing_role" in ev_cols and "test_role" in ev_cols:
+                    conn.execute("UPDATE evidence_artifacts SET testing_role = COALESCE(test_role, 'user_b') WHERE testing_role IS NULL OR testing_role = ''")
+                    conn.execute("UPDATE evidence_artifacts SET test_role = COALESCE(testing_role, 'user_b') WHERE test_role IS NULL OR test_role = ''")
+
+            if "scan_sessions" in table_columns_cache:
+                ss_cols = table_columns_cache["scan_sessions"]
+                if "updated_at" in ss_cols:
+                    conn.execute("UPDATE scan_sessions SET updated_at = COALESCE(started_at, datetime('now')) WHERE updated_at IS NULL")
+
+            if "findings" in table_columns_cache:
+                f_cols = table_columns_cache["findings"]
+                if "created_timestamp" in f_cols:
+                    conn.execute("UPDATE findings SET created_timestamp = COALESCE(created_at, datetime('now')) WHERE created_timestamp IS NULL")
+                if "updated_at" in f_cols:
+                    conn.execute("UPDATE findings SET updated_at = COALESCE(created_timestamp, created_at, datetime('now')) WHERE updated_at IS NULL")
+                if "target_identifier" in f_cols and "scan_id" in f_cols:
+                    conn.execute("UPDATE findings SET target_identifier = scan_id WHERE target_identifier IS NULL OR target_identifier = ''")
+
+        except sqlite3.OperationalError as exc:
+            logger.error(f"Backfill execution failed: {exc}")
+            raise
 
     def init_schema(self) -> None:
         """Executes DDL schema initialization, column migrations, and index creation."""

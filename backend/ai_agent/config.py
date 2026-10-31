@@ -108,10 +108,22 @@ class GeminiAgentConfig(BaseModel):
         """Returns True when a non-placeholder Gemini API key is present."""
         return bool(self.api_key)
 
+    @property
+    def fallback_mode(self) -> bool:
+        """Returns True when GEMINI_API_KEY is absent and deterministic fallback mode is active."""
+        return not self.is_configured
+
+    @property
+    def mode(self) -> str:
+        """Returns 'gemini' when configured with an API key, else 'deterministic_fallback'."""
+        return "gemini" if self.is_configured else "deterministic_fallback"
+
     def to_safe_dict(self) -> Dict[str, Any]:
         """Returns a dictionary safe for logging or frontend status responses (never exposes API key)."""
         return {
             "configured": self.is_configured,
+            "fallback_mode": self.fallback_mode,
+            "mode": self.mode,
             "api_key": "[REDACTED]" if self.is_configured else None,
             "model": self.model,
             "max_iterations": self.max_iterations,
