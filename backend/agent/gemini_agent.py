@@ -235,3 +235,4 @@ class GeminiAgent:
                         return parts[0].get("text", "")
             logger.warning(f"Gemini API returned status {resp.status_code}: {resp.text[:200]}")
             return ""
+

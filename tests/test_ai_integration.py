@@ -281,3 +281,4 @@ class TestCancellationAndResilience:
         """Attempting to stop an unknown assessment returns HTTP 404."""
         resp = test_client.post("/api/assessments/unknown_scan_id_888/stop")
         assert resp.status_code == 404
+

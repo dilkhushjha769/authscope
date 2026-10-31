@@ -288,3 +288,4 @@ class AssessmentMemory:
         p1 = urlparse(url1)
         p2 = urlparse(url2)
         return (p1.hostname or "").lower() == (p2.hostname or "").lower() and p1.port == p2.port
+
