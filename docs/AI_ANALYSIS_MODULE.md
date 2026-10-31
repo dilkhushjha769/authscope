@@ -223,3 +223,4 @@ When connecting the AI Analysis Module to Layer 2 (Scanner) and Layer 4 (Storage
 
 3. **Dashboard Consumption:**
    Use `output.model_dump()` or `agent.analyze_finding_json(input_data)` to stream structured JSON directly to the Streamlit UI.
+
