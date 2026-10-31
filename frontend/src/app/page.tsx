@@ -50,10 +50,50 @@ function mapRecordToFindingItem(rec: Record<string, unknown>): FindingItem {
   const validation_status = String(
     rec.validation_status || "CONFIRMED"
   ).toUpperCase();
+
+  let finding_status = validation_status;
+  if (
+    validation_status === "CONFIRMED" &&
+    (confirmation_status === "CONFIRMED" ||
+      confirmation_status === "CONFIRMED_RUNTIME_VULNERABILITY")
+  ) {
+    finding_status = "CONFIRMED";
+  } else if (
+    validation_status === "INCONCLUSIVE" ||
+    confirmation_status === "INCONCLUSIVE"
+  ) {
+    finding_status = "INCONCLUSIVE";
+  } else if (
+    validation_status === "NOT_TESTED" ||
+    confirmation_status === "NOT_TESTED"
+  ) {
+    finding_status = "NOT_TESTED";
+  } else if (
+    validation_status === "REJECTED_FALSE_POSITIVE" ||
+    validation_status === "UNVALIDATED" ||
+    validation_status === "NOT_CONFIRMED" ||
+    confirmation_status === "FALSE_POSITIVE" ||
+    confirmation_status === "NOT_REPRODUCIBLE"
+  ) {
+    finding_status = "NOT_CONFIRMED";
+  } else if (
+    validation_status === "SUSPICIOUS" ||
+    confirmation_status === "SUSPECTED" ||
+    confirmation_status === "SUSPICIOUS"
+  ) {
+    finding_status = "SUSPICIOUS";
+  }
+
   const explanation = String(
-    rec.impact_explanation ||
-      rec.description ||
+    rec.description ||
+      rec.impact_explanation ||
       `Differential authorization discrepancy observed on ${endpoint}.`
+  );
+  const impact = String(
+    rec.impact_explanation ||
+      rec.business_impact ||
+      rec.description ||
+      "Unauthorized exposure or modification of protected application resources."
   );
 
   const technicalDetails =
@@ -88,14 +128,32 @@ function mapRecordToFindingItem(rec: Record<string, unknown>): FindingItem {
       "Enforce server-side access control checks before returning resource data."
   );
 
+  const actual_behavior = rec.actual_behavior
+    ? String(rec.actual_behavior)
+    : undefined;
+  const evidence_summary =
+    actual_behavior ||
+    (evidenceObj
+      ? `HTTP ${evidenceObj.response_status || 200} returned for ${
+          evidenceObj.testing_role || evidenceObj.test_role || "test role"
+        }${
+          evidenceObj.evidence_sha256
+            ? ` (SHA-256: ${evidenceObj.evidence_sha256.slice(0, 12)}...)`
+            : ""
+        }`
+      : undefined);
+
   return {
     id,
     title,
     vulnerability_category: category,
     severity,
     confidence: confirmation_status,
-    validation_status,
+    validation_status: finding_status,
+    finding_status,
     explanation,
+    impact,
+    evidence_summary,
     affected_endpoint: endpoint,
     http_method: method,
     source_file,
@@ -107,9 +165,8 @@ function mapRecordToFindingItem(rec: Record<string, unknown>): FindingItem {
     expected_behavior: rec.expected_behavior
       ? String(rec.expected_behavior)
       : undefined,
-    actual_behavior: rec.actual_behavior
-      ? String(rec.actual_behavior)
-      : undefined,
+    actual_behavior,
+    black_box_only: !source_file && !vulnerable_code,
     evidence: evidenceObj,
   };
 }
@@ -266,7 +323,7 @@ export default function Home() {
         }
       });
 
-      // Listen for structured AI agent operational events
+      // Listen for all 15 structured AI agent operational SSE events
       const agentEventNames = [
         "assessment_started",
         "agent_thinking",
@@ -274,12 +331,15 @@ export default function Home() {
         "tool_started",
         "tool_completed",
         "tool_failed",
+        "endpoint_discovered",
+        "finding_hypothesis",
         "finding_discovered",
         "evidence_validated",
         "source_location_found",
         "explanation_generated",
         "assessment_completed",
         "assessment_failed",
+        "assessment_cancelled",
       ];
 
       agentEventNames.forEach((ename) => {
@@ -301,9 +361,16 @@ export default function Home() {
               return duplicate ? prev : [...prev, evItem];
             });
 
-            if (ename === "finding_discovered") {
+            if (ename === "finding_discovered" || ename === "evidence_validated") {
               setStatus("findings_discovered");
               fetchAssessmentDetails(scanId);
+            } else if (ename === "assessment_cancelled") {
+              setStatus("cancelled");
+            } else if (ename === "assessment_failed") {
+              if (payload.message || payload.error) {
+                setError(String(payload.message || payload.error));
+              }
+              setStatus("failed");
             }
           } catch (err) {
             console.warn(`Failed to parse ${ename} event:`, err);
@@ -473,7 +540,11 @@ export default function Home() {
       const res = await fetch(`${API_BASE_URL}/api/assessments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target_url: finalUrl }),
+        body: JSON.stringify({
+          target_url: finalUrl,
+          github_repo: githubRepo.trim() || undefined,
+          source_archive_path: sourceArchive ? sourceArchive.name : undefined,
+        }),
       });
 
       const data = await res.json();
@@ -868,7 +939,7 @@ export default function Home() {
                 {/* 3C. Streaming Conversational Markdown Output              */}
                 {/* ========================================================= */}
                 <div className="prose prose-invert max-w-none text-sm sm:text-base leading-relaxed text-gray-200">
-                  {streamingText ? (
+                  {streamingText && (
                     <ReactMarkdown
                       components={{
                         h3: ({ children }) => (
@@ -933,14 +1004,16 @@ export default function Home() {
                     >
                       {streamingText}
                     </ReactMarkdown>
-                  ) : status === "failed" || status === "cancelled" ? (
+                  )}
+
+                  {(status === "failed" || status === "cancelled") && (
                     <div className="p-4 rounded-xl bg-red-950/20 border border-red-800/40 text-red-300 text-sm flex flex-col gap-2.5">
                       <div className="flex items-center gap-2 font-medium text-red-400">
                         <AlertCircle className="w-4 h-4 shrink-0" />
                         <span>Assessment Halted</span>
                       </div>
                       <p className="text-xs text-gray-300 leading-relaxed">
-                        {error || "The assessment was interrupted or halted before completion. Ensure the backend API is running and target application is reachable."}
+                        {error || "The assessment was interrupted or halted before completion. Ensure the backend API is running on http://localhost:8000 and target application is reachable."}
                       </p>
                       <button
                         type="button"
@@ -951,7 +1024,9 @@ export default function Home() {
                         Start New Assessment
                       </button>
                     </div>
-                  ) : (
+                  )}
+
+                  {!streamingText && status !== "failed" && status !== "cancelled" && (
                     <div className="flex items-center gap-2 text-gray-400 text-sm italic">
                       <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
                       Connecting to application and executing authorization tests...

@@ -11,14 +11,49 @@ import {
   Code,
   FileText,
   FileCode,
+  HelpCircle,
+  MinusCircle,
   ShieldAlert,
   Terminal,
 } from "lucide-react";
-import { FindingItem } from "@/types/assessment";
+import { FindingItem, FindingStatus } from "@/types/assessment";
 
 interface FindingCardProps {
   finding: FindingItem;
   index: number;
+}
+
+/**
+ * Normalizes raw finding status / validation_status into one of the 5 canonical
+ * statuses required by AuthScope:
+ * CONFIRMED | SUSPICIOUS | NOT_CONFIRMED | INCONCLUSIVE | NOT_TESTED
+ */
+export function resolveFindingStatus(finding: FindingItem): FindingStatus {
+  const raw = String(
+    finding.finding_status || finding.validation_status || finding.confidence || ""
+  )
+    .trim()
+    .toUpperCase();
+
+  if (raw === "CONFIRMED" || raw === "CONFIRMED_RUNTIME_VULNERABILITY" || raw === "VALIDATED") {
+    return "CONFIRMED";
+  }
+  if (raw === "INCONCLUSIVE") {
+    return "INCONCLUSIVE";
+  }
+  if (raw === "NOT_TESTED" || raw === "SKIPPED" || raw === "UNTESTED") {
+    return "NOT_TESTED";
+  }
+  if (
+    raw === "NOT_CONFIRMED" ||
+    raw === "UNVALIDATED" ||
+    raw === "FALSE_POSITIVE" ||
+    raw === "REJECTED_FALSE_POSITIVE" ||
+    raw === "NOT_REPRODUCIBLE"
+  ) {
+    return "NOT_CONFIRMED";
+  }
+  return "SUSPICIOUS";
 }
 
 export function FindingCard({ finding, index }: FindingCardProps) {
@@ -48,14 +83,67 @@ export function FindingCard({ finding, index }: FindingCardProps) {
   };
   const sevStyle = severityColors[severityUpper] || severityColors.MEDIUM;
 
-  const isConfirmed =
-    finding.validation_status.toUpperCase() === "CONFIRMED" ||
-    finding.confidence.toUpperCase() === "CONFIRMED";
+  const canonicalStatus = resolveFindingStatus(finding);
 
-  // Fallback for missing source code location
-  const hasSourceCode = Boolean(
-    finding.source_file || finding.vulnerable_code
-  );
+  const statusStyles: Record<
+    FindingStatus,
+    { bg: string; text: string; border: string; icon: React.ReactNode }
+  > = {
+    CONFIRMED: {
+      bg: "bg-emerald-950/40",
+      text: "text-emerald-300",
+      border: "border-emerald-600/40",
+      icon: <CheckCircle2 className="w-3 h-3 text-emerald-400" />,
+    },
+    SUSPICIOUS: {
+      bg: "bg-amber-950/40",
+      text: "text-amber-300",
+      border: "border-amber-600/40",
+      icon: <AlertTriangle className="w-3 h-3 text-amber-400" />,
+    },
+    NOT_CONFIRMED: {
+      bg: "bg-orange-950/40",
+      text: "text-orange-300",
+      border: "border-orange-600/40",
+      icon: <AlertTriangle className="w-3 h-3 text-orange-400" />,
+    },
+    INCONCLUSIVE: {
+      bg: "bg-purple-950/40",
+      text: "text-purple-300",
+      border: "border-purple-600/40",
+      icon: <HelpCircle className="w-3 h-3 text-purple-400" />,
+    },
+    NOT_TESTED: {
+      bg: "bg-gray-900/60",
+      text: "text-gray-400",
+      border: "border-gray-700/50",
+      icon: <MinusCircle className="w-3 h-3 text-gray-400" />,
+    },
+  };
+  const statusStyle = statusStyles[canonicalStatus];
+
+  // Only treat source code as available when provided by the source-analysis engine
+  const hasSourceCode =
+    !finding.black_box_only &&
+    Boolean(finding.source_file || finding.vulnerable_code);
+
+  const actualEvidenceSummary =
+    finding.evidence_summary ||
+    finding.actual_behavior ||
+    (finding.evidence
+      ? `HTTP ${finding.evidence.response_status || 200} response captured for ${
+          finding.evidence.testing_role || finding.evidence.test_role || "test role"
+        }${
+          finding.evidence.evidence_sha256
+            ? ` (SHA-256: ${finding.evidence.evidence_sha256.slice(0, 12)}...)`
+            : ""
+        }`
+      : "Empirical runtime HTTP comparison recorded.");
+
+  const impactText =
+    finding.impact ||
+    finding.explanation ||
+    "Unauthorized access to protected application resources or functionality.";
 
   return (
     <div className="w-full my-4 rounded-2xl border border-[#263248] bg-[#0E1420] overflow-hidden shadow-xl shadow-black/30 transition-all hover:border-[#384a68]">
@@ -81,7 +169,7 @@ export function FindingCard({ finding, index }: FindingCardProps) {
           </div>
         </div>
 
-        {/* Severity, Confidence & Validation Badges */}
+        {/* Severity, Confidence & Canonical Status Badges */}
         <div className="flex items-center gap-2 shrink-0 flex-wrap">
           <span
             className={`px-2.5 py-1 rounded-lg text-xs font-bold font-mono border ${sevStyle.bg} ${sevStyle.text} ${sevStyle.border}`}
@@ -94,18 +182,10 @@ export function FindingCard({ finding, index }: FindingCardProps) {
           </span>
 
           <span
-            className={`px-2.5 py-1 rounded-lg text-xs font-mono font-medium flex items-center gap-1 border ${
-              isConfirmed
-                ? "bg-emerald-950/40 text-emerald-300 border-emerald-600/40"
-                : "bg-amber-950/40 text-amber-300 border-amber-600/40"
-            }`}
+            className={`px-2.5 py-1 rounded-lg text-xs font-mono font-medium flex items-center gap-1 border ${statusStyle.bg} ${statusStyle.text} ${statusStyle.border}`}
           >
-            {isConfirmed ? (
-              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-            ) : (
-              <AlertTriangle className="w-3 h-3 text-amber-400" />
-            )}
-            {finding.validation_status}
+            {statusStyle.icon}
+            {canonicalStatus}
           </span>
         </div>
       </div>
@@ -114,11 +194,32 @@ export function FindingCard({ finding, index }: FindingCardProps) {
         {/* Simple English Explanation */}
         <div>
           <div className="text-xs font-medium uppercase tracking-wider text-gray-400 mb-1">
-            Simple English Explanation
+            Explanation
           </div>
           <p className="text-sm text-gray-200 leading-relaxed">
             {finding.explanation}
           </p>
+        </div>
+
+        {/* Impact & Actual Evidence Summary */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="p-3 rounded-xl bg-[#0B101B] border border-[#1E293B]">
+            <div className="text-[11px] font-mono uppercase tracking-wider text-gray-400 mb-1">
+              Actual Evidence Summary
+            </div>
+            <p className="text-xs text-gray-300 leading-relaxed font-mono">
+              {actualEvidenceSummary}
+            </p>
+          </div>
+
+          <div className="p-3 rounded-xl bg-[#0B101B] border border-[#1E293B]">
+            <div className="text-[11px] font-mono uppercase tracking-wider text-gray-400 mb-1">
+              Security Impact
+            </div>
+            <p className="text-xs text-gray-300 leading-relaxed">
+              {impactText}
+            </p>
+          </div>
         </div>
 
         {/* Key Attributes Grid */}
@@ -133,21 +234,27 @@ export function FindingCard({ finding, index }: FindingCardProps) {
           <div>
             <span className="text-gray-500 block">Source File:</span>
             <span className="text-gray-300 break-all">
-              {finding.source_file || "runtime-api"}
+              {hasSourceCode && finding.source_file
+                ? finding.source_file
+                : "Black-box only (unavailable)"}
             </span>
           </div>
 
           <div>
             <span className="text-gray-500 block">Function Name:</span>
             <span className="text-gray-300">
-              {finding.function_name || "N/A (HTTP Router)"}
+              {hasSourceCode && finding.function_name
+                ? finding.function_name
+                : "N/A (Black-box runtime)"}
             </span>
           </div>
 
           <div>
             <span className="text-gray-500 block">Line Numbers:</span>
             <span className="text-gray-300">
-              {finding.line_numbers || "N/A (Runtime Telemetry)"}
+              {hasSourceCode && finding.line_numbers
+                ? finding.line_numbers
+                : "N/A (Black-box runtime)"}
             </span>
           </div>
         </div>
@@ -156,15 +263,17 @@ export function FindingCard({ finding, index }: FindingCardProps) {
         {!hasSourceCode && (
           <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#161F30]/70 border border-blue-500/20 text-blue-300 text-xs">
             <FileCode className="w-4 h-4 text-blue-400 shrink-0" />
-            <span>Source code location unavailable. Runtime evidence is available.</span>
+            <span>
+              Black-box assessment only — source code location unavailable. Runtime evidence is available.
+            </span>
           </div>
         )}
 
-        {/* How to Fix It Summary */}
+        {/* Remediation Summary */}
         {finding.how_to_fix && (
           <div>
             <div className="text-xs font-medium uppercase tracking-wider text-gray-400 mb-1">
-              How to Fix It
+              Remediation
             </div>
             <p className="text-sm text-gray-300 leading-relaxed bg-[#111827]/70 p-3 rounded-xl border border-[#1E293B]">
               {finding.how_to_fix}
@@ -201,7 +310,7 @@ export function FindingCard({ finding, index }: FindingCardProps) {
 
             {showVulnerableCode && (
               <div className="p-3 bg-[#080C14] border-t border-[#1E293B] text-xs">
-                {finding.vulnerable_code ? (
+                {hasSourceCode && finding.vulnerable_code ? (
                   <div className="relative group">
                     <button
                       type="button"
@@ -229,7 +338,7 @@ export function FindingCard({ finding, index }: FindingCardProps) {
                 ) : (
                   <div className="p-3 rounded-lg bg-[#0F141F] text-gray-400 font-mono leading-relaxed border border-[#1E293B]">
                     <div className="text-amber-400 mb-1">
-                      {"// Observed Vulnerable Runtime Behavior:"}
+                      {"// Black-box assessment only — no source repository provided:"}
                     </div>
                     <div>
                       {finding.actual_behavior ||
@@ -332,7 +441,8 @@ export function FindingCard({ finding, index }: FindingCardProps) {
                 <div>
                   <span className="text-gray-500">Expected Behavior: </span>
                   <span className="text-blue-300">
-                    {finding.expected_behavior || "Access denied (HTTP 401/403) for unauthorized role."}
+                    {finding.expected_behavior ||
+                      "Access denied (HTTP 401/403) for unauthorized role."}
                   </span>
                 </div>
 
@@ -347,7 +457,9 @@ export function FindingCard({ finding, index }: FindingCardProps) {
                   <div className="pt-1 text-gray-400">
                     <span>Testing Persona: </span>
                     <span className="text-gray-200">
-                      {finding.evidence.testing_role || finding.evidence.test_role || "User B"}
+                      {finding.evidence.testing_role ||
+                        finding.evidence.test_role ||
+                        "User B"}
                     </span>
                     <span className="mx-2">·</span>
                     <span>Resource Owner: </span>
@@ -395,11 +507,14 @@ export function FindingCard({ finding, index }: FindingCardProps) {
                     </div>
 
                     <div>
-                      <span className="text-gray-500 block mb-1">HTTP Request:</span>
+                      <span className="text-gray-500 block mb-1">
+                        HTTP Request:
+                      </span>
                       <pre className="p-2.5 rounded bg-[#0F141F] text-gray-300 overflow-x-auto border border-[#1E293B]">
                         <code>
                           {finding.evidence.request_method || finding.http_method}{" "}
-                          {finding.evidence.request_url || finding.affected_endpoint}
+                          {finding.evidence.request_url ||
+                            finding.affected_endpoint}
                           {"\n"}
                           {finding.evidence.request_headers
                             ? Object.entries(finding.evidence.request_headers)
