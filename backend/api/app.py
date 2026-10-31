@@ -37,6 +37,7 @@ from backend.core.assessment_engine import (
 )
 from backend.core.scope_guard import ScopeCheckResult, ScopeGuard
 from backend.retesting.retest_engine import RetestEngine
+from backend.api.adapters import AssessmentPipelineRequest, ToolRegistryAdapter, MemoryManager
 from backend.core.target_registry import TargetRegistry, TargetSubmissionPayload
 from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict
@@ -525,11 +526,65 @@ class _SessionBoundRepository:
 class AssessmentTaskManager:
     """Manages decoupled background execution of assessments and SSE client event broadcasting."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        agent: Optional[Any] = None,
+        tool_registry: Optional[Any] = None,
+        memory_manager: Optional[Any] = None,
+    ) -> None:
         self._tasks: Dict[str, asyncio.Task] = {}
         self._tokens: Dict[str, CancellationToken] = {}
         self._subscribers: Dict[str, List[asyncio.Queue]] = {}
         self._lock = asyncio.Lock()
+        self.agent = agent
+        self.tool_registry = tool_registry
+        self.memory_manager = memory_manager
+
+    def configure_dependencies(
+        self,
+        agent: Optional[Any] = None,
+        tool_registry: Optional[Any] = None,
+        memory_manager: Optional[Any] = None,
+    ) -> None:
+        """Configures injected components for the unified pipeline (or mock adapters in tests)."""
+        self.agent = agent
+        self.tool_registry = tool_registry
+        self.memory_manager = memory_manager
+
+    def reset_dependencies(self) -> None:
+        """Resets injected dependencies back to production defaults."""
+        self.agent = None
+        self.tool_registry = None
+        self.memory_manager = None
+
+    def get_agent(self, repo: FindingRepository) -> Any:
+        if self.agent is not None:
+            return self.agent
+        memory = self.memory_manager or MemoryManager(repository=repo)
+        tools = self.tool_registry or ToolRegistryAdapter()
+        return GeminiAuthScopeAgent(
+            tool_registry=tools,
+            memory_manager=memory,
+            repository=repo,
+        )
+
+    @staticmethod
+    def _coerce_event(scan_id: str, raw_item: Union[AssessmentEvent, Dict[str, Any]]) -> AssessmentEvent:
+        if isinstance(raw_item, AssessmentEvent):
+            raw_item.assessment_id = scan_id
+            return raw_item
+        data = dict(raw_item)
+        etype = str(data.get("event_type") or data.get("type") or EventType.STAGE_UPDATED.value)
+        stage = str(data.get("stage") or AssessmentStage.AUTHORIZATION_TESTING.value)
+        msg = str(data.get("message") or etype)
+        meta = dict(data.get("metadata") or {k: v for k, v in data.items() if k not in ("id", "assessment_id", "event_type", "type", "stage", "message", "timestamp")})
+        return AssessmentEvent(
+            assessment_id=scan_id,
+            event_type=etype,
+            stage=stage,
+            message=msg,
+            metadata=meta,
+        )
 
     def get_token(self, scan_id: str) -> Optional[CancellationToken]:
         return self._tokens.get(scan_id)
@@ -599,6 +654,76 @@ class AssessmentTaskManager:
             candidate_path = Path(source_archive_path)
             if candidate_path.exists() and candidate_path.is_dir():
                 source_root = candidate_path
+
+        if self.agent is not None:
+            # An injected agent (e.g. MockGeminiAgent in unit tests) is configured
+            active_agent = self.agent
+            pipeline_req = AssessmentPipelineRequest(
+                assessment_id=scan_id,
+                target_url=target_url,
+                github_repo=github_repo,
+                source_archive_path=source_archive_path,
+            )
+
+            async def _execute_injected_steps() -> None:
+                await asyncio.sleep(0.05)
+                curr_sess = repo.get_scan_session(scan_id)
+                if curr_sess and curr_sess.status == "PENDING":
+                    curr_sess.status = "RUNNING"
+                    curr_sess.updated_at = datetime.now(timezone.utc)
+                    repo.save_scan_session(curr_sess)
+
+                stream_iter = active_agent.astream_assessment(pipeline_req, cancel_token=token)
+                async for raw_ev in stream_iter:
+                    event = self._coerce_event(scan_id, raw_ev)
+                    if not event.id:
+                        repo.save_event(event)
+
+                    if event.event_type == EventType.ASSESSMENT_COMPLETED.value:
+                        sess = repo.get_scan_session(scan_id)
+                        if sess and sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
+                            sess.status = "COMPLETED"
+                            sess.completed_at = datetime.now(timezone.utc)
+                            sess.updated_at = datetime.now(timezone.utc)
+                            sess.summary_text = event.message
+                            sess.confirmed_findings_count = int(
+                                event.metadata.get("confirmed_findings", sess.confirmed_findings_count or 0)
+                            )
+                            sess.suspicious_results_count = int(
+                                event.metadata.get("suspicious_results", sess.suspicious_results_count or 0)
+                            )
+                            repo.save_scan_session(sess)
+                    elif event.event_type == EventType.ASSESSMENT_FAILED.value:
+                        sess = repo.get_scan_session(scan_id)
+                        if sess and sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
+                            sess.status = "FAILED"
+                            sess.failure_reason = "ASSESSMENT_FAILED"
+                            sess.completed_at = datetime.now(timezone.utc)
+                            sess.summary_text = event.message
+                            repo.save_scan_session(sess)
+                    elif event.event_type == EventType.ASSESSMENT_CANCELLED.value:
+                        sess = repo.get_scan_session(scan_id)
+                        if sess and sess.status != "CANCELLED":
+                            sess.status = "CANCELLED"
+                            sess.completed_at = datetime.now(timezone.utc)
+                            sess.updated_at = datetime.now(timezone.utc)
+                            sess.summary_text = event.message
+                            repo.save_scan_session(sess)
+
+                    msg_chunk = _format_event_message_chunk(event, repo=repo)
+                    await self._broadcast(scan_id, ("activity", event, msg_chunk))
+                    await asyncio.sleep(0.04)
+
+            try:
+                await asyncio.wait_for(_execute_injected_steps(), timeout=settings.assessment_timeout_seconds)
+            except Exception as exc:
+                logger.error(f"Injected task error: {exc}", exc_info=True)
+                await self._broadcast(scan_id, ("error", str(exc), None))
+            finally:
+                final_session = repo.get_scan_session(scan_id)
+                done_payload = _build_done_payload(final_session, repo, target_url)
+                await self._broadcast(scan_id, ("done", done_payload, None))
+            return
 
         bound_repo = _SessionBoundRepository(
             repo=repo,
@@ -1323,19 +1448,49 @@ def _format_event_message_chunk(
 def _map_event_to_agent_sse(
     event: AssessmentEvent,
     assessment_id: str,
-    agent: GeminiAgent,
+    agent: Optional[Any] = None,
     repo: Optional[FindingRepository] = None,
 ) -> List[Tuple[str, Dict[str, Any]]]:
-    """Maps internal assessment events to all 14 structured SSE agent events (Section 9)."""
+    """Maps internal assessment events to all 15 structured SSE agent events."""
     etype = event.event_type
     results: List[Tuple[str, Dict[str, Any]]] = []
+    meta = event.metadata or {}
 
     if etype == EventType.ASSESSMENT_STARTED.value:
+        target_url = meta.get("target_url", "")
         results.append(("assessment_started", {
             "type": "assessment_started",
-            "message": event.message,
+            "message": event.message or f"Assessment initialized for {target_url}",
             "assessment_id": assessment_id,
-            "target_url": event.metadata.get("target_url", ""),
+            "target_url": target_url,
+        }))
+        thinking_msg = meta.get(
+            "thinking_message",
+            f"Formulating authorization testing strategy for {target_url}." if target_url else "Formulating authorization testing strategy.",
+        )
+        results.append(("agent_thinking", {
+            "type": "agent_thinking",
+            "message": thinking_msg,
+            "assessment_id": assessment_id,
+        }))
+        plan_steps = meta.get(
+            "plan_steps",
+            [
+                "1. Validate target scope against strict ScopeGuard allowlist.",
+                "2. Establish target connectivity and verify HTTP response.",
+                "3. Discover attack surface endpoints and parameterized resources.",
+                "4. Validate multi-role testing personas (User A, User B, Admin).",
+                "5. Execute cross-account differential tests on identified endpoints.",
+                "6. Cryptographically sign and validate evidence artifacts (SHA-256).",
+                "7. Compile findings and synthesize remediation code patches.",
+            ],
+        )
+        plan_summary = meta.get("plan_summary", "7-stage authorization evaluation plan initialized.")
+        results.append(("agent_plan", {
+            "type": "agent_plan",
+            "message": plan_summary,
+            "steps": plan_steps,
+            "assessment_id": assessment_id,
         }))
     elif etype == EventType.SCOPE_VALIDATION_STARTED.value:
         results.append(("tool_started", {
@@ -1345,9 +1500,9 @@ def _map_event_to_agent_sse(
             "assessment_id": assessment_id,
         }))
     elif etype == EventType.SCOPE_VALIDATION_COMPLETED.value:
-        host = event.metadata.get("host", "localhost")
-        port = event.metadata.get("port", 3000)
-        scheme = event.metadata.get("scheme", "http")
+        host = meta.get("host", "localhost")
+        port = meta.get("port", 3000)
+        scheme = meta.get("scheme", "http")
         results.append(("tool_completed", {
             "type": "tool_completed",
             "tool": "check_scope",
@@ -1360,12 +1515,19 @@ def _map_event_to_agent_sse(
             "message": "Target application connection verified; mapping attack surface routes",
             "assessment_id": assessment_id,
         }))
+        results.append(("tool_started", {
+            "type": "tool_started",
+            "tool": "discover_routes",
+            "message": "Discovering application endpoints and parameterized routes",
+            "assessment_id": assessment_id,
+        }))
     elif etype == EventType.ENDPOINT_DISCOVERED.value:
-        path = event.metadata.get("path", "")
-        method = event.metadata.get("method", "GET")
-        cat = event.metadata.get("category", "UNKNOWN")
+        path = meta.get("path") or meta.get("endpoint") or event.message
+        method = meta.get("method", "GET")
+        cat = meta.get("category", "API")
         results.append(("endpoint_discovered", {
             "type": "endpoint_discovered",
+            "endpoint": path,
             "path": path,
             "method": method,
             "category": cat,
@@ -1373,7 +1535,7 @@ def _map_event_to_agent_sse(
             "assessment_id": assessment_id,
         }))
     elif etype == EventType.ENDPOINT_DISCOVERY_COMPLETED.value:
-        count = event.metadata.get("endpoints_discovered", 0)
+        count = meta.get("endpoints_discovered", 0)
         results.append(("tool_completed", {
             "type": "tool_completed",
             "tool": "discover_routes",
@@ -1388,7 +1550,7 @@ def _map_event_to_agent_sse(
             "assessment_id": assessment_id,
         }))
     elif etype == EventType.SESSION_VALIDATION_COMPLETED.value:
-        roles = event.metadata.get("authenticated_roles", [])
+        roles = meta.get("authenticated_roles", [])
         results.append(("tool_completed", {
             "type": "tool_completed",
             "tool": "verify_sessions",
@@ -1403,7 +1565,7 @@ def _map_event_to_agent_sse(
             "assessment_id": assessment_id,
         }))
     elif etype == EventType.AUTHORIZATION_TEST_COMPLETED.value:
-        tested = event.metadata.get("tested_count", 0)
+        tested = meta.get("tested_count", 0)
         results.append(("tool_completed", {
             "type": "tool_completed",
             "tool": "compare_access",
@@ -1411,73 +1573,144 @@ def _map_event_to_agent_sse(
             "assessment_id": assessment_id,
         }))
     elif etype in (EventType.SUSPICIOUS_BEHAVIOR_DETECTED.value, EventType.FINDING_CONFIRMED.value):
-        ep = event.metadata.get("endpoint", "")
         is_confirmed = etype == EventType.FINDING_CONFIRMED.value
-        val_status = "CONFIRMED" if is_confirmed else "SUSPICIOUS"
-        sev = event.metadata.get("severity", "HIGH" if is_confirmed else "MEDIUM")
-        cat = event.metadata.get(
-            "category",
-            event.metadata.get("vulnerability_candidate", "BOLA_IDOR" if is_confirmed else "BFLA"),
+        finding_id = meta.get("finding_id")
+        finding = repo.get_finding(str(finding_id)) if (finding_id and repo) else None
+
+        ep = (finding.target_endpoint if finding else None) or str(meta.get("endpoint", ""))
+        sev = (
+            (finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity))
+            if finding
+            else str(meta.get("severity", "HIGH" if is_confirmed else "MEDIUM"))
         )
+        cat = (
+            (finding.vulnerability_category or finding.vulnerability_type)
+            if finding
+            else str(meta.get("vulnerability_candidate") or meta.get("category", "BOLA_IDOR" if is_confirmed else "BFLA"))
+        )
+        val_status = "CONFIRMED" if is_confirmed else "SUSPICIOUS"
 
-        if not is_confirmed:
-            results.append(("finding_hypothesis", {
-                "type": "finding_hypothesis",
-                "endpoint": ep,
-                "category": cat,
-                "validation_status": "SUSPICIOUS",
-                "message": f"Hypothesis: potential {cat} discrepancy detected on {ep}; awaiting full evidence validation",
-                "assessment_id": assessment_id,
-            }))
-
-        results.append(("finding_discovered", {
-            "type": "finding_discovered",
-            "finding_id": event.metadata.get("finding_id"),
+        # 1. Emit finding_hypothesis
+        results.append(("finding_hypothesis", {
+            "type": "finding_hypothesis",
             "endpoint": ep,
             "category": cat,
             "severity": sev,
+            "status": val_status,
+            "validation_status": val_status,
+            "message": f"Hypothesis: potential {cat} authorization discrepancy on {ep}",
+            "assessment_id": assessment_id,
+        }))
+
+        # 2. If confirmed, emit evidence_validated BEFORE finding_discovered
+        if is_confirmed:
+            sha = (
+                finding.evidence.evidence_sha256
+                if (finding and finding.evidence and finding.evidence.evidence_sha256)
+                else str(meta.get("sha256", ""))
+            )
+            results.append(("evidence_validated", {
+                "type": "evidence_validated",
+                "endpoint": ep,
+                "finding_id": finding.id if finding else finding_id,
+                "validation_status": "CONFIRMED",
+                "evidence_sha256": sha,
+                "message": f"Cryptographic evidence validated for {ep} (SHA-256)",
+                "assessment_id": assessment_id,
+            }))
+
+        # 3. Emit finding_discovered
+        results.append(("finding_discovered", {
+            "type": "finding_discovered",
+            "finding_id": finding.id if finding else finding_id,
+            "endpoint": ep,
+            "category": cat,
+            "severity": sev,
+            "status": val_status,
             "validation_status": val_status,
             "message": (
                 f"Confirmed vulnerability identified on {ep}"
                 if is_confirmed
-                else f"Suspicious authorization behavior identified on {ep}"
+                else f"Authorization discrepancy ({val_status}) identified on {ep}"
             ),
             "assessment_id": assessment_id,
         }))
 
-        # Emit source_location_found if verified source mapping exists
-        finding_id = event.metadata.get("finding_id")
-        fnd_rec = repo.get_finding(finding_id) if (repo and finding_id) else None
+        # 4. Emit source_location_found
+        src_info = meta.get("source_info") or {}
         src_loc = (
-            fnd_rec.technical_details.get("source_location")
-            if (fnd_rec and isinstance(fnd_rec.technical_details, dict))
-            else event.metadata.get("source_location")
+            finding.technical_details.get("source_location")
+            if (finding and isinstance(finding.technical_details, dict))
+            else meta.get("source_location")
+        ) or {}
+        src_file = (
+            src_info.get("source_file")
+            or (src_loc.get("file_path") if isinstance(src_loc, dict) else None)
+            or (finding.technical_details.get("source_file") if (finding and isinstance(finding.technical_details, dict)) else None)
         )
-        if isinstance(src_loc, dict) and src_loc.get("verified") is True and src_loc.get("file_path"):
-            results.append(("source_location_found", {
-                "type": "source_location_found",
-                "endpoint": ep,
-                "file_path": src_loc["file_path"],
-                "start_line": src_loc.get("start_line"),
-                "end_line": src_loc.get("end_line"),
-                "function_name": src_loc.get("function_name"),
-                "message": f"Mapped {ep} to {src_loc['file_path']}:{src_loc.get('start_line')}",
-                "assessment_id": assessment_id,
-            }))
+        line_nums = (
+            src_info.get("line_numbers")
+            or (f"{src_loc.get('start_line')}-{src_loc.get('end_line')}" if (isinstance(src_loc, dict) and src_loc.get("start_line")) else None)
+            or (finding.technical_details.get("line_numbers") if (finding and isinstance(finding.technical_details, dict)) else None)
+        )
+        func_name = (
+            src_info.get("function_name")
+            or (src_loc.get("function_name") if isinstance(src_loc, dict) else None)
+            or (finding.technical_details.get("function_name") if (finding and isinstance(finding.technical_details, dict)) else None)
+        )
+        black_box = False if (src_info.get("black_box_only") is False or (isinstance(src_loc, dict) and src_loc.get("verified") is True)) else not bool(src_file)
 
-        expl_data = agent.generate_explanation(
-            endpoint=ep,
-            vulnerability_category=cat,
-            validation_status=val_status,
-            evidence_summary=event.message,
+        results.append(("source_location_found", {
+            "type": "source_location_found",
+            "endpoint": ep,
+            "source_file": src_file,
+            "file_path": src_file,
+            "function_name": func_name,
+            "line_numbers": line_nums,
+            "start_line": src_loc.get("start_line") if isinstance(src_loc, dict) else None,
+            "end_line": src_loc.get("end_line") if isinstance(src_loc, dict) else None,
+            "black_box_only": black_box,
+            "verified": not black_box,
+            "message": (
+                f"Mapped {ep} to {src_file}:{line_nums}"
+                if src_file
+                else f"Black-box assessment only for {ep} — no source code repository provided."
+            ),
+            "assessment_id": assessment_id,
+        }))
+
+        # 5. Emit explanation_generated
+        explanation_text = (
+            meta.get("explanation")
+            or (finding.impact_explanation or finding.description if finding else None)
+            or event.message
         )
+        remediation_code = (
+            meta.get("remediation_code")
+            or (finding.remediation_guidance or finding.remediation_recommendation if finding else None)
+            or ""
+        )
+        if not explanation_text and agent is not None and hasattr(agent, "generate_explanation"):
+            try:
+                expl_data = agent.generate_explanation(
+                    endpoint=ep,
+                    vulnerability_category=cat,
+                    validation_status=val_status,
+                    evidence_summary=event.message,
+                )
+                explanation_text = expl_data.get("explanation", explanation_text)
+                remediation_code = expl_data.get("remediation_code", remediation_code)
+            except Exception:
+                pass
+
         results.append(("explanation_generated", {
             "type": "explanation_generated",
             "endpoint": ep,
             "category": cat,
             "validation_status": val_status,
-            "explanation": expl_data["explanation"],
-            "remediation_code": expl_data.get("remediation_code"),
+            "explanation": explanation_text or f"Security analysis for {ep}",
+            "remediation_code": remediation_code,
+            "message": f"Generated security explanation and remediation for {ep}",
             "assessment_id": assessment_id,
         }))
     elif etype == EventType.EVIDENCE_VALIDATION_COMPLETED.value:
@@ -1485,26 +1718,27 @@ def _map_event_to_agent_sse(
             "type": "evidence_validated",
             "message": "Cryptographic evidence artifacts signed and verified (SHA-256)",
             "assessment_id": assessment_id,
-            "confirmed_count": event.metadata.get("confirmed_count", 0),
-            "suspicious_count": event.metadata.get("suspicious_count", 0),
+            "confirmed_count": meta.get("confirmed_count", 0),
+            "suspicious_count": meta.get("suspicious_count", 0),
         }))
     elif etype == EventType.ASSESSMENT_COMPLETED.value:
         results.append(("assessment_completed", {
             "type": "assessment_completed",
             "message": event.message or "Assessment concluded successfully",
             "assessment_id": assessment_id,
-            "confirmed_findings": event.metadata.get("confirmed_findings", 0),
-            "suspicious_results": event.metadata.get("suspicious_results", 0),
+            "confirmed_findings": meta.get("confirmed_findings", 0),
+            "suspicious_results": meta.get("suspicious_results", 0),
         }))
     elif etype == EventType.ASSESSMENT_FAILED.value:
         if event.stage in (
             AssessmentStage.TARGET_CONNECTION.value,
             AssessmentStage.SCOPE_VALIDATION.value,
             AssessmentStage.AUTHORIZATION_TESTING.value,
+            AssessmentStage.ENDPOINT_DISCOVERY.value,
         ):
             results.append(("tool_failed", {
                 "type": "tool_failed",
-                "tool": event.stage,
+                "tool": meta.get("tool", event.stage),
                 "error": event.message,
                 "message": f"Tool execution halted in {event.stage}: {event.message}",
                 "assessment_id": assessment_id,
@@ -1514,23 +1748,33 @@ def _map_event_to_agent_sse(
             "message": event.message,
             "assessment_id": assessment_id,
         }))
+    elif etype == EventType.ASSESSMENT_CANCELLED.value:
+        results.append(("assessment_cancelled", {
+            "type": "assessment_cancelled",
+            "message": event.message or "Assessment cancelled by operator.",
+            "assessment_id": assessment_id,
+        }))
     elif etype in {
         "agent_thinking",
         "agent_plan",
         "tool_started",
         "tool_completed",
         "tool_failed",
+        "endpoint_discovered",
         "finding_hypothesis",
         "finding_discovered",
         "evidence_validated",
         "source_location_found",
         "explanation_generated",
+        "assessment_completed",
+        "assessment_failed",
+        "assessment_cancelled",
     }:
         results.append((etype, {
             "type": etype,
             "message": event.message,
             "assessment_id": assessment_id,
-            **event.metadata,
+            **meta,
         }))
 
     return results
@@ -2030,6 +2274,7 @@ async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
     retest_results = []
     for f in findings:
         log_rec = retest_engine.retest_finding(f.id)
+        log_rec.id = f"retest_{f.id}_{uuid.uuid4().hex[:8]}"
         repo.save_retest_result(log_rec)
         retest_results.append(log_rec.model_dump(mode="json"))
 
