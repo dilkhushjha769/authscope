@@ -1,22 +1,31 @@
-"""Scanner package exports, loaded lazily to avoid analysis/scanner import cycles."""
+"""Scanner package public interface.
+
+Keep scanner submodules lazy: evidence validation imports request execution,
+and eagerly loading the security inspector here would create a circular import.
+"""
 
 from importlib import import_module
 from typing import Any
 
-__all__ = [
-    "SecurityInspector",
+_PUBLIC_TYPES = {
+    "CategoryInspectionResult",
     "DetectionCategory",
     "FindingSeverity",
     "FindingValidationStatus",
     "ParsedCookie",
     "SecurityFindingRecord",
-    "CategoryInspectionResult",
-]
+    "SecurityInspector",
+}
+
+__all__ = sorted(_PUBLIC_TYPES)
 
 
 def __getattr__(name: str) -> Any:
-    """Resolve public inspection symbols only when callers request them."""
-    if name not in __all__:
+    """Load security inspection types only when callers request them."""
+    if name not in _PUBLIC_TYPES:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
     module = import_module("backend.scanner.security_inspector")
-    return getattr(module, name)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
