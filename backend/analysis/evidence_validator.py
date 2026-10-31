@@ -34,6 +34,20 @@ JSON_SECRET_FIELD_REGEX = re.compile(
 class EvidenceValidator:
     """Validates, sanitizes, and signs non-destructive proof artifacts."""
 
+    URL_SENSITIVE_PARAM_REGEX = re.compile(
+        r"(?i)([?&;#](?:token|jwt|session_id|sessionid|sid|access_token|auth_token|api_key|apikey|password|secret)=)([^&#\s]+)"
+    )
+    VALID_FINDING_STATUSES = {
+        "CONFIRMED",
+        "SUSPICIOUS",
+        "NOT_CONFIRMED",
+        "INCONCLUSIVE",
+        "NOT_TESTED",
+        "REJECTED_FALSE_POSITIVE",
+        "UNVALIDATED",
+    }
+    """Validates, sanitizes, and signs non-destructive proof artifacts."""
+
     SENSITIVE_HEADER_KEYS = {
         "authorization": "Bearer [REDACTED_BEARER_TOKEN]",
         "proxy-authorization": "Bearer [REDACTED_BEARER_TOKEN]",
@@ -180,3 +194,89 @@ class EvidenceValidator:
                 return False
 
         return True
+
+    @classmethod
+    def sanitize_url(cls, url: str) -> Tuple[str, List[str]]:
+        """Redacts sensitive tokens, session IDs, or credentials in URL query/fragment parameters."""
+        if not url:
+            return "", []
+        redacted_params: List[str] = []
+        sanitized = url
+        if cls.URL_SENSITIVE_PARAM_REGEX.search(sanitized):
+            for match in cls.URL_SENSITIVE_PARAM_REGEX.finditer(sanitized):
+                param_prefix = match.group(1)
+                param_name = param_prefix.lstrip("?&;#").rstrip("=")
+                redacted_params.append(f"url_param:{param_name}")
+            sanitized = cls.URL_SENSITIVE_PARAM_REGEX.sub(r"\1[REDACTED_TOKEN]", sanitized)
+        if JWT_REGEX.search(sanitized):
+            sanitized = JWT_REGEX.sub("[REDACTED_JWT]", sanitized)
+            redacted_params.append("url_jwt")
+        return sanitized, redacted_params
+
+    @classmethod
+    def sanitize_set_cookie_preserve_attributes(cls, raw_set_cookie: str) -> str:
+        """Redacts the cookie value while preserving the cookie name and all security attributes.
+
+        Example:
+            'connect.sid=s%3Asecret123; Path=/; HttpOnly; SameSite=Lax'
+            -> 'connect.sid=[REDACTED_COOKIE_VALUE]; Path=/; HttpOnly; SameSite=Lax'
+        """
+        if not raw_set_cookie or not raw_set_cookie.strip():
+            return ""
+        parts = [p.strip() for p in raw_set_cookie.split(";") if p.strip()]
+        if not parts:
+            return ""
+        first = parts[0]
+        if "=" in first:
+            cookie_name, _ = first.split("=", 1)
+            redacted_first = f"{cookie_name.strip()}=[REDACTED_COOKIE_VALUE]"
+        else:
+            redacted_first = "[REDACTED_COOKIE_VALUE]"
+        if len(parts) > 1:
+            return "; ".join([redacted_first] + parts[1:])
+        return redacted_first
+
+    @classmethod
+    def validate_finding_evidence_dict(cls, finding: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """Validates a Sprint 2 security finding dictionary for completeness and zero secret leaks."""
+        errors: List[str] = []
+        required_keys = [
+            "finding_id",
+            "assessment_id",
+            "target_url",
+            "endpoint",
+            "method",
+            "detection_category",
+            "actual_response_evidence",
+            "sanitized_request_metadata",
+            "sanitized_response_metadata",
+            "relevant_headers_or_cookies",
+            "severity",
+            "severity_rationale",
+            "validation_status",
+            "confirmation_reason",
+            "remediation_guidance",
+        ]
+        for rk in required_keys:
+            if rk not in finding or finding[rk] is None or finding[rk] == "":
+                errors.append(f"Missing or empty required finding field: '{rk}'")
+
+        status = str(finding.get("validation_status", ""))
+        if status not in cls.VALID_FINDING_STATUSES:
+            errors.append(f"Invalid validation_status: '{status}'")
+
+        # Ensure no raw JWTs or unredacted Bearer tokens remain in evidence
+        evidence_str = str(finding.get("actual_response_evidence", "")) + " " + str(finding.get("sanitized_evidence", ""))
+        if JWT_REGEX.search(evidence_str):
+            errors.append("Raw JWT token detected in finding evidence.")
+        for m in BEARER_REGEX.finditer(evidence_str):
+            if "REDACTED" not in m.group(0).upper():
+                errors.append("Unredacted Bearer token detected in finding evidence.")
+
+        if status == "CONFIRMED":
+            if not str(finding.get("actual_response_evidence", "")).strip():
+                errors.append("CONFIRMED finding must contain non-empty actual_response_evidence.")
+            if not str(finding.get("confirmation_reason", "")).strip():
+                errors.append("CONFIRMED finding must contain a non-empty confirmation_reason.")
+
+        return len(errors) == 0, errors
