@@ -43,6 +43,8 @@ from backend.tools.schemas import (
     ProbeAccessControlOutput,
     TestAccessControlInput,
     TestAccessControlOutput,
+    TestBflaInput,
+    TestBflaOutput,
     ToolCategory,
     ToolCompletedEvent,
     ToolEventBase,
@@ -498,6 +500,28 @@ class ToolRegistry:
                 input_model=DetectIdorInput,
                 output_model=DetectIdorOutput,
                 handler=lambda args, ctx: self.authorization_tools.detect_idor(args, ctx),
+                requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="test_bfla",
+                description="Tests Broken Function Level Authorization against an administrative route across roles.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=TestBflaInput,
+                output_model=TestBflaOutput,
+                handler=lambda args, ctx: self.authorization_tools.test_bfla(args, ctx),
+                requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="compare_authorization",
+                description="Canonical alias for compare_endpoint_access: multi-role authorization testing.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=CompareEndpointAccessInput,
+                output_model=CompareEndpointAccessOutput,
+                handler=lambda args, ctx: self.authorization_tools.compare_endpoint_access(args, ctx),
                 requires_scope_check=True
             )
         )

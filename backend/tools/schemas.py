@@ -285,6 +285,45 @@ class DetectIdorOutput(BaseModel):
     vulnerability_title: Optional[str] = None
 
 
+class TestBflaInput(BaseModel):
+    """Input for testing Broken Function Level Authorization."""
+    __test__ = False
+    endpoint: str = Field(..., description="Administrative or privileged endpoint path")
+    test_roles: List[str] = Field(
+        default_factory=lambda: ["ANONYMOUS", "USER_A", "USER_B"],
+        description="Lower privilege roles to test against privileged function"
+    )
+    admin_role: str = Field(default="ADMIN", description="Privileged baseline role")
+
+
+class TestBflaOutput(BaseModel):
+    """Output for Broken Function Level Authorization testing."""
+    __test__ = False
+    endpoint: str
+    is_bfla_detected: bool
+    is_confirmed: bool
+    tested_roles: List[str]
+    verdict: str
+    evidence_summary: str
+    vulnerability_title: Optional[str] = None
+
+
+class CanonicalFinding(BaseModel):
+    """Canonical finding structure defined in Phase 5.3 contract."""
+    finding_id: str
+    assessment_id: str
+    target_url: str
+    endpoint: str
+    method: str = "GET"
+    testing_role: str
+    baseline_response: Dict[str, Any]
+    comparison_response: Dict[str, Any]
+    sanitized_evidence: str
+    response_hashes: Dict[str, Optional[str]]
+    validation_status: str
+    confirmation_reason: str
+
+
 # --- 3. Source Analysis Schemas ---
 
 
