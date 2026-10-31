@@ -1,39 +1,255 @@
 [
   {
     "id": "fnd_idor_basket_01",
+    "target_identifier": "scan_20261031_001",
     "scan_id": "scan_20261031_001",
     "title": "Broken Object Level Authorization (IDOR) on Shopping Basket",
-    "vulnerability_type": "BOLA_IDOR",
-    "severity": "HIGH",
-    "status": "confirmed",
+    "endpoint": "/rest/basket/1",
     "target_endpoint": "/rest/basket/1",
     "http_method": "GET",
+    "vulnerability_category": "BOLA_IDOR",
+    "vulnerability_type": "BOLA_IDOR",
+    "affected_role": "user_b",
     "affected_roles": [
       "user_b",
       "anonymous"
     ],
+    "expected_behavior": "Return HTTP 403 Forbidden when User B requests a shopping basket owned by User A (UserId 1).",
+    "actual_behavior": "Returned HTTP 200 OK with complete JSON basket payload containing User A product inventory and order metadata.",
+    "evidence_reference": "evi_8a4f91c2",
+    "confirmation_status": "confirmed",
+    "status": "confirmed",
+    "severity": "HIGH",
+    "impact_explanation": "Horizontal authorization flaw allows any authenticated user or attacker to enumerate and view private customer carts, order contents, and personal identifier tokens.",
     "description": "The endpoint /rest/basket/{id} returns customer cart details based solely on the URL path ID parameter. Requesting basket ID 1 using User B credentials successfully returned User A's private product inventory and order metadata without proper ownership verification.",
+    "remediation_recommendation": "// Node.js / Express Remediation\nconst basket = await BasketModel.findByPk(req.params.id);\nif (!basket) return res.status(404).send('Basket not found');\nif (basket.UserId !== req.user.id && req.user.role !== 'admin') {\n    return res.status(403).json({ error: 'Access Denied: You do not own this basket' });\n}",
     "remediation_guidance": "// Node.js / Express Remediation\nconst basket = await BasketModel.findByPk(req.params.id);\nif (!basket) return res.status(404).send('Basket not found');\nif (basket.UserId !== req.user.id && req.user.role !== 'admin') {\n    return res.status(403).json({ error: 'Access Denied: You do not own this basket' });\n}",
+    "created_timestamp": "2026-10-31T15:30:00Z",
+    "created_at": "2026-10-31T15:30:00Z",
+    "last_retested_timestamp": null,
+    "retest_status": null,
+    "technical_details": {
+      "differential_status": "200_vs_403_mismatch",
+      "data_classification": "PII_ORDER_METADATA"
+    },
     "evidence": {
+      "id": "evi_8a4f91c2",
       "evidence_id": "evi_8a4f91c2",
       "finding_id": "fnd_idor_basket_01",
       "timestamp": "2026-10-31T15:30:00Z",
+      "testing_role": "user_b",
       "test_role": "user_b",
       "authorized_role": "user_a",
-      "raw_request": {
-        "method": "GET",
-        "url": "http://localhost:3000/rest/basket/1",
-        "headers": {
-          "Host": "localhost:3000",
-          "Authorization": "Bearer [REDACTED_USER_B_JWT]"
-        }
+      "request_method": "GET",
+      "request_url": "http://localhost:3000/rest/basket/1",
+      "request_headers": {
+        "Host": "localhost:3000",
+        "Authorization": "Bearer [REDACTED_BEARER_TOKEN]"
       },
-      "raw_response": {
-        "status_code": 200,
-        "body": "{\"status\":\"success\",\"data\":{\"id\":1,\"UserId\":1,\"Products\":[{\"id\":1,\"name\":\"Apple Juice\"}]}}"
+      "request_metadata": {
+        "probe_type": "differential_cross_role",
+        "peer_role": "user_b"
       },
-      "evidence_sha256": "8a4f91c2b53e7f22384a86b3a097d8e6a1476b7e193e4d9c7f12e5a6438901b2"
+      "response_status": 200,
+      "relevant_response_headers": {
+        "Content-Type": "application/json; charset=utf-8"
+      },
+      "sanitized_response_body": "{\"status\":\"success\",\"data\":{\"id\":1,\"UserId\":1,\"Products\":[{\"id\":1,\"name\":\"Apple Juice\"}]}}",
+      "response_body": "{\"status\":\"success\",\"data\":{\"id\":1,\"UserId\":1,\"Products\":[{\"id\":1,\"name\":\"Apple Juice\"}]}}",
+      "evidence_validation_status": "valid",
+      "evidence_sha256": "8a4f91c2b53e7f22384a86b3a097d8e6a1476b7e193e4d9c7f12e5a6438901b2",
+      "redacted_fields": [
+        "Authorization"
+      ]
+    }
+  },
+  {
+    "id": "fnd_bfla_admin_users_02",
+    "target_identifier": "scan_20261031_001",
+    "scan_id": "scan_20261031_001",
+    "title": "Broken Function Level Authorization (BFLA) on User Administration",
+    "endpoint": "/api/Users",
+    "target_endpoint": "/api/Users",
+    "http_method": "GET",
+    "vulnerability_category": "BFLA",
+    "vulnerability_type": "BFLA",
+    "affected_role": "user_a",
+    "affected_roles": [
+      "user_a",
+      "user_b",
+      "anonymous"
+    ],
+    "expected_behavior": "Strictly restrict full customer list access to administrator role with HTTP 403 Forbidden for non-admins.",
+    "actual_behavior": "Standard authenticated User A successfully retrieved entire user directory including emails, hashed credentials, and role flags.",
+    "evidence_reference": "evi_c4e190ba",
+    "confirmation_status": "confirmed",
+    "status": "confirmed",
+    "severity": "CRITICAL",
+    "impact_explanation": "Vertical privilege escalation exposing tenant-wide customer accounts, enabling targeted account takeover and offline credential cracking.",
+    "description": "Administrative endpoint /api/Users fails to enforce RBAC middleware checks before querying the database, allowing any low-privilege role to view all users.",
+    "remediation_recommendation": "// Route-level RBAC middleware protection\nrouter.get('/api/Users', authMiddleware, requireRole('admin'), async (req, res) => {\n    const users = await UserModel.findAll({ attributes: ['id', 'email', 'role'] });\n    res.json({ status: 'success', data: users });\n});",
+    "remediation_guidance": "// Route-level RBAC middleware protection\nrouter.get('/api/Users', authMiddleware, requireRole('admin'), async (req, res) => {\n    const users = await UserModel.findAll({ attributes: ['id', 'email', 'role'] });\n    res.json({ status: 'success', data: users });\n});",
+    "created_timestamp": "2026-10-31T15:35:00Z",
+    "created_at": "2026-10-31T15:35:00Z",
+    "last_retested_timestamp": null,
+    "retest_status": null,
+    "technical_details": {
+      "differential_status": "rbac_bypass",
+      "data_classification": "CREDENTIALS_AND_ROLES"
+    },
+    "evidence": {
+      "id": "evi_c4e190ba",
+      "evidence_id": "evi_c4e190ba",
+      "finding_id": "fnd_bfla_admin_users_02",
+      "timestamp": "2026-10-31T15:35:00Z",
+      "testing_role": "user_a",
+      "test_role": "user_a",
+      "authorized_role": "admin",
+      "request_method": "GET",
+      "request_url": "http://localhost:3000/api/Users",
+      "request_headers": {
+        "Host": "localhost:3000",
+        "Authorization": "Bearer [REDACTED_BEARER_TOKEN]"
+      },
+      "request_metadata": {
+        "probe_type": "vertical_privilege_escalation",
+        "tested_role": "user_a"
+      },
+      "response_status": 200,
+      "relevant_response_headers": {
+        "Content-Type": "application/json"
+      },
+      "sanitized_response_body": "{\"status\":\"success\",\"data\":[{\"id\":1,\"email\":\"admin@juice-sh.op\",\"role\":\"admin\"},{\"id\":2,\"email\":\"victim@example.com\",\"role\":\"customer\"}]}",
+      "response_body": "{\"status\":\"success\",\"data\":[{\"id\":1,\"email\":\"admin@juice-sh.op\",\"role\":\"admin\"},{\"id\":2,\"email\":\"victim@example.com\",\"role\":\"customer\"}]}",
+      "evidence_validation_status": "valid",
+      "evidence_sha256": "c4e190bac88a31e1493019da821104e76a6d655f2d011884aa590b5671239ab1",
+      "redacted_fields": [
+        "Authorization"
+      ]
+    }
+  },
+  {
+    "id": "fnd_missing_auth_security_03",
+    "target_identifier": "scan_20261031_001",
+    "scan_id": "scan_20261031_001",
+    "title": "Missing Authentication on Security Questions Directory",
+    "endpoint": "/api/SecurityQuestions",
+    "target_endpoint": "/api/SecurityQuestions",
+    "http_method": "GET",
+    "vulnerability_category": "MISSING_AUTH",
+    "vulnerability_type": "MISSING_AUTH",
+    "affected_role": "anonymous",
+    "affected_roles": [
+      "anonymous"
+    ],
+    "expected_behavior": "Private system endpoints should require a valid authentication token before answering requests.",
+    "actual_behavior": "Anonymous requests with no Authorization header successfully retrieved all security question definitions and identifiers.",
+    "evidence_reference": "evi_5e921d77",
+    "confirmation_status": "confirmed",
+    "status": "confirmed",
+    "severity": "MEDIUM",
+    "impact_explanation": "Allows unauthenticated reconnaissance of password reset workflows and pre-computation of target answer matrices.",
+    "description": "Endpoint /api/SecurityQuestions completely omits session authentication checks, returning internal security question models to unauthenticated clients.",
+    "remediation_recommendation": "// Require valid user authentication\nrouter.get('/api/SecurityQuestions', authMiddleware, async (req, res) => {\n    const questions = await SecurityQuestionModel.findAll();\n    res.json({ status: 'success', data: questions });\n});",
+    "remediation_guidance": "// Require valid user authentication\nrouter.get('/api/SecurityQuestions', authMiddleware, async (req, res) => {\n    const questions = await SecurityQuestionModel.findAll();\n    res.json({ status: 'success', data: questions });\n});",
+    "created_timestamp": "2026-10-31T15:40:00Z",
+    "created_at": "2026-10-31T15:40:00Z",
+    "last_retested_timestamp": null,
+    "retest_status": null,
+    "technical_details": {
+      "differential_status": "unauthenticated_success",
+      "data_classification": "AUTH_METADATA"
+    },
+    "evidence": {
+      "id": "evi_5e921d77",
+      "evidence_id": "evi_5e921d77",
+      "finding_id": "fnd_missing_auth_security_03",
+      "timestamp": "2026-10-31T15:40:00Z",
+      "testing_role": "anonymous",
+      "test_role": "anonymous",
+      "authorized_role": "user_a",
+      "request_method": "GET",
+      "request_url": "http://localhost:3000/api/SecurityQuestions",
+      "request_headers": {
+        "Host": "localhost:3000"
+      },
+      "request_metadata": {
+        "probe_type": "unauthenticated_baseline",
+        "tested_role": "anonymous"
+      },
+      "response_status": 200,
+      "relevant_response_headers": {
+        "Content-Type": "application/json"
+      },
+      "sanitized_response_body": "{\"status\":\"success\",\"data\":[{\"id\":1,\"question\":\"Mother's maiden name?\"},{\"id\":2,\"question\":\"First pet's name?\"}]}",
+      "response_body": "{\"status\":\"success\",\"data\":[{\"id\":1,\"question\":\"Mother's maiden name?\"},{\"id\":2,\"question\":\"First pet's name?\"}]}",
+      "evidence_validation_status": "valid",
+      "evidence_sha256": "5e921d77a83d711bc21008d59f712954a116892ccbc1622340156993ef178821",
+      "redacted_fields": []
+    }
+  },
+  {
+    "id": "fnd_mass_assign_profile_04",
+    "target_identifier": "scan_20261031_001",
+    "scan_id": "scan_20261031_001",
+    "title": "Mass Assignment Vulnerability in Profile Role Modification",
+    "endpoint": "/api/Users/2",
+    "target_endpoint": "/api/Users/2",
+    "http_method": "PUT",
+    "vulnerability_category": "MASS_ASSIGNMENT",
+    "vulnerability_type": "MASS_ASSIGNMENT",
+    "affected_role": "user_b",
+    "affected_roles": [
+      "user_b"
+    ],
+    "expected_behavior": "Profile update endpoints must reject or strip restricted administrative parameters such as role or isAdmin.",
+    "actual_behavior": "Supplying role: 'admin' in the JSON update payload successfully elevated User B to full administrator privileges with HTTP 200 OK.",
+    "evidence_reference": "evi_98fe1140",
+    "confirmation_status": "confirmed",
+    "status": "confirmed",
+    "severity": "CRITICAL",
+    "impact_explanation": "Enables standard low-privilege users to self-promote to full administrator access, compromising system integrity and authorization guarantees.",
+    "description": "Endpoint /api/Users/{id} directly binds user-supplied JSON properties to the persistent database model without field filtering.",
+    "remediation_recommendation": "// Explicit property allowlisting\nconst allowedFields = ['username', 'profileImage'];\nconst safeUpdates = Object.keys(req.body)\n    .filter(k => allowedFields.includes(k))\n    .reduce((obj, key) => { obj[key] = req.body[key]; return obj; }, {});\nawait UserModel.update(safeUpdates, { where: { id: req.user.id } });",
+    "remediation_guidance": "// Explicit property allowlisting\nconst allowedFields = ['username', 'profileImage'];\nconst safeUpdates = Object.keys(req.body)\n    .filter(k => allowedFields.includes(k))\n    .reduce((obj, key) => { obj[key] = req.body[key]; return obj; }, {});\nawait UserModel.update(safeUpdates, { where: { id: req.user.id } });",
+    "created_timestamp": "2026-10-31T15:45:00Z",
+    "created_at": "2026-10-31T15:45:00Z",
+    "last_retested_timestamp": null,
+    "retest_status": null,
+    "technical_details": {
+      "differential_status": "mass_assignment_priv_esc",
+      "data_classification": "AUTHORIZATION_ROLES"
+    },
+    "evidence": {
+      "id": "evi_98fe1140",
+      "evidence_id": "evi_98fe1140",
+      "finding_id": "fnd_mass_assign_profile_04",
+      "timestamp": "2026-10-31T15:45:00Z",
+      "testing_role": "user_b",
+      "test_role": "user_b",
+      "authorized_role": "user_b",
+      "request_method": "PUT",
+      "request_url": "http://localhost:3000/api/Users/2",
+      "request_headers": {
+        "Host": "localhost:3000",
+        "Authorization": "Bearer [REDACTED_BEARER_TOKEN]",
+        "Content-Type": "application/json"
+      },
+      "request_metadata": {
+        "payload_field_tampered": "role",
+        "tampered_value": "admin"
+      },
+      "response_status": 200,
+      "relevant_response_headers": {
+        "Content-Type": "application/json"
+      },
+      "sanitized_response_body": "{\"status\":\"success\",\"data\":{\"id\":2,\"email\":\"attacker@juice-sh.op\",\"role\":\"admin\"}}",
+      "response_body": "{\"status\":\"success\",\"data\":{\"id\":2,\"email\":\"attacker@juice-sh.op\",\"role\":\"admin\"}}",
+      "evidence_validation_status": "valid",
+      "evidence_sha256": "98fe1140bc8351f0449a1d95015b6728e10034a78129e9ca89012351abf12019",
+      "redacted_fields": [
+        "Authorization"
+      ]
     }
   }
 ]
-

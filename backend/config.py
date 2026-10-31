@@ -4,8 +4,9 @@ Manages application settings, scope allowlists, role credentials, and Anthropic
 API configuration using Pydantic Settings and environment variables.
 """
 
-from typing import List
-from pydantic import Field
+from typing import List, Union, Any
+import json
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,9 +19,9 @@ class Settings(BaseSettings):
 
     # Scope Allowlist Rules
     target_base_url: str = Field(default="http://localhost:3000", alias="TARGET_BASE_URL")
-    allowed_hosts: List[str] = Field(default_factory=lambda: ["localhost", "127.0.0.1"])
-    allowed_ports: List[int] = Field(default_factory=lambda: [3000])
-    allowed_schemes: List[str] = Field(default_factory=lambda: ["http", "https"])
+    allowed_hosts: Union[List[str], str] = Field(default_factory=lambda: ["localhost", "127.0.0.1"], alias="ALLOWED_HOSTS")
+    allowed_ports: Union[List[int], int, str] = Field(default_factory=lambda: [3000], alias="ALLOWED_PORTS")
+    allowed_schemes: Union[List[str], str] = Field(default_factory=lambda: ["http", "https"], alias="ALLOWED_SCHEMES")
 
     # Test Roles Credentials (OWASP Juice Shop defaults)
     user_a_email: str = Field(default="user1@juice-sh.op", alias="USER_A_EMAIL")
@@ -43,6 +44,34 @@ class Settings(BaseSettings):
     follow_redirects: bool = Field(default=False, alias="FOLLOW_REDIRECTS")
     safe_mode: bool = Field(default=True, alias="SAFE_MODE")
 
+    @field_validator("allowed_hosts", "allowed_schemes", mode="after")
+    @classmethod
+    def parse_string_list(cls, v: Any) -> List[str]:
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    pass
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
+
+    @field_validator("allowed_ports", mode="after")
+    @classmethod
+    def parse_int_list(cls, v: Any) -> List[int]:
+        if isinstance(v, int):
+            return [v]
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    return [int(x) for x in json.loads(v)]
+                except Exception:
+                    pass
+            return [int(item.strip()) for item in v.split(",") if item.strip()]
+        return v
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -52,4 +81,3 @@ class Settings(BaseSettings):
 
 # Global settings singleton
 settings = Settings()
-

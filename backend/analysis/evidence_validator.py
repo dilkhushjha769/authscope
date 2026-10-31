@@ -1,30 +1,14 @@
 """Evidence Validator: Redacts secrets, verifies proof reproducibility, and generates SHA-256 hashes."""
 
 from typing import Dict, Any, List
-from datetime import datetime
-from pydantic import BaseModel, Field
+from datetime import datetime, timezone
 from backend.core.session_manager import Role
 from backend.scanner.request_executor import HttpResponseModel
-from backend.utils.helpers import compute_sha256
+from backend.storage.models import EvidenceArtifact
+from backend.utils.helpers import compute_sha256, redact_sensitive_text
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-
-class EvidenceArtifact(BaseModel):
-    """Immutable evidence package supporting a confirmed security finding."""
-    id: str
-    finding_id: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    test_role: Role
-    authorized_role: Role
-    request_method: str
-    request_url: str
-    request_headers: Dict[str, str] = Field(default_factory=dict)
-    response_status: int
-    response_body: str
-    evidence_sha256: str
-    redacted_tokens: List[str] = Field(default_factory=list)
 
 
 class EvidenceValidator:
@@ -40,32 +24,51 @@ class EvidenceValidator:
         headers: Dict[str, str],
         response: HttpResponseModel
     ) -> EvidenceArtifact:
-        """Sanitizes sensitive headers and computes an immutable SHA-256 evidence hash.
-
-        TODO (Phase 6): Implement deep token pattern matching and sanitization.
-        """
-        # Redact Authorization header if present
+        """Sanitizes sensitive headers and computes an immutable SHA-256 evidence hash."""
         sanitized_headers = dict(headers)
-        redacted_list = []
-        if "Authorization" in sanitized_headers:
-            sanitized_headers["Authorization"] = "Bearer [REDACTED_BEARER_TOKEN]"
-            redacted_list.append("Authorization")
+        redacted_list: List[str] = []
 
-        canonical_string = f"{method}|{url}|{response.status_code}|{response.body}"
+        # Sanitize authorization headers
+        for k in list(sanitized_headers.keys()):
+            k_lower = k.lower()
+            if k_lower in ("authorization", "proxy-authorization"):
+                sanitized_headers[k] = "Bearer [REDACTED_BEARER_TOKEN]"
+                if k not in redacted_list:
+                    redacted_list.append(k)
+            elif k_lower in ("cookie", "set-cookie"):
+                sanitized_headers[k] = "[REDACTED_COOKIE]"
+                if k not in redacted_list:
+                    redacted_list.append(k)
+            elif k_lower in ("x-api-key", "api-key", "x-auth-token"):
+                sanitized_headers[k] = "[REDACTED_API_KEY]"
+                if k not in redacted_list:
+                    redacted_list.append(k)
+
+        # Sanitize response body
+        raw_body = response.body
+        sanitized_body = redact_sensitive_text(raw_body)
+        if sanitized_body != raw_body:
+            redacted_list.append("response_body")
+
+        canonical_string = f"{method}|{url}|{response.status_code}|{raw_body}"
         sha256_hash = compute_sha256(canonical_string)
 
         logger.info("Cryptographic evidence artifact signed", extra={"sha256": sha256_hash[:12]})
         return EvidenceArtifact(
             id=f"evi_{sha256_hash[:8]}",
+            evidence_id=f"evi_{sha256_hash[:8]}",
             finding_id=finding_id,
+            testing_role=test_role,
             test_role=test_role,
             authorized_role=authorized_role,
             request_method=method,
             request_url=url,
             request_headers=sanitized_headers,
             response_status=response.status_code,
-            response_body=response.body,
+            sanitized_response_body=sanitized_body,
+            response_body=sanitized_body,
             evidence_sha256=sha256_hash,
+            evidence_validation_status="valid",
+            redacted_fields=redacted_list,
             redacted_tokens=redacted_list
         )
-
