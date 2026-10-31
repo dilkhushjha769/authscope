@@ -67,6 +67,7 @@ class FindingRepository:
         }
         started_str = _dt_to_iso(session.started_at)
         completed_str = _dt_to_iso(session.completed_at)
+        updated_str = _dt_to_iso(session.updated_at or datetime.now(timezone.utc))
 
         with self.db.get_connection() as conn:
             conn.execute(
@@ -75,8 +76,8 @@ class FindingRepository:
                     id, target_url, status, started_at, completed_at,
                     endpoints_discovered_count, endpoints_tested_count,
                     confirmed_findings_count, suspicious_results_count,
-                    stages_json, summary_text, config_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    stages_json, summary_text, config_json, updated_at, failure_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.id,
@@ -91,10 +92,62 @@ class FindingRepository:
                     json.dumps(stages_serialized),
                     session.summary_text,
                     json.dumps(session.config or {}),
+                    updated_str,
+                    session.failure_reason or "",
                 ),
             )
             conn.commit()
         return session.id
+
+    def recover_orphaned_running_sessions(self, active_session_ids: Optional[Set[str]] = None) -> int:
+        """Identifies assessments left in RUNNING/PENDING state from previous server executions and marks them FAILED.
+
+        Args:
+            active_session_ids: Optional set of actively running in-memory task IDs to preserve.
+
+        Returns:
+            Count of orphaned sessions marked as FAILED with SERVER_RESTART.
+        """
+        active_set = active_session_ids or set()
+        with self.db.get_connection() as conn:
+            query = "SELECT id FROM scan_sessions WHERE status IN ('RUNNING', 'PENDING')"
+            rows = conn.execute(query).fetchall()
+            orphaned = [r["id"] for r in rows if r["id"] not in active_set]
+            if not orphaned:
+                return 0
+
+            placeholders = ",".join("?" for _ in orphaned)
+            now_iso = _dt_to_iso(datetime.now(timezone.utc))
+            conn.execute(
+                f"""
+                UPDATE scan_sessions
+                SET status = 'FAILED',
+                    completed_at = ?,
+                    updated_at = ?,
+                    failure_reason = 'SERVER_RESTART',
+                    summary_text = 'Assessment interrupted by server restart.'
+                WHERE id IN ({placeholders})
+                """,
+                (now_iso, now_iso, *orphaned),
+            )
+            for scan_id in orphaned:
+                conn.execute(
+                    """
+                    INSERT INTO assessment_events (
+                        scan_id, event_type, stage, message, timestamp, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_id,
+                        "assessment_failed",
+                        "report_preparation",
+                        "Assessment was interrupted by server restart (SERVER_RESTART). Operator can retry.",
+                        now_iso,
+                        json.dumps({"reason": "SERVER_RESTART", "failure_reason": "SERVER_RESTART"}),
+                    ),
+                )
+            conn.commit()
+            return len(orphaned)
 
     def get_scan_session(self, scan_id: str) -> Optional[ScanSessionRecord]:
         """Retrieves a single ScanSessionRecord by ID."""
@@ -158,6 +211,8 @@ class FindingRepository:
             stages=stages_dict,
             summary_text=row["summary_text"] if "summary_text" in row_keys else "",
             config=cfg,
+            updated_at=_iso_to_dt(row["updated_at"]) if "updated_at" in row_keys and row["updated_at"] else (_iso_to_dt(row["started_at"]) or datetime.now(timezone.utc)),
+            failure_reason=row["failure_reason"] if "failure_reason" in row_keys and row["failure_reason"] else "",
         )
 
     def save_event(self, event: AssessmentEvent) -> int:

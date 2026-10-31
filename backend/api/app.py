@@ -57,6 +57,10 @@ class AssessmentTaskManager:
         task = self._tasks.get(scan_id)
         return task is not None and not task.done()
 
+    def get_active_scan_ids(self) -> Set[str]:
+        """Returns the set of scan IDs with currently active background tasks in memory."""
+        return {sid for sid, task in self._tasks.items() if not task.done()}
+
     def cancel(self, scan_id: str) -> bool:
         token = self._tokens.get(scan_id)
         if token:
@@ -97,7 +101,7 @@ class AssessmentTaskManager:
         engine = AssessmentEngine(repository=repo)
         gen = engine.stream_assessment(target_url=target_url, cancel_token=token)
 
-        try:
+        async def _execute_steps() -> None:
             while True:
                 # Run generator next() in worker thread without blocking event loop
                 event = await asyncio.to_thread(lambda: next(gen, None))
@@ -113,13 +117,40 @@ class AssessmentTaskManager:
                 # Yield brief time to asyncio event loop
                 await asyncio.sleep(0.04)
 
+        try:
+            await asyncio.wait_for(_execute_steps(), timeout=settings.assessment_timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.error(f"Assessment {scan_id} timed out after {settings.assessment_timeout_seconds}s")
+            token.cancel()
+            try:
+                curr_session = repo.get_scan_session(scan_id)
+                if curr_session and curr_session.status not in ("COMPLETED", "CANCELLED", "FAILED"):
+                    curr_session.status = "FAILED"
+                    curr_session.failure_reason = "TIMEOUT"
+                    curr_session.completed_at = datetime.now(timezone.utc)
+                    curr_session.updated_at = datetime.now(timezone.utc)
+                    curr_session.summary_text = f"Assessment exceeded timeout limit ({settings.assessment_timeout_seconds}s)."
+                    repo.save_scan_session(curr_session)
+                    timeout_ev = AssessmentEvent(
+                        scan_id=scan_id,
+                        event_type=EventType.ASSESSMENT_FAILED.value,
+                        stage=AssessmentStage.PREPARING_RESULTS.value,
+                        message=f"Assessment timed out after {settings.assessment_timeout_seconds} seconds.",
+                        metadata={"reason": "TIMEOUT", "timeout_seconds": settings.assessment_timeout_seconds},
+                    )
+                    repo.save_event(timeout_ev)
+            except Exception as e:
+                logger.warning(f"Error recording timeout for {scan_id}: {e}")
+            await self._broadcast(scan_id, ("error", f"Assessment timed out after {settings.assessment_timeout_seconds}s", None))
         except Exception as exc:
             logger.error(f"Error in background assessment task {scan_id}: {exc}", exc_info=True)
             try:
                 curr_session = repo.get_scan_session(scan_id)
                 if curr_session and curr_session.status not in ("COMPLETED", "CANCELLED", "FAILED"):
                     curr_session.status = "FAILED"
+                    curr_session.failure_reason = "EXECUTION_ERROR"
                     curr_session.completed_at = datetime.now(timezone.utc)
+                    curr_session.updated_at = datetime.now(timezone.utc)
                     curr_session.summary_text = f"Assessment failed: {exc}"
                     repo.save_scan_session(curr_session)
             except Exception:
@@ -172,6 +203,16 @@ app = FastAPI(
     version="1.0.0",
 )
 
+
+@app.on_event("startup")
+async def startup_recovery() -> None:
+    """Recovers orphaned running assessments from previous server executions on startup."""
+    repo = FindingRepository()
+    active_ids = task_manager.get_active_scan_ids()
+    recovered = repo.recover_orphaned_running_sessions(active_session_ids=active_ids)
+    if recovered > 0:
+        logger.info(f"Startup recovery: marked {recovered} orphaned session(s) as FAILED with SERVER_RESTART")
+
 # Enable CORS for explicit configured development origins only (never wildcard with credentials)
 cors_origins_list = (
     settings.cors_origins
@@ -211,7 +252,9 @@ class AssessmentSummaryResponse(BaseModel):
     target_url: str
     status: str
     started_at: str
-    completed_at: Optional[str]
+    updated_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    failure_reason: Optional[str] = ""
     endpoints_discovered_count: int
     endpoints_tested_count: int
     confirmed_findings_count: int
@@ -574,6 +617,66 @@ def stop_assessment(assessment_id: str) -> Dict[str, Any]:
     token.cancel()
     return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
 
+@app.post("/api/assessments/{assessment_id}/retry", response_model=CreateAssessmentResponse)
+async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
+    """Retries an interrupted, failed, or cancelled assessment."""
+    repo = FindingRepository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Assessment {assessment_id} not found.",
+        )
+
+    if task_manager.is_running(assessment_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Assessment {assessment_id} is already actively running.",
+        )
+
+    # Validate scope for target url
+    scope_guard = ScopeGuard()
+    check = scope_guard.validate_request(url=session.target_url, method="GET")
+    if not check.is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Scope violation: {check.reason}",
+        )
+
+    # Reset session fields for retry
+    now = datetime.now(timezone.utc)
+    session.status = "PENDING"
+    session.failure_reason = ""
+    session.started_at = now
+    session.updated_at = now
+    session.completed_at = None
+    session.stages = AssessmentEngine._init_stages()
+    session.endpoints_discovered_count = 0
+    session.endpoints_tested_count = 0
+    session.confirmed_findings_count = 0
+    session.suspicious_results_count = 0
+    session.summary_text = ""
+    repo.save_scan_session(session)
+
+    # Launch background task
+    token = CancellationToken()
+    task_manager.start_assessment_task(
+        scan_id=assessment_id,
+        target_url=session.target_url,
+        token=token,
+        repo=repo,
+    )
+
+    logger.info(f"Retried assessment session {assessment_id} for target {session.target_url}")
+    return CreateAssessmentResponse(
+        assessment_id=assessment_id,
+        target_url=session.target_url,
+        status="PENDING",
+        created_at=session.started_at.isoformat(),
+        message="Assessment retried and running in background. Connect to SSE stream to observe.",
+    )
+
+
 
 @app.get("/api/assessments/{assessment_id}", response_model=AssessmentSummaryResponse)
 def get_assessment(assessment_id: str) -> AssessmentSummaryResponse:
@@ -596,7 +699,9 @@ def get_assessment(assessment_id: str) -> AssessmentSummaryResponse:
         target_url=session.target_url,
         status=session.status,
         started_at=session.started_at.isoformat(),
+        updated_at=session.updated_at.isoformat() if session.updated_at else None,
         completed_at=session.completed_at.isoformat() if session.completed_at else None,
+        failure_reason=session.failure_reason,
         endpoints_discovered_count=session.endpoints_discovered_count,
         endpoints_tested_count=session.endpoints_tested_count,
         confirmed_findings_count=session.confirmed_findings_count,

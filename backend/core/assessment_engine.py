@@ -188,6 +188,7 @@ class AssessmentEngine:
         rec.status = StageStatus.RUNNING
         rec.explanation = sanitize_event_text(explanation)
         rec.started_at = datetime.now(timezone.utc).isoformat()
+        session.updated_at = datetime.now(timezone.utc)
         self.repository.save_scan_session(session)
         return time.perf_counter()
 
@@ -205,6 +206,7 @@ class AssessmentEngine:
         rec.explanation = sanitize_event_text(explanation)
         rec.completed_at = datetime.now(timezone.utc).isoformat()
         rec.duration_ms = round((time.perf_counter() - start_perf) * 1000.0, 2)
+        session.updated_at = datetime.now(timezone.utc)
         self.repository.save_scan_session(session)
 
     def _skip_remaining_stages(self, session: ScanSessionRecord, reason: str) -> None:
@@ -555,6 +557,7 @@ class AssessmentEngine:
                 t_stage4,
                 session_summary_msg,
             )
+            cred_report = self.session_manager.validate_configured_credentials()
             yield self._emit_event(
                 session,
                 EventType.SESSION_VALIDATION_COMPLETED,
@@ -564,6 +567,9 @@ class AssessmentEngine:
                     "user_a_authenticated": user_a_ok,
                     "user_b_authenticated": user_b_ok,
                     "admin_authenticated": admin_ok,
+                    "authenticated_roles": active_roles_list,
+                    "multi_role_ready": cred_report["multi_role_ready"],
+                    "anonymous_baseline_ready": True,
                 },
             )
 

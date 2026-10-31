@@ -148,6 +148,8 @@ class ScanSessionRecord(BaseModel):
     stages: Dict[str, StageStateRecord] = Field(default_factory=dict)
     summary_text: str = ""
     config: Dict[str, Any] = Field(default_factory=dict, description="Scan parameters")
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    failure_reason: str = Field(default="", description="Failure reason code: SERVER_RESTART, TIMEOUT, etc.")
 
 
 class EvidenceArtifact(BaseModel):

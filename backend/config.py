@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     # Execution Guardrails & Request Constraints
     request_timeout_seconds: float = Field(default=10.0, alias="REQUEST_TIMEOUT_SECONDS")
+    assessment_timeout_seconds: float = Field(default=300.0, alias="ASSESSMENT_TIMEOUT_SECONDS")
     max_requests_per_minute: int = Field(default=120, alias="MAX_REQUESTS_PER_MINUTE")
     max_response_size_bytes: int = Field(default=1_048_576, alias="MAX_RESPONSE_SIZE_BYTES")  # 1 MB max response
     max_body_display_chars: int = Field(default=25_000, alias="MAX_BODY_DISPLAY_CHARS")

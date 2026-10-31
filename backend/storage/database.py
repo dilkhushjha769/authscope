@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS scan_sessions (
     suspicious_results_count INTEGER DEFAULT 0,
     stages_json TEXT DEFAULT '{}',
     summary_text TEXT DEFAULT '',
-    config_json TEXT DEFAULT '{}'
+    config_json TEXT DEFAULT '{}',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    failure_reason TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS discovered_endpoints (
@@ -184,6 +186,8 @@ class DatabaseManager:
             ("scan_sessions", "stages_json", "TEXT DEFAULT '{}'"),
             ("scan_sessions", "summary_text", "TEXT DEFAULT ''"),
             ("scan_sessions", "config_json", "TEXT DEFAULT '{}'"),
+            ("scan_sessions", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ("scan_sessions", "failure_reason", "TEXT DEFAULT ''"),
             ("findings", "target_identifier", "TEXT DEFAULT ''"),
             ("findings", "validation_status", "TEXT DEFAULT 'CONFIRMED'"),
             ("findings", "access_verdict", "TEXT DEFAULT 'CONFIRMED_UNAUTHORIZED_ACCESS'"),
