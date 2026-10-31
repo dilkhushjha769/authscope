@@ -396,6 +396,12 @@ export default function Home() {
           const startTimeMs = data.started_at ? new Date(data.started_at).getTime() : Date.now();
           setStartTime(startTimeMs);
 
+          if (backendStatus === "failed" && (!data.events || data.events.length === 0)) {
+            // Interrupted or empty session from previous server restart; clear stale state to start clean
+            localStorage.removeItem("authscope_last_assessment_id");
+            return;
+          }
+
           if (backendStatus === "completed") {
             const hasFindings =
               (data.confirmed_findings_count || 0) > 0 ||
@@ -482,8 +488,12 @@ export default function Home() {
       // 2. Open EventSource stream
       connectSSE(scanId);
     } catch (err: unknown) {
+      const rawMsg = err instanceof Error ? err.message : "Failed to start assessment.";
       const msg =
-        err instanceof Error ? err.message : "Failed to start assessment.";
+        rawMsg.toLowerCase().includes("failed to fetch") ||
+        rawMsg.toLowerCase().includes("networkerror")
+          ? "Unable to reach the AuthScope API backend on http://localhost:8000. Please ensure the FastAPI backend is running."
+          : rawMsg;
       setError(msg);
       setStatus("failed");
     }
@@ -923,6 +933,24 @@ export default function Home() {
                     >
                       {streamingText}
                     </ReactMarkdown>
+                  ) : status === "failed" || status === "cancelled" ? (
+                    <div className="p-4 rounded-xl bg-red-950/20 border border-red-800/40 text-red-300 text-sm flex flex-col gap-2.5">
+                      <div className="flex items-center gap-2 font-medium text-red-400">
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                        <span>Assessment Halted</span>
+                      </div>
+                      <p className="text-xs text-gray-300 leading-relaxed">
+                        {error || "The assessment was interrupted or halted before completion. Ensure the backend API is running and target application is reachable."}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={resetAssessment}
+                        className="self-start mt-1.5 px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors flex items-center gap-1.5 shadow-md shadow-blue-600/20"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Start New Assessment
+                      </button>
+                    </div>
                   ) : (
                     <div className="flex items-center gap-2 text-gray-400 text-sm italic">
                       <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
