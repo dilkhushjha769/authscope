@@ -5,6 +5,7 @@
 - Resolved the active merge conflicts in the API app, finding card, and API test package initializer.
 - Restored backend startup. `backend.api.app` imports successfully, Uvicorn starts, and `/api/health` returns `healthy`.
 - Connected the minimal AuthScope workspace to the existing assessment create, fetch, stream, stop, and history endpoints.
+- Reshaped the assessment screen into a chat-style conversation with the target bubble, AuthScope reply header, live engine activity, findings, and report. Kept events and findings sourced from the backend; did not copy the prototype sample data or timed fake progress.
 - Added localhost URL normalization, submission/loading/error states, retry and reconnect behavior, event ID deduplication, finding/report rendering, and print styling.
 - Removed the extra authorization checkbox while retaining an authorization notice and server-side ScopeGuard validation.
 - Kept the security engine verdict separate from AI review. The UI reports AI review as unavailable when no AI finding analysis is returned by the backend.
@@ -60,7 +61,8 @@ The remaining test warnings are FastAPI `on_event` deprecation, an unregistered 
 ## Known limitations
 
 - AI review requires a backend API/SSE contract addition before the frontend can show real AI review conclusions or progress.
-- Screenshot evidence was not captured.
+- Screenshot evidence was not saved.
+- A frontend process already running on port 3001 serves an older stylesheet bundle. Restart that process to load the latest chat-style assessment layout.
 - Local run requires dependencies from `requirements.txt` (including `google-genai`) and a configured `NEXT_PUBLIC_API_URL`.
 
 ## Run locally
