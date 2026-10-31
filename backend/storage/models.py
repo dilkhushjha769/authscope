@@ -14,7 +14,7 @@ import uuid
 from pydantic import BaseModel, Field, field_validator, model_validator
 from backend.core.session_manager import Role
 from backend.analysis.severity_engine import SeverityLevel
-from backend.utils.helpers import compute_sha256, redact_sensitive_text
+from backend.utils.helpers import compute_sha256, redact_sensitive_text, sanitize_dict_or_list
 
 
 class VulnerabilityType(str, Enum):
@@ -126,6 +126,12 @@ class EvidenceArtifact(BaseModel):
                 data.setdefault("response_status", int(resp.get("status_code", 200)))
                 data.setdefault("sanitized_response_body", str(resp.get("body", "")))
 
+        # Sanitize request_url and request_metadata
+        if "request_url" in data:
+            data["request_url"] = redact_sensitive_text(str(data["request_url"]))
+        if "request_metadata" in data:
+            data["request_metadata"] = sanitize_dict_or_list(data["request_metadata"])
+
         # Harmonize response body
         body = data.get("sanitized_response_body") or data.get("response_body") or ""
         redacted_fields = list(data.get("redacted_fields") or data.get("redacted_tokens") or [])
@@ -135,20 +141,24 @@ class EvidenceArtifact(BaseModel):
         sanitized_headers = {}
         for k, v in headers.items():
             k_lower = k.lower()
+            v_str = str(v)
             if k_lower in ("authorization", "proxy-authorization"):
-                sanitized_headers[k] = "Bearer [REDACTED_BEARER_TOKEN]"
+                if v_str.lower().startswith("basic "):
+                    sanitized_headers[k] = "Basic [REDACTED_BASIC_AUTH]"
+                else:
+                    sanitized_headers[k] = "Bearer [REDACTED_BEARER_TOKEN]"
                 if k not in redacted_fields:
                     redacted_fields.append(k)
             elif k_lower in ("cookie", "set-cookie"):
                 sanitized_headers[k] = "[REDACTED_COOKIE]"
                 if k not in redacted_fields:
                     redacted_fields.append(k)
-            elif k_lower in ("x-api-key", "api-key", "x-auth-token"):
+            elif k_lower in ("x-api-key", "api-key", "x-auth-token", "x-access-token", "x-csrf-token"):
                 sanitized_headers[k] = "[REDACTED_API_KEY]"
                 if k not in redacted_fields:
                     redacted_fields.append(k)
             else:
-                sanitized_headers[k] = redact_sensitive_text(str(v))
+                sanitized_headers[k] = redact_sensitive_text(v_str)
         data["request_headers"] = sanitized_headers
 
         # Sanitize response body
@@ -163,8 +173,16 @@ class EvidenceArtifact(BaseModel):
         sanitized_resp_headers = {}
         for k, v in resp_headers.items():
             k_lower = k.lower()
-            if k_lower in ("set-cookie", "authorization"):
+            if k_lower in ("set-cookie", "cookie"):
+                sanitized_resp_headers[k] = "[REDACTED_COOKIE]"
+                if f"response_{k}" not in redacted_fields:
+                    redacted_fields.append(f"response_{k}")
+            elif k_lower in ("authorization", "proxy-authorization"):
                 sanitized_resp_headers[k] = "[REDACTED]"
+                if f"response_{k}" not in redacted_fields:
+                    redacted_fields.append(f"response_{k}")
+            elif k_lower in ("x-api-key", "api-key", "x-auth-token"):
+                sanitized_resp_headers[k] = "[REDACTED_API_KEY]"
                 if f"response_{k}" not in redacted_fields:
                     redacted_fields.append(f"response_{k}")
             else:
@@ -323,6 +341,10 @@ class FindingRecord(BaseModel):
                 data["evidence_reference"] = evi.get("id") or evi.get("evidence_id")
             elif hasattr(evi, "id"):
                 data["evidence_reference"] = getattr(evi, "id")
+
+        # Sanitize technical_details
+        if "technical_details" in data:
+            data["technical_details"] = sanitize_dict_or_list(data["technical_details"])
 
         return data
 
