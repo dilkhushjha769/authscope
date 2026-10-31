@@ -2,15 +2,18 @@
 
 import React, { useState } from "react";
 import {
+  AlertCircle,
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock,
   Copy,
   Check,
   Code,
   FileText,
   FileCode,
+  HelpCircle,
   ShieldAlert,
   Terminal,
 } from "lucide-react";
@@ -48,9 +51,43 @@ export function FindingCard({ finding, index }: FindingCardProps) {
   };
   const sevStyle = severityColors[severityUpper] || severityColors.MEDIUM;
 
-  const isConfirmed =
-    finding.validation_status.toUpperCase() === "CONFIRMED" ||
-    finding.confidence.toUpperCase() === "CONFIRMED";
+  const statusUpper = (finding.validation_status || "UNVALIDATED").toUpperCase();
+
+  const getValidationBadge = (status: string) => {
+    switch (status) {
+      case "CONFIRMED":
+        return {
+          bg: "bg-emerald-950/40 text-emerald-300 border-emerald-600/40",
+          icon: <CheckCircle2 className="w-3 h-3 text-emerald-400" />,
+        };
+      case "SUSPICIOUS":
+        return {
+          bg: "bg-amber-950/40 text-amber-300 border-amber-600/40",
+          icon: <AlertTriangle className="w-3 h-3 text-amber-400" />,
+        };
+      case "NOT_CONFIRMED":
+        return {
+          bg: "bg-slate-900/60 text-slate-300 border-slate-600/40",
+          icon: <AlertCircle className="w-3 h-3 text-slate-400" />,
+        };
+      case "INCONCLUSIVE":
+        return {
+          bg: "bg-purple-950/40 text-purple-300 border-purple-600/40",
+          icon: <HelpCircle className="w-3 h-3 text-purple-400" />,
+        };
+      case "NOT_TESTED":
+        return {
+          bg: "bg-zinc-900/60 text-zinc-400 border-zinc-700/40",
+          icon: <Clock className="w-3 h-3 text-zinc-400" />,
+        };
+      default:
+        return {
+          bg: "bg-blue-950/40 text-blue-300 border-blue-600/40",
+          icon: <AlertCircle className="w-3 h-3 text-blue-400" />,
+        };
+    }
+  };
+  const valBadge = getValidationBadge(statusUpper);
 
   // Fallback for missing source code location
   const hasSourceCode = Boolean(
@@ -94,18 +131,10 @@ export function FindingCard({ finding, index }: FindingCardProps) {
           </span>
 
           <span
-            className={`px-2.5 py-1 rounded-lg text-xs font-mono font-medium flex items-center gap-1 border ${
-              isConfirmed
-                ? "bg-emerald-950/40 text-emerald-300 border-emerald-600/40"
-                : "bg-amber-950/40 text-amber-300 border-amber-600/40"
-            }`}
+            className={`px-2.5 py-1 rounded-lg text-xs font-mono font-medium flex items-center gap-1 border ${valBadge.bg}`}
           >
-            {isConfirmed ? (
-              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-            ) : (
-              <AlertTriangle className="w-3 h-3 text-amber-400" />
-            )}
-            {finding.validation_status}
+            {valBadge.icon}
+            {statusUpper}
           </span>
         </div>
       </div>
@@ -133,30 +162,30 @@ export function FindingCard({ finding, index }: FindingCardProps) {
           <div>
             <span className="text-gray-500 block">Source File:</span>
             <span className="text-gray-300 break-all">
-              {finding.source_file || "runtime-api"}
+              {finding.source_file || "N/A (Black-box testing)"}
             </span>
           </div>
 
           <div>
             <span className="text-gray-500 block">Function Name:</span>
             <span className="text-gray-300">
-              {finding.function_name || "N/A (HTTP Router)"}
+              {finding.function_name || "N/A (Black-box testing)"}
             </span>
           </div>
 
           <div>
             <span className="text-gray-500 block">Line Numbers:</span>
             <span className="text-gray-300">
-              {finding.line_numbers || "N/A (Runtime Telemetry)"}
+              {finding.line_numbers || "N/A (Black-box testing)"}
             </span>
           </div>
         </div>
 
         {/* Source Code Location Banner (if unavailable) */}
         {!hasSourceCode && (
-          <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#161F30]/70 border border-blue-500/20 text-blue-300 text-xs">
+          <div className="flex items-center gap-2 p-2.5 rounded-xl bg-[#161F30]/70 border border-blue-500/20 text-blue-300 text-xs font-sans">
             <FileCode className="w-4 h-4 text-blue-400 shrink-0" />
-            <span>Source code location unavailable. Runtime evidence is available.</span>
+            <span>Source code was not available. This assessment used black-box testing.</span>
           </div>
         )}
 
