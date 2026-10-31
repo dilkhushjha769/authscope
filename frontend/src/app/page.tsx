@@ -149,6 +149,7 @@ export default function Home() {
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const connectSSERef = useRef<((scanId: string) => void) | null>(null);
+  const reconnectAttemptsRef = useRef<number>(0);
 
   // Timer effect for tracking elapsed duration
   useEffect(() => {
@@ -203,67 +204,6 @@ export default function Home() {
       console.warn("Could not fetch detailed assessment findings:", err);
     }
   }, []);
-
-  /**
-   * Restores last assessment on browser refresh if preserved in localStorage.
-   */
-  useEffect(() => {
-    const savedId = localStorage.getItem("authscope_last_assessment_id");
-    if (savedId && !assessmentId && status === "ready") {
-      fetch(`${API_BASE_URL}/api/assessments/${savedId}`)
-        .then((res) => {
-          if (res.ok) return res.json();
-          throw new Error("Not found");
-        })
-        .then((data) => {
-          setAssessmentId(data.id);
-          setTargetUrl(data.target_url);
-          const backendStatus = String(data.status).toLowerCase();
-          const startTimeMs = data.started_at ? new Date(data.started_at).getTime() : Date.now();
-          setStartTime(startTimeMs);
-
-          if (backendStatus === "completed") {
-            const hasFindings =
-              (data.confirmed_findings_count || 0) > 0 ||
-              (data.suspicious_results_count || 0) > 0;
-            setStatus(hasFindings ? "completed" : "no_vulnerabilities");
-          } else if (backendStatus === "failed") {
-            setStatus("failed");
-          } else if (backendStatus === "cancelled") {
-            setStatus("cancelled");
-          } else {
-            setStatus("running");
-          }
-
-          setActivityEvents(data.events || []);
-          setStreamingText(data.markdown_content || "");
-
-          if (Array.isArray(data.findings) && data.findings.length > 0) {
-            setFindings(
-              data.findings.map((f: Record<string, unknown>) =>
-                mapRecordToFindingItem(f)
-              )
-            );
-          }
-          setElapsedSeconds(
-            data.completed_at && data.started_at
-              ? Math.max(1, Math.floor((new Date(data.completed_at).getTime() - new Date(data.started_at).getTime()) / 1000))
-              : Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000))
-          );
-
-          if (backendStatus === "running" || backendStatus === "pending") {
-            // Assessment is still running in background! Reconnect to stream and stream new events
-            connectSSE(data.id);
-          } else {
-            setActivityEvents(data.events || []);
-            setStreamingText(data.markdown_content || "");
-          }
-        })
-        .catch(() => {
-          localStorage.removeItem("authscope_last_assessment_id");
-        });
-    }
-  }, [assessmentId, status]);
 
   /**
    * Connects to the SSE stream with automatic reconnection support.
@@ -415,11 +355,12 @@ export default function Home() {
           }
 
           // Attempt reconnection if active
-          if (reconnectAttempts < maxReconnectAttempts) {
-            setReconnectAttempts((prev) => prev + 1);
+          if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+            reconnectAttemptsRef.current += 1;
+            setReconnectAttempts(reconnectAttemptsRef.current);
             setTimeout(() => {
               connectSSERef.current?.(scanId);
-            }, 2000 * (reconnectAttempts + 1));
+            }, 2000 * reconnectAttemptsRef.current);
             return "reconnecting";
           } else {
             setError(
@@ -430,12 +371,73 @@ export default function Home() {
         });
       });
     },
-    [fetchAssessmentDetails, reconnectAttempts]
+    [fetchAssessmentDetails]
   );
 
   useEffect(() => {
     connectSSERef.current = connectSSE;
   }, [connectSSE]);
+
+  /**
+   * Restores last assessment on browser refresh if preserved in localStorage.
+   */
+  useEffect(() => {
+    const savedId = localStorage.getItem("authscope_last_assessment_id");
+    if (savedId && !assessmentId && status === "ready") {
+      fetch(`${API_BASE_URL}/api/assessments/${savedId}`)
+        .then((res) => {
+          if (res.ok) return res.json();
+          throw new Error("Not found");
+        })
+        .then((data) => {
+          setAssessmentId(data.id);
+          setTargetUrl(data.target_url);
+          const backendStatus = String(data.status).toLowerCase();
+          const startTimeMs = data.started_at ? new Date(data.started_at).getTime() : Date.now();
+          setStartTime(startTimeMs);
+
+          if (backendStatus === "completed") {
+            const hasFindings =
+              (data.confirmed_findings_count || 0) > 0 ||
+              (data.suspicious_results_count || 0) > 0;
+            setStatus(hasFindings ? "completed" : "no_vulnerabilities");
+          } else if (backendStatus === "failed") {
+            setStatus("failed");
+          } else if (backendStatus === "cancelled") {
+            setStatus("cancelled");
+          } else {
+            setStatus("running");
+          }
+
+          setActivityEvents(data.events || []);
+          setStreamingText(data.markdown_content || "");
+
+          if (Array.isArray(data.findings) && data.findings.length > 0) {
+            setFindings(
+              data.findings.map((f: Record<string, unknown>) =>
+                mapRecordToFindingItem(f)
+              )
+            );
+          }
+          setElapsedSeconds(
+            data.completed_at && data.started_at
+              ? Math.max(1, Math.floor((new Date(data.completed_at).getTime() - new Date(data.started_at).getTime()) / 1000))
+              : Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000))
+          );
+
+          if (backendStatus === "running" || backendStatus === "pending") {
+            // Assessment is still running in background! Reconnect to stream and stream new events
+            connectSSE(data.id);
+          } else {
+            setActivityEvents(data.events || []);
+            setStreamingText(data.markdown_content || "");
+          }
+        })
+        .catch(() => {
+          localStorage.removeItem("authscope_last_assessment_id");
+        });
+    }
+  }, [assessmentId, status, connectSSE]);
 
   /**
    * Dispatches assessment initiation to backend FastAPI.
@@ -454,6 +456,7 @@ export default function Home() {
     setFindings([]);
     setIsActivityExpanded(false);
     setReconnectAttempts(0);
+    reconnectAttemptsRef.current = 0;
 
     const now = Date.now();
     setStartTime(now);
@@ -522,6 +525,7 @@ export default function Home() {
     setIsActivityExpanded(false);
     setError(null);
     setReconnectAttempts(0);
+    reconnectAttemptsRef.current = 0;
     setGithubRepo("");
     setSourceArchive(null);
     if (fileInputRef.current) {
@@ -788,7 +792,7 @@ export default function Home() {
                     {status === "reconnecting" && (
                       <span className="text-amber-300 animate-pulse flex items-center gap-1">
                         <RefreshCw className="w-3 h-3 animate-spin" />
-                        Reconnecting to stream...
+                        Reconnecting to stream{reconnectAttempts > 0 ? ` (${reconnectAttempts})` : ""}...
                       </span>
                     )}
                     {status === "completed" && (
