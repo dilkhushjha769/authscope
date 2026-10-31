@@ -209,7 +209,7 @@ export default function Home() {
    */
   useEffect(() => {
     const savedId = localStorage.getItem("authscope_last_assessment_id");
-    if (savedId && !assessmentId && (status === "ready" || status === "idle")) {
+    if (savedId && !assessmentId && status === "ready") {
       fetch(`${API_BASE_URL}/api/assessments/${savedId}`)
         .then((res) => {
           if (res.ok) return res.json();
@@ -251,7 +251,7 @@ export default function Home() {
               : Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000))
           );
 
-          if (scanStatus === "running" || scanStatus === "pending") {
+          if (backendStatus === "running" || backendStatus === "pending") {
             // Assessment is still running in background! Reconnect to stream and stream new events
             connectSSE(data.id);
           } else {
