@@ -188,6 +188,7 @@ class AssessmentEngine:
         rec.status = StageStatus.RUNNING
         rec.explanation = sanitize_event_text(explanation)
         rec.started_at = datetime.now(timezone.utc).isoformat()
+        session.updated_at = datetime.now(timezone.utc)
         self.repository.save_scan_session(session)
         return time.perf_counter()
 
@@ -205,6 +206,7 @@ class AssessmentEngine:
         rec.explanation = sanitize_event_text(explanation)
         rec.completed_at = datetime.now(timezone.utc).isoformat()
         rec.duration_ms = round((time.perf_counter() - start_perf) * 1000.0, 2)
+        session.updated_at = datetime.now(timezone.utc)
         self.repository.save_scan_session(session)
 
     def _skip_remaining_stages(self, session: ScanSessionRecord, reason: str) -> None:
@@ -555,6 +557,7 @@ class AssessmentEngine:
                 t_stage4,
                 session_summary_msg,
             )
+            cred_report = self.session_manager.validate_configured_credentials()
             yield self._emit_event(
                 session,
                 EventType.SESSION_VALIDATION_COMPLETED,
@@ -564,6 +567,9 @@ class AssessmentEngine:
                     "user_a_authenticated": user_a_ok,
                     "user_b_authenticated": user_b_ok,
                     "admin_authenticated": admin_ok,
+                    "authenticated_roles": active_roles_list,
+                    "multi_role_ready": cred_report["multi_role_ready"],
+                    "anonymous_baseline_ready": True,
                 },
             )
 
@@ -760,6 +766,7 @@ class AssessmentEngine:
                                 f"HTTP {anon_resp.status_code} with {anon_resp.content_length} bytes of JSON data. "
                                 f"Marked SUSPICIOUS_ACCESS because Admin session baseline was unavailable for comparison."
                             )
+                            rem_preview = self.remediation_engine.generate_patch("BFLA")
                             yield self._emit_event(
                                 session,
                                 EventType.SUSPICIOUS_BEHAVIOR_DETECTED,
@@ -769,6 +776,10 @@ class AssessmentEngine:
                                     "endpoint": route.path,
                                     "status_code": anon_resp.status_code,
                                     "verdict": AccessVerdict.SUSPICIOUS_ACCESS.value,
+                                    "actual_behavior": f"Anonymous request received HTTP {anon_resp.status_code} response ({anon_resp.content_length} bytes, sensitive fields: {insp.sensitive_fields_found}).",
+                                    "expected_behavior": f"Administrative route '{route.path}' should restrict unauthenticated access (HTTP 401/403).",
+                                    "validation_status": "SUSPICIOUS",
+                                    "remediation": rem_preview,
                                 },
                             )
                             evi = self.evidence_validator.create_and_sign_evidence(
@@ -892,6 +903,14 @@ class AssessmentEngine:
                             "endpoint": fnd.target_endpoint,
                             "severity": fnd.severity.value if hasattr(fnd.severity, "value") else str(fnd.severity),
                             "sha256": fnd.evidence.evidence_sha256 if fnd.evidence else "",
+                            "title": fnd.title,
+                            "category": fnd.vulnerability_category or fnd.vulnerability_type,
+                            "actual_behavior": fnd.actual_behavior,
+                            "expected_behavior": fnd.expected_behavior,
+                            "impact": fnd.impact_explanation or fnd.description,
+                            "remediation": fnd.remediation_guidance or fnd.remediation_recommendation,
+                            "access_verdict": fnd.access_verdict,
+                            "validation_status": fnd.validation_status,
                         },
                     )
                 else:

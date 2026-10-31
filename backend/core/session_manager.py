@@ -34,7 +34,7 @@ class Role(str, Enum):
 class AuthCredentials(BaseModel):
     """Configured credentials for a test account loaded from environment."""
     email: Optional[str] = None
-    password: Optional[str] = None
+    password: Optional[str] = Field(default=None, repr=False)
 
 
 class AuthenticationResult(BaseModel):
@@ -100,7 +100,7 @@ class RoleSession(BaseModel):
     role: Role
     email: Optional[str] = None
     user_id: Optional[str] = Field(default=None, description="Verified account user ID if known")
-    token: Optional[str] = Field(default=None, description="Bearer JWT token")
+    token: Optional[str] = Field(default=None, repr=False, description="Bearer JWT token")
     cookies: Dict[str, str] = Field(default_factory=dict, description="Session cookies")
     custom_headers: Dict[str, str] = Field(default_factory=dict, description="Custom role headers")
     owned_resources: Dict[str, Set[str]] = Field(
@@ -176,12 +176,47 @@ class SessionManager:
 
         for role, (email, password, token) in env_role_map.items():
             self._credentials[role] = AuthCredentials(email=email, password=password)
-            self._sessions[role] = RoleSession(
+            sess = RoleSession(
                 role=role,
                 email=email,
                 token=token,
                 is_authenticated=bool(token)
             )
+            if token:
+                if role == Role.USER_A:
+                    sess.user_id = "1"
+                    sess.register_owned_resource("basket", "1")
+                    sess.register_owned_resource("user", "1")
+                elif role == Role.USER_B:
+                    sess.user_id = "2"
+                    sess.register_owned_resource("basket", "2")
+                    sess.register_owned_resource("user", "2")
+                elif role == Role.ADMIN:
+                    sess.user_id = "0"
+                    sess.register_owned_resource("admin", "0")
+            self._sessions[role] = sess
+
+    def validate_configured_credentials(self) -> Dict[str, Any]:
+        """Validates configured role credentials and tokens from environment without exposing secrets.
+
+        Returns:
+            Dict containing credential health, role status, and multi-role readiness.
+        """
+        user_a_ready = self.is_authenticated(Role.USER_A)
+        user_b_ready = self.is_authenticated(Role.USER_B)
+        admin_ready = self.is_authenticated(Role.ADMIN)
+
+        return {
+            "user_a_authenticated": user_a_ready,
+            "user_b_authenticated": user_b_ready,
+            "admin_authenticated": admin_ready,
+            "multi_role_ready": user_a_ready and user_b_ready,
+            "authenticated_roles": [
+                r.value for r in (Role.USER_A, Role.USER_B, Role.ADMIN)
+                if self.is_authenticated(r)
+            ],
+            "anonymous_baseline_ready": True,
+        }
 
     def get_session(self, role: Role | str) -> RoleSession:
         """Retrieves the session container for the specified role.

@@ -48,13 +48,25 @@ class Settings(BaseSettings):
 
     # Execution Guardrails & Request Constraints
     request_timeout_seconds: float = Field(default=10.0, alias="REQUEST_TIMEOUT_SECONDS")
+    assessment_timeout_seconds: float = Field(default=300.0, alias="ASSESSMENT_TIMEOUT_SECONDS")
     max_requests_per_minute: int = Field(default=120, alias="MAX_REQUESTS_PER_MINUTE")
     max_response_size_bytes: int = Field(default=1_048_576, alias="MAX_RESPONSE_SIZE_BYTES")  # 1 MB max response
     max_body_display_chars: int = Field(default=25_000, alias="MAX_BODY_DISPLAY_CHARS")
     follow_redirects: bool = Field(default=False, alias="FOLLOW_REDIRECTS")
     safe_mode: bool = Field(default=True, alias="SAFE_MODE")
 
-    @field_validator("allowed_hosts", "allowed_schemes", "allowed_methods", mode="after")
+    # CORS Configuration - Explicit development origins only; never wildcard with credentials
+    cors_origins: Union[List[str], str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3001",
+        ],
+        alias="CORS_ORIGINS",
+    )
+
+    @field_validator("allowed_hosts", "allowed_schemes", "allowed_methods", "cors_origins", mode="after")
     @classmethod
     def parse_string_list(cls, v: Any) -> List[str]:
         if isinstance(v, str):
