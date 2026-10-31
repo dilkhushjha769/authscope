@@ -1,8 +1,8 @@
 # Attack Chain Planner Contract
 
-`backend.agent.attack_chain.AttackChainPlanner` creates **unverified planning candidates** from discovered endpoint metadata. It performs no network requests, does not read or create sessions, does not persist evidence, and cannot authorize execution. An HTTP status code, including 200, is not evidence of a vulnerability.
+`backend.agent.attack_chain.AttackChainPlanner` plans unverified authorization tests from discovered endpoint metadata. It performs no network requests, does not manage sessions, does not store evidence, and cannot authorize execution. A response status, including HTTP 200, does not confirm a vulnerability.
 
-## Python interface
+## Interface
 
 ```python
 from backend.agent.attack_chain import AttackChainPlanner
@@ -10,33 +10,54 @@ from backend.agent.attack_chain import AttackChainPlanner
 planner = AttackChainPlanner()
 graph = planner.build_graph(discovered_endpoints)
 plan = planner.plan(discovered_endpoints, max_steps=5, max_candidates=25)
-# Compatibility API: serialized candidate dictionaries, without graph metadata.
+# Backward-compatible JSON-compatible candidate list:
 candidate_dicts = planner.plan_chain(discovered_endpoints, max_steps=5)
 ```
 
-Inputs may be `DiscoveredEndpoint`, persisted `DiscoveredEndpointRecord`, metadata mappings, or legacy relative path strings. Optional `dependencies` / `depends_on` / `endpoint_dependencies` metadata names prerequisite endpoint paths; missing dependencies are returned in `graph.unresolved_dependencies`. The current persisted endpoint model has no dependency field, so dependencies are only available when a discovery provider supplies them. Resource and identifier relationships are conservatively inferred from discovered resource types and parameter names. Unsafe paths and methods outside GET, HEAD, POST, PUT, PATCH are rejected; non-read methods carry `requires_human_approval=true`.
+The allowlisted AI tool `plan_attack_chains` invokes the same planner over endpoints persisted for the active assessment. It does not accept endpoint paths from model arguments. `plan_attack_chains` is an approved tool name for the existing agent planner; it relies on the existing tool registry and execution context.
 
-## Stable executor contract (schema version 1.0)
+Inputs may be `DiscoveredEndpoint`, `DiscoveredEndpointRecord`, or endpoint mappings. Legacy path strings remain accepted, but without richer metadata they cannot establish resource identifier flows. Optional metadata includes `input_parameters`, `output_parameters`, `resource_identifier_name`, `parent_resource_type`, `related_resource_types`, `requires_auth`, `expected_allowed_roles`, `permissions` / `required_permissions`, `resource_sensitivity`, and explicit `dependencies` / `depends_on` / `endpoint_dependencies`.
 
-`AttackChainPlan` contains graph diagnostics and ranked `AttackChainCandidate` objects. Each candidate contains:
+Missing input parameter metadata falls back to discovered `parameters`; missing output metadata remains unknown. Missing role and permission metadata is represented by empty lists and a null `expected_role`. Missing sensitivity remains null and adds no risk weight. Concrete extracted resource IDs are never copied to candidate output. Parent/related resources without a known source identifier are represented as low-confidence `uncertain` graph relationships and are excluded from executable candidate paths. Explicit dependencies that do not resolve appear in `graph.unresolved_dependencies`. Rejected paths and unsupported methods appear in `graph.rejected_endpoints`.
 
-- `candidate_id`, `scenario` (`BOLA_IDOR`, `PRIVILEGE_ESCALATION`, `RELATED_RESOURCE_ACCESS`, or `MIXED_AUTHORIZATION`), deterministic heuristic `risk_score` (0–100), `priority`, and rationale.
-- `steps` in execution order (2–5). Every step has stable `step_id`, `endpoint_id` (method + normalized route identity), relative `path`, `method`, endpoint metadata, prior-step references, and symbolic `input_bindings`.
-- `execution_authorized=false`, `requires_scope_validation=true`, and `status="CANDIDATE_UNVERIFIED"` are fixed planner values. Risk and scenario are planning hints, not confirmation or permission.
+## Schema version 1.1
 
-Bindings name a parameter and source step/field (`response.resource_id`). They intentionally do not contain discovered concrete resource IDs. The executor must resolve values only from validated outputs of the referenced step; it must not guess identifiers. `path` is relative and must be revalidated against the active target by `ScopeGuard` before each request.
+Required candidate fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `schema_version` | string | Contract version (`1.1`). |
+| `chain_id`, `candidate_id` | string | Stable identity; equal values. `candidate_id` is the current executor compatibility key. |
+| `chain_name` | string | Human-readable candidate label. |
+| `vulnerability_category`, `scenario` | enum string | Equal planning category: BOLA_IDOR, PRIVILEGE_ESCALATION, RELATED_RESOURCE_ACCESS, or MIXED_AUTHORIZATION. |
+| `risk_metadata` | object | `score` (0–100), `priority`, optional `resource_sensitivity`, and rationale list. |
+| `ordered_steps`, `steps` | array of 2–5 step objects | Equal ordered lists. `steps` is required by the current Member 2 validator/executor. |
+| `execution_authorized` | boolean | Always false in planner output. |
+| `requires_scope_validation` | boolean | Always true. |
+| `status` | string | Always `CANDIDATE_UNVERIFIED`. |
+
+Each step includes required `step_id`, `endpoint_id`, `endpoint` and compatibility `path` (same relative path), `method` and compatibility `http_method` (same uppercase method), `parameters`, `input_parameters`, `output_parameters`, `resource_dependencies`, `purpose`, `requires_auth`, `requires_owner_match`, `depends_on_step_ids`, and `input_bindings`. Optional metadata includes `resource_type`, `expected_role` (null when role expectations are absent or ambiguous), `expected_allowed_roles`, `permissions`, and `requires_human_approval`. Bindings identify `parameter`, `source_step_id`, and `source_field`; concrete IDs are resolved only from validated execution outputs.
+
+Validation errors are raised for `max_steps` outside 2–5, `max_candidates` below 1, or invalid Pydantic candidate contracts. Invalid endpoint inputs are diagnostics rather than fatal planning errors. The planner never inserts missing endpoints or dependencies. Every candidate edge must be a confident explicit dependency or a metadata-supported resource identifier relationship. Graph cycles are allowed, but plans are simple paths and never repeat endpoints.
+
+## Representative candidate sequences
+
+These are controlled metadata examples; they are proposed tests, not vulnerability reports.
+
+1. **Cross-user object access (BOLA/IDOR):** `GET /api/users` (output `id`) → `GET /api/users/{id}` (owner match required; input `id`). Step 2 binds its `id` to the validated resource identifier from step 1 and compares access under the appropriate roles.
+2. **Parent-child related resource:** `GET /api/users` (output `id`) → `GET /api/users/{user_id}/orders` (declared parent type `user`, input `user_id`, output `order_id`). The resource relationship is included only when metadata establishes the identifier flow.
+3. **Administrative boundary:** `GET /api/users` (output `id`) → `GET /api/admin/users/{id}` (input `id`, admin-only expected role/permission metadata). The resulting candidate calls for role-boundary validation; it does not imply the operation is accessible.
 
 ## Member 2 integration
 
-1. Obtain endpoints from the existing `FindingRepository.list_discovered_endpoints(scan_id)` or the in-memory `EndpointDiscovery` result. Do not accept AI-generated paths as discovery.
-2. Call `AttackChainPlanner.plan(endpoints, max_steps=5)` and serialize via `plan.model_dump(mode="json")` across the boundary. Persist/share `schema_version` with the executor adapter.
-3. Present candidates for the existing authorization and human-approval policy. Ignore `risk_score` as execution authorization; require the active assessment and `ScopeGuard` checks.
-4. For every step, validate the relative path and method with `ScopeGuard`, and dispatch only through the existing approved registry and `RequestExecutor`. Keep redirects disabled. Follow only `input_bindings` whose source output was safely validated.
-5. Route captured results through the existing authorization comparison and evidence validation/storage pipeline. Only verified differential evidence may create or confirm a finding.
-6. Treat unresolved dependencies and rejected endpoints as diagnostics; do not fill gaps with invented routes.
+1. Retrieve endpoints from `FindingRepository.list_discovered_endpoints(scan_id)` or an existing trusted discovery result. Do not treat model-suggested paths as discovered endpoints.
+2. Call `AttackChainPlanner.plan(...)`; pass `candidate.model_dump(mode="json")` (or the whole plan) to the executor. Current executor compatibility fields `candidate_id`, `scenario`, and `steps` are retained alongside the clearer `chain_id`, `vulnerability_category`, and `ordered_steps` fields. The model validator enforces equality between duplicated fields.
+3. The executor must independently validate chain length, dependency order, methods, and every path with `ScopeGuard`; require existing human approval for state-changing operations; and dispatch only through the approved registry and existing `RequestExecutor`.
+4. Resolve only `input_bindings` from validated prior-step outputs. Treat absent resource IDs, unresolved dependencies, and uncertain edges as incomplete and do not guess values.
+5. Preserve the existing four-role authorization comparison and evidence validation/storage flow. Only validated differential evidence can confirm a finding.
 
-There is no AI-assisted chain generation in this planner. This preserves deterministic endpoint provenance; an AI can later rank only supplied `candidate_id` values, but cannot add steps, change risk/authorization flags, or execute a chain.
+The existing AI agent may request the approved `plan_attack_chains` tool. `apply_ai_suggestions()` accepts only known candidate IDs and can reorder them; unknown IDs and any model-supplied routes, steps, scores, or authorization fields are ignored. Deterministic planning metadata remains unchanged, and the executor remains the deterministic validation gate.
 
-## Relationship and risk limits
+## Risk and limitations
 
-Graph relationships include declared dependencies, resource identifier flow, related-resource references, and same-resource admin role boundaries. A graph can contain cycles, while candidate plans are simple paths and never repeat an endpoint. Scores are transparent deterministic prioritization heuristics; they do not represent measured exploitability, likelihood, CVSS, or a confirmed vulnerability. Existing discovery metadata may be too sparse to infer a complete business workflow.
+Risk score is a transparent prioritization heuristic based on chain scenario, relationship type, length, and available sensitivity metadata. It is not CVSS, measured exploitability, or a permission to execute. Current persisted endpoint records do not contain input/output schemas, dependency declarations, explicit parent relationships, permission sets, or sensitivity. Thus many persisted-only edges will be uncertain or absent until discovery supplies these fields; the planner deliberately favors false negatives over invented chains.

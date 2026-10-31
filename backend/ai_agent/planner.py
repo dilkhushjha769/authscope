@@ -25,6 +25,7 @@ logger = get_logger(__name__)
 DEFAULT_APPROVED_TOOLS: List[str] = [
     "check_scope",
     "discover_endpoints",
+    "plan_attack_chains",
     "inspect_endpoint",
     "compare_access",
     "validate_evidence",
