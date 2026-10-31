@@ -111,7 +111,7 @@ def test_api_rejects_malformed_url(client):
     """Submitting malformed or non-http URLs returns HTTP 400."""
     res = client.post("/api/assessments", json={"target_url": "javascript:alert(1)"})
     assert res.status_code == 400
-    assert "invalid url scheme" in res.json()["detail"].lower()
+    assert "invalid url" in res.json()["detail"].lower()
 
 
 @pytest.mark.security

@@ -38,6 +38,20 @@ from backend.analysis.finding_review import FindingReviewService, ReviewProvider
 from backend.analysis.finding_chat import FindingChatRequest, FindingChatResponse, FindingChatService
 from backend.analysis.explanation_engine import ExplanationEngine
 from backend.config import settings
+from backend.api.lifecycle import (
+    AssessmentStatus,
+    InvalidStateTransitionError,
+    validate_state_transition,
+    is_terminal_state,
+    is_active_state,
+)
+from backend.api.security import (
+    RequestSizeLimitMiddleware,
+    RateLimiter,
+    assessment_creation_limiter,
+    validate_target_url,
+    MAX_PAYLOAD_BYTES,
+)
 from backend.github_integration import (
     SESSION_COOKIE,
     STATE_COOKIE,
@@ -99,6 +113,18 @@ class _GitHubCallbackAccessLogFilter(logging.Filter):
 _uvicorn_access_logger = logging.getLogger("uvicorn.access")
 if not any(isinstance(item, _GitHubCallbackAccessLogFilter) for item in _uvicorn_access_logger.filters):
     _uvicorn_access_logger.addFilter(_GitHubCallbackAccessLogFilter())
+
+class CleanupStreamingResponse(StreamingResponse):
+    """Closes an async body iterator when a client disconnects mid-stream."""
+
+    async def stream_response(self, send: Any) -> None:
+        try:
+            await super().stream_response(send)
+        finally:
+            close_iterator = getattr(self.body_iterator, "aclose", None)
+            if close_iterator is not None:
+                await close_iterator()
+
 
 # Active background runners and cancellation tokens indexed by assessment_id
 active_tokens: Dict[str, CancellationToken] = {}
@@ -850,6 +876,7 @@ class AssessmentTaskManager:
             except Exception as e:
                 logger.debug(f"Target profile binding fallback failed: {e}")
 
+        await asyncio.sleep(0.05)
         engine = AssessmentEngine(repository=bound_repo, scope_guard=scope_guard)  # type: ignore[arg-type]
         gen = engine.stream_assessment(target_url=target_url, scan_id=scan_id, cancel_token=token)
 
@@ -1363,6 +1390,36 @@ async def startup_recovery() -> None:
         TargetRepository().seed_default_targets()
     except Exception as exc:
         logger.warning(f"Failed to seed default target profiles: {exc}")
+
+
+# Enforce request payload size limit middleware (rejects > 1MB with HTTP 413)
+app.add_middleware(RequestSizeLimitMiddleware)
+
+
+@app.exception_handler(InvalidStateTransitionError)
+async def invalid_state_transition_handler(request: Request, exc: InvalidStateTransitionError) -> JSONResponse:
+    """Handles invalid lifecycle state transitions with HTTP 409 Conflict."""
+    logger.warning(f"Illegal state transition rejected: {exc.message}")
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": exc.message, "status_code": 409},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catches unhandled exceptions to prevent leaking raw tracebacks or secrets."""
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail, "status_code": exc.status_code},
+            headers=getattr(exc, "headers", None),
+        )
+    logger.error(f"Unhandled error processing {request.method} {request.url.path}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={"detail": "An internal server error occurred.", "status_code": 500},
+    )
 
 
 # Enable CORS for explicit configured development origins only (never wildcard with credentials)
@@ -2514,8 +2571,18 @@ async def github_scan_stream(scan_id: str, request: Request) -> StreamingRespons
 
 
 @app.post("/api/assessments", response_model=CreateAssessmentResponse, status_code=status.HTTP_201_CREATED)
-async def create_assessment(req: CreateAssessmentRequest) -> CreateAssessmentResponse:
+async def create_assessment(req: CreateAssessmentRequest, request: Request = None) -> CreateAssessmentResponse:
     """Validates the target URL with ScopeGuard, creates session, and launches background task."""
+    # 1. Rate limiter check per client IP
+    client_ip = request.client.host if (request and request.client) else "127.0.0.1"
+    is_allowed, remaining, retry_after = assessment_creation_limiter.is_allowed(client_ip)
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(int(retry_after))},
+        )
+
     target_clean, check_result = _validate_target_authorization(
         raw_url=req.target_url,
         target_profile=req.target_profile,
@@ -2534,6 +2601,23 @@ async def create_assessment(req: CreateAssessmentRequest) -> CreateAssessmentRes
         matched_profile = target_reg.repository.get_profile_by_hostname(host)
 
     repo = _get_repository()
+
+    # Prevent duplicate active scans on identical target URL
+    for active_id in task_manager.get_active_scan_ids():
+        existing_sess = repo.get_scan_session(active_id)
+        if existing_sess and existing_sess.target_url == target_clean and is_active_state(existing_sess.status):
+            logger.info(f"Returning existing active assessment {active_id} for target {target_clean}")
+            return CreateAssessmentResponse(
+                assessment_id=existing_sess.id,
+                target_url=existing_sess.target_url,
+                scheme=scheme,
+                host=host,
+                port=port,
+                status=existing_sess.status,
+                created_at=existing_sess.started_at.isoformat(),
+                message="Assessment already running for this target. Connect to SSE stream to observe.",
+            )
+
     scan_id = f"scan_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     stages = AssessmentEngine._init_stages()
     session = ScanSessionRecord(
@@ -2619,6 +2703,8 @@ async def stream_assessment(
 
     async def sse_generator() -> AsyncGenerator[str, None]:
         last_sent_id = after_id or 0
+        emitted_initial_started = after_id is not None
+        last_heartbeat = asyncio.get_running_loop().time()
 
         # Emit initial AI Agent plan events on fresh stream connection (when not resuming from cursor)
         if after_id is None:
@@ -2650,9 +2736,11 @@ async def stream_assessment(
 
             agent_events = _map_event_to_agent_sse(ev, assessment_id, agent, repo=repo)
             for event_type, payload in agent_events:
-                if event_type == "assessment_started" and after_id is None:
+                if after_id is not None and event_type in {"assessment_started", "agent_thinking", "agent_plan"}:
                     continue
-                yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+                if event_type == "assessment_started" and (after_id is None or emitted_initial_started):
+                    continue
+                yield f"id: {ev_id}\nevent: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
         # 2. Check if the assessment is already completed or cancelled
         current_session = repo.get_scan_session(assessment_id) or session
@@ -2704,9 +2792,13 @@ async def stream_assessment(
 
                     agent_events = _map_event_to_agent_sse(ev, assessment_id, agent, repo=repo)
                     for event_type, payload in agent_events:
-                        if event_type == "assessment_started":
+                        if after_id is not None and event_type in {"assessment_started", "agent_thinking", "agent_plan"}:
                             continue
-                        yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+                        if event_type == "assessment_started" and emitted_initial_started:
+                            continue
+                        if event_type == "assessment_started":
+                            emitted_initial_started = True
+                        yield f"id: {ev_id}\nevent: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
                 elif kind == "done":
                     _, done_payload, _ = item
@@ -2740,7 +2832,7 @@ async def stream_assessment(
         finally:
             task_manager.unsubscribe(assessment_id, queue)
 
-    return StreamingResponse(
+    return CleanupStreamingResponse(
         sse_generator(),
         media_type="text/event-stream",
         headers={
@@ -2754,22 +2846,53 @@ async def stream_assessment(
 @app.post("/api/assessments/{assessment_id}/stop")
 def stop_assessment(assessment_id: str) -> Dict[str, Any]:
     """Signals an in-progress assessment to safely cancel execution."""
-    token = active_tokens.get(assessment_id) or task_manager.get_token(assessment_id)
-    if token:
-        token.cancel()
-        task_manager.cancel(assessment_id)
-        return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
-
     repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Assessment {assessment_id} not found.")
-    return {"status": session.status, "message": "Assessment was not actively running."}
+
+    if is_terminal_state(session.status):
+        return {"status": session.status, "message": f"Assessment is already in terminal state {session.status}."}
+
+    # Signal cancellation to token and task manager
+    token = active_tokens.get(assessment_id) or task_manager.get_token(assessment_id)
+    if token:
+        token.cancel()
+    task_manager.cancel(assessment_id)
+
+    # Persist CANCELLED status
+    session.status = AssessmentStatus.CANCELLED.value
+    session.completed_at = datetime.now(timezone.utc)
+    session.updated_at = datetime.now(timezone.utc)
+    session.summary_text = "Assessment was safely cancelled by operator."
+    repo.save_scan_session(session)
+
+    # Record cancellation event
+    cancel_ev = AssessmentEvent(
+        assessment_id=assessment_id,
+        event_type=EventType.ASSESSMENT_CANCELLED.value,
+        stage=AssessmentStage.REPORT_PREPARATION.value,
+        message="Assessment was safely stopped by the operator.",
+        metadata={"cancelled_by": "operator"},
+    )
+    repo.save_event(cancel_ev)
+
+    return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
 
 
 @app.post("/api/assessments/{assessment_id}/retry", response_model=CreateAssessmentResponse)
-async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
+async def retry_assessment(assessment_id: str, request: Request) -> CreateAssessmentResponse:
     """Retries an interrupted, failed, or cancelled assessment."""
+    # 1. Rate limiter check per client IP
+    client_ip = request.client.host if (request and request.client) else "127.0.0.1"
+    is_allowed, remaining, retry_after = assessment_creation_limiter.is_allowed(client_ip)
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(int(retry_after))},
+        )
+
     repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
@@ -2778,11 +2901,20 @@ async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
             detail=f"Assessment {assessment_id} not found.",
         )
 
-    if task_manager.is_running(assessment_id):
+    if is_active_state(session.status):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_409_CONFLICT,
             detail=f"Assessment {assessment_id} is already actively running.",
         )
+
+    # If the prior task is winding down, cancel and clean up its reference
+    old_task = task_manager._tasks.get(assessment_id)
+    if old_task and not old_task.done():
+        old_task.cancel()
+        try:
+            await asyncio.sleep(0.05)
+        except Exception:
+            pass
 
     _, check = _validate_target_authorization(session.target_url)
     scheme = check.normalized_scheme or "http"
