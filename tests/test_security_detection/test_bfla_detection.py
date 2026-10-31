@@ -101,6 +101,24 @@ def test_bfla_secure_control_case():
 
 
 @pytest.mark.security
+def test_matching_public_configuration_shape_is_not_confirmed_bfla():
+    """Similar 200 JSON without shared privileged evidence remains suspicious."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"application": {"name": "Juice Shop"}, "version": "1"})
+
+    tester = _create_bfla_tester(httpx.MockTransport(handler), include_admin=True)
+    result = tester.test_bfla(
+        endpoint="http://localhost:3000/rest/admin/application-configuration",
+        admin_role=Role.ADMIN,
+        test_roles=[Role.USER_A],
+    )
+
+    assert result.is_discrepancy_detected is True
+    assert result.is_confirmed is False
+    assert result.overall_verdict == AccessVerdict.SUSPICIOUS_ACCESS
+
+
+@pytest.mark.security
 def test_bfla_without_admin_session_probes_roles_safely():
     """When Admin credentials are unconfigured, engine safely probes without inventing an Admin session."""
     def handler(request: httpx.Request) -> httpx.Response:
@@ -169,7 +187,7 @@ def test_bfla_via_authorization_tools():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={"admin_data": "secret_dump", "access": "unrestricted"},
+            json={"admin_secret": "secret_dump", "access": "unrestricted"},
         )
 
     transport = httpx.MockTransport(handler)

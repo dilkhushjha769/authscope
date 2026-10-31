@@ -332,7 +332,8 @@ class TestEndToEndIntegrationQA:
         e2e_repo.save_retest_result(retest_1)
 
         fnd_after_r1 = e2e_repo.get_finding("fnd_retest_life_01")
-        assert fnd_after_r1.retest_status == "vulnerable"
+        assert fnd_after_r1.retest_status == "confirmed"
+        assert fnd_after_r1.status == "confirmed"
         assert fnd_after_r1.last_retested_timestamp is not None
 
         # Retest Iteration 2: Patch deployed, verification succeeds
@@ -348,6 +349,7 @@ class TestEndToEndIntegrationQA:
 
         fnd_after_r2 = e2e_repo.get_finding("fnd_retest_life_01")
         assert fnd_after_r2.retest_status == "remediated"
+        assert fnd_after_r2.status == "confirmed"
 
         # Verify historical log ordering and integrity
         history = e2e_repo.get_retest_history("fnd_retest_life_01")

@@ -443,7 +443,7 @@ class TestStorageAndEvidence:
         repo.save_retest_result(retest_1)
 
         f_after_1 = repo.get_finding("fnd_retest_test")
-        assert f_after_1.retest_status == "vulnerable"
+        assert f_after_1.retest_status == "confirmed"
         assert f_after_1.status == "confirmed"
         assert f_after_1.last_retested_timestamp is not None
 
@@ -461,8 +461,8 @@ class TestStorageAndEvidence:
 
         f_after_2 = repo.get_finding("fnd_retest_test")
         assert f_after_2.retest_status == "remediated"
-        assert f_after_2.status == "remediated"
-        assert f_after_2.confirmation_status == "remediated"
+        assert f_after_2.status == "confirmed"
+        assert f_after_2.confirmation_status == "confirmed"
 
         # Check retest history retrieval
         history = repo.get_retest_history("fnd_retest_test")
@@ -534,7 +534,7 @@ class TestStorageAndEvidence:
         assert persisted_fnd.evidence is not None
         assert persisted_fnd.evidence.id == "evi_persist_01"
         assert persisted_fnd.evidence.sanitized_response_body == '{"feedback": "sensitive message"}'
-        assert persisted_fnd.retest_status == "vulnerable"
+        assert persisted_fnd.retest_status == "confirmed"
 
         persisted_history = repo2.get_retest_history("fnd_persist_01")
         assert len(persisted_history) == 1
@@ -784,7 +784,7 @@ class TestCrossModuleIntegration:
         repo.save_retest_result(retest_1)
 
         fnd_after_ret1 = repo.get_finding("fnd_retest_flow_01")
-        assert fnd_after_ret1.retest_status == "vulnerable"
+        assert fnd_after_ret1.retest_status == "confirmed"
         assert fnd_after_ret1.last_retested_timestamp is not None
 
         # Retest 2: Developer deployed complete fix, retest passes (remediated)

@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.analysis.evidence_validator import EvidenceValidator
 from backend.analysis.code_mapper import CodeMapper, MappingStatus
 from backend.storage.models import EvidenceArtifact, EvidenceValidationStatus, FindingRecord
-from backend.utils.helpers import AuthScopeException
+from backend.utils.helpers import AuthScopeException, redact_sensitive_text
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -227,6 +227,28 @@ class ExplanationReport(BaseModel):
         "Code examples are illustrative and do not represent actual target source code.",
         description="Mandatory disclaimer reminding consumers that examples are illustrative.",
     )
+
+
+class BeginnerExplanation(BaseModel):
+    """Plain-language summary grounded in one finding and its captured evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    simple_title: str
+    technical_name: str
+    risk_level: str
+    risk_description: str
+    confirmation_status: str
+    what_is_the_problem: str
+    what_attacker_can_do: str
+    real_world_impact: str
+    why_it_matters: str
+    how_to_fix: List[str] = Field(default_factory=list)
+    secure_code_example: Optional[str] = None
+    how_to_verify_fix: List[str] = Field(default_factory=list)
+    additional_recommendations: List[str] = Field(default_factory=list)
+    evidence_summary: List[str] = Field(default_factory=list)
+    what_is_not_yet_proven: List[str] = Field(default_factory=list)
 
 
 # ==============================================================================
@@ -853,6 +875,144 @@ class ExplanationEngine:
             },
         )
         return report
+
+    def generate_beginner_explanation(self, finding: FindingRecord) -> BeginnerExplanation:
+        """Build a concise, evidence-aware explanation without promoting a finding."""
+        status = self._determine_validation_status(finding)
+        confirmed = status == ExplanationValidationStatus.CONFIRMED
+        category = str(finding.vulnerability_category or finding.vulnerability_type or "UNKNOWN").upper()
+        technical_names = {
+            "BOLA_IDOR": "Access to another user's record (BOLA / IDOR)",
+            "BFLA": "Access to a restricted action (BFLA)",
+            "MISSING_AUTH": "A protected page may not require sign-in",
+            "PRIVILEGE_ESCALATION": "Access beyond the user's assigned role",
+            "MASS_ASSIGNMENT": "Unexpected changes to protected account fields",
+            "MULTI_STEP_CHAIN": "A sequence of actions may bypass access checks",
+        }
+        names = {
+            "BOLA_IDOR": "A user may be able to open another user's record",
+            "BFLA": "A user may be able to reach a restricted action",
+            "MISSING_AUTH": "A protected page may be available without signing in",
+            "PRIVILEGE_ESCALATION": "A user may be able to use a higher-level account action",
+            "MASS_ASSIGNMENT": "A request may change a protected account setting",
+            "MULTI_STEP_CHAIN": "Several steps may combine to bypass an access check",
+        }
+        simple_title = names.get(category, "A possible access-control problem needs review")
+        technical_name = technical_names.get(category, "Access-control issue (exact type not established)")
+        severity = str(getattr(finding.severity, "value", finding.severity)).upper()
+        risk_descriptions = {
+            "CRITICAL": "Could cause very serious damage.",
+            "HIGH": "Could expose important information or allow serious unauthorized actions.",
+            "MEDIUM": "Could allow limited unauthorized access or other meaningful harm.",
+            "LOW": "A smaller security weakness that should still be fixed.",
+            "INFO": "Useful security advice; this is not necessarily a vulnerability.",
+            "INFORMATIONAL": "Useful security advice; this is not necessarily a vulnerability.",
+        }
+        endpoint = redact_sensitive_text(finding.endpoint or finding.target_endpoint or "the tested page")
+        method = finding.http_method.upper()
+        evidence = finding.evidence
+        actual = redact_sensitive_text(
+            (evidence.actual_behavior if evidence else "") or finding.actual_behavior or ""
+        ).strip()
+        test_role_raw = getattr(evidence.testing_role, "value", evidence.testing_role) if evidence else "test user"
+        owner_role_raw = getattr(evidence.authorized_role, "value", evidence.authorized_role) if evidence else "record owner"
+        role_names = {
+            "user_a": "User A", "user_b": "User B", "anonymous": "a visitor who is not signed in",
+            "admin": "an administrator",
+        }
+        test_role = role_names.get(str(test_role_raw).lower(), str(test_role_raw))
+        owner_role = role_names.get(str(owner_role_raw).lower(), str(owner_role_raw))
+
+        if confirmed and actual:
+            problem = (
+                f"During the authorized test, {test_role} received a response for a record assigned to {owner_role} "
+                f"at {method} {endpoint}. The security engine confirmed this result using the captured evidence."
+            )
+            attacker_action = (
+                f"The test showed that a request using the tested {test_role} role received this endpoint's response. "
+                "An attacker with comparable access could try the same request; the evidence does not prove access to other records or actions."
+            )
+            impact = (
+                "The record owner may lose privacy if the returned response contains their information. "
+                "The evidence only supports the response captured in this test; it does not establish wider damage."
+            )
+            why = "People expect their account records to be visible only to users who have permission. This result shows that this boundary failed in the tested case."
+            missing = ["The test does not establish access to other records, endpoints, or write actions."]
+        else:
+            observed = actual or f"The test did not capture a usable response for {method} {endpoint}."
+            problem = (
+                f"The test observed: {observed} "
+                "This evidence is not enough to confirm that someone accessed information without permission."
+            )
+            attacker_action = "We have not proven that an attacker can access another account or perform a restricted action."
+            impact = "No harm to users has been confirmed by the available evidence. If access is later confirmed, the affected record or action will determine the possible harm."
+            why = "A possible access problem deserves review, but describing it as a successful attack without proof could mislead developers and users."
+            missing = ["We need more evidence to confirm this.", "A verified owner or role baseline and a reproducible response comparison are needed."]
+
+        if category == "BOLA_IDOR":
+            fixes = [
+                "Read the signed-in user's identity on the server for each request.",
+                "Check that the requested record belongs to that user or that the user has an explicit permission to view it.",
+                "Deny access when the check fails, and add tests for both the owner and another user.",
+            ]
+        elif category in ("BFLA", "PRIVILEGE_ESCALATION"):
+            fixes = [
+                "Check the signed-in user's role on the server before running the restricted action.",
+                "Deny the request when that role is not allowed to use the action.",
+                "Add tests for an allowed role and a lower-privilege role.",
+            ]
+        elif category == "MISSING_AUTH":
+            fixes = [
+                "Require a valid signed-in session on this protected page.",
+                "Check permission on the server before returning private data or performing an action.",
+                "Add tests for signed-in and signed-out requests.",
+            ]
+        else:
+            fixes = [
+                "Review the server-side permission check for the affected request.",
+                "Reject requests that do not meet the required account or role permission.",
+                "Add a regression test for the observed behavior.",
+            ]
+        if not confirmed:
+            fixes = ["Collect the missing comparison evidence before changing application code."]
+
+        verify_steps = [
+            f"In the authorized test environment, repeat {method} {endpoint} with the same test role and record.",
+            "The user without permission should receive a denial or no protected record data.",
+            "Confirm that the legitimate owner or allowed role can still use the feature.",
+        ] if confirmed else [
+            "In the authorized test environment, establish a verified owner or allowed-role baseline.",
+            f"Repeat {method} {endpoint} with an account that should not have access and compare the response.",
+            "Keep the result marked as under investigation unless the evidence proves unauthorized access.",
+        ]
+        evidence_facts = [f"Engine result: {status.value}."]
+        if evidence is not None:
+            evidence_facts.extend([
+                f"Tested role: {test_role}; expected owner/role: {owner_role}.",
+                f"Observed HTTP status: {evidence.response_status}.",
+            ])
+            if actual:
+                evidence_facts.append(f"Observed behavior: {actual}")
+        else:
+            evidence_facts.append("No evidence artifact was attached to the finding.")
+
+        return BeginnerExplanation(
+            simple_title=simple_title,
+            technical_name=technical_name,
+            risk_level=severity,
+            risk_description=risk_descriptions.get(severity, "Risk level supplied by the security engine."),
+            confirmation_status=status.value,
+            what_is_the_problem=problem,
+            what_attacker_can_do=attacker_action,
+            real_world_impact=impact,
+            why_it_matters=why,
+            how_to_fix=fixes,
+            secure_code_example=None,
+            how_to_verify_fix=verify_steps,
+            additional_recommendations=["Keep a regression test for the authorized and unauthorized roles."],
+            evidence_summary=evidence_facts,
+            what_is_not_yet_proven=missing,
+        )
 
     # ── Private helpers ───────────────────────────────────────────────────────
 

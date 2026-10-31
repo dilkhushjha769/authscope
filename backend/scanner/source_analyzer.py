@@ -570,6 +570,10 @@ _HIGH_ENTROPY_TOKEN_RE = re.compile(
         |AKIA[0-9A-Z]{16}
         |ghp_[0-9a-zA-Z]{20,}
         |github_pat_[0-9a-zA-Z_]{20,}
+        |gho_[0-9a-zA-Z]{20,}
+        |ghu_[0-9a-zA-Z]{20,}
+        |ghs_[0-9a-zA-Z]{20,}
+        |ghr_[0-9a-zA-Z]{20,}
         |xox[baprs]-[0-9a-zA-Z\-]{10,}
         |AIza[0-9A-Za-z\-_]{20,}
     )\b

@@ -182,18 +182,6 @@ class SessionManager:
                 token=token,
                 is_authenticated=bool(token)
             )
-            if token:
-                if role == Role.USER_A:
-                    sess.user_id = "1"
-                    sess.register_owned_resource("basket", "1")
-                    sess.register_owned_resource("user", "1")
-                elif role == Role.USER_B:
-                    sess.user_id = "2"
-                    sess.register_owned_resource("basket", "2")
-                    sess.register_owned_resource("user", "2")
-                elif role == Role.ADMIN:
-                    sess.user_id = "0"
-                    sess.register_owned_resource("admin", "0")
             self._sessions[role] = sess
 
     def validate_configured_credentials(self) -> Dict[str, Any]:
@@ -300,9 +288,7 @@ class SessionManager:
         session.email = email
         self._credentials[session.role] = AuthCredentials(email=email, password=password)
         if token is not None:
-            session.token = token.strip()
-        elif not session.token:
-            session.token = f"jwt_{session.role.value}_session"
+            session.token = token.strip() or None
         session.is_authenticated = bool(session.token or session.cookies)
         logger.info("Configured role session credentials", extra={"role": session.role.value})
         return session

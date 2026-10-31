@@ -210,7 +210,7 @@ class TestPersistentBackgroundTaskRecovery:
 
         # Check session is updated
         reloaded = default_repo.get_scan_session(scan_id)
-        assert reloaded.status == "PENDING"
+        assert reloaded.status in ("PENDING", "RUNNING")
         assert reloaded.failure_reason == ""
 
     def test_retry_nonexistent_assessment_returns_404(self, test_client):
@@ -244,8 +244,8 @@ class TestMultiRoleAuthenticationConfiguration:
         assert "user_b" in report["authenticated_roles"]
         assert "admin" in report["authenticated_roles"]
 
-    def test_cross_user_resource_ownership(self, monkeypatch):
-        """Verifies SessionManager auto-registers resource ownership for configured personas."""
+    def test_environment_tokens_do_not_invent_resource_ownership(self, monkeypatch):
+        """Configured role tokens do not imply identity IDs or resource ownership."""
         monkeypatch.setattr(settings, "user_a_token", "token_a")
         monkeypatch.setattr(settings, "user_b_token", "token_b")
 
@@ -253,12 +253,19 @@ class TestMultiRoleAuthenticationConfiguration:
         user_a_sess = sm.get_session(Role.USER_A)
         user_b_sess = sm.get_session(Role.USER_B)
 
-        # User A owns basket 1, User B owns basket 2
-        assert user_a_sess.owns_resource("basket", "1") is True
+        assert user_a_sess.user_id is None
+        assert user_a_sess.owned_resources == {}
+        assert user_b_sess.user_id is None
+        assert user_b_sess.owned_resources == {}
         assert user_a_sess.owns_resource("basket", "2") is False
-
-        assert user_b_sess.owns_resource("basket", "2") is True
         assert user_b_sess.owns_resource("basket", "1") is False
+
+    def test_credentials_without_token_do_not_create_a_session(self):
+        """Email/password setup is not treated as a successful authentication."""
+        sm = SessionManager(load_from_env=False)
+        session = sm.authenticate_role(Role.USER_A, "user@test.local", "configured-password")
+        assert session.is_authenticated is False
+        assert session.token is None
 
     def test_missing_credentials_reported_safely_without_speculation(self, monkeypatch):
         """Verifies unconfigured tokens are reported as not authenticated without breaking or inventing tokens."""

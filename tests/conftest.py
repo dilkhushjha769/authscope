@@ -31,6 +31,7 @@ def session_manager() -> SessionManager:
     mgr.set_token(Role.USER_A, "mocked_jwt_user_a")
     mgr.set_token(Role.USER_B, "mocked_jwt_user_b")
     mgr.set_token(Role.ADMIN, "mocked_jwt_admin")
+    mgr.register_resource_ownership(Role.USER_A, "basket", "1")
     return mgr
 
 

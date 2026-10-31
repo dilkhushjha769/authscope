@@ -58,6 +58,7 @@ class EventType(str, Enum):
     SESSION_VALIDATION_COMPLETED = "session_validation_completed"
     AUTHORIZATION_TEST_STARTED = "authorization_test_started"
     AUTHORIZATION_TEST_COMPLETED = "authorization_test_completed"
+    EVIDENCE_VALIDATION_STARTED = "evidence_validation_started"
     SUSPICIOUS_BEHAVIOR_DETECTED = "suspicious_behavior_detected"
     EVIDENCE_VALIDATION_COMPLETED = "evidence_validation_completed"
     FINDING_CONFIRMED = "finding_confirmed"

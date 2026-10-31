@@ -57,6 +57,18 @@ class Settings(BaseSettings):
     # Storage Configuration
     database_path: str = Field(default="data/authscope.db", alias="DATABASE_PATH")
 
+    # GitHub App user authorization. Secrets are backend-only and never serialized.
+    github_client_id: str = Field(default="", alias="GITHUB_CLIENT_ID")
+    github_client_secret: str = Field(default="", alias="GITHUB_CLIENT_SECRET")
+    github_callback_url: str = Field(
+        default="http://localhost:8000/api/github/callback",
+        alias="GITHUB_CALLBACK_URL",
+    )
+    github_frontend_url: str = Field(default="http://localhost:3001", alias="FRONTEND_URL")
+    github_app_slug: str = Field(default="", alias="GITHUB_APP_SLUG")
+    github_token_encryption_key: str = Field(default="", alias="GITHUB_TOKEN_ENCRYPTION_KEY")
+    github_session_cookie_secure: bool = Field(default=False, alias="GITHUB_SESSION_COOKIE_SECURE")
+
     # Execution Guardrails & Request Constraints
     request_timeout_seconds: float = Field(default=10.0, alias="REQUEST_TIMEOUT_SECONDS")
     assessment_timeout_seconds: float = Field(default=300.0, alias="ASSESSMENT_TIMEOUT_SECONDS")
@@ -104,6 +116,16 @@ class Settings(BaseSettings):
                     pass
             return [int(item.strip()) for item in v.split(",") if item.strip()]
         return v
+
+    @field_validator("github_callback_url", mode="before")
+    @classmethod
+    def default_github_callback_when_blank(cls, value: Any) -> str:
+        return str(value).strip() if value and str(value).strip() else "http://localhost:8000/api/github/callback"
+
+    @field_validator("github_frontend_url", mode="before")
+    @classmethod
+    def default_github_frontend_when_blank(cls, value: Any) -> str:
+        return str(value).strip().rstrip("/") if value and str(value).strip() else "http://localhost:3001"
 
     model_config = SettingsConfigDict(
         env_file=".env",

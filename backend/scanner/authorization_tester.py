@@ -241,6 +241,27 @@ class AuthorizationTester:
         for trole in test_roles:
             self.session_manager.require_authenticated_session(trole)
 
+        if (
+            disc_ep.requires_owner_match
+            and disc_ep.resource_type
+            and effective_res_id
+            and not owner_session.owns_resource(disc_ep.resource_type, effective_res_id)
+        ):
+            return DifferentialResult(
+                endpoint=disc_ep.path,
+                resolved_url=resolved_url,
+                method=disc_ep.method,
+                resource_id=effective_res_id,
+                owner_role=owner_role,
+                overall_verdict=AccessVerdict.INCONCLUSIVE,
+                is_discrepancy_detected=False,
+                is_confirmed=False,
+                summary=(
+                    f"Ownership of resource '{effective_res_id}' for role '{owner_role.value}' "
+                    "is not explicitly configured; authorization comparison was not sent."
+                ),
+            )
+
         logger.info(
             "Starting authorization-differential test",
             extra={
@@ -319,20 +340,6 @@ class AuthorizationTester:
 
             artifact: Optional[EvidenceArtifact] = None
             final_role_verdict = comparison.verdict
-            if (
-                disc_ep.category == EndpointCategory.ADMIN_FUNCTION
-                and owner_role == Role.ADMIN
-                and trole != Role.ADMIN
-                and comparison.verdict == AccessVerdict.SUSPICIOUS_ACCESS
-                and comparison.similarity_ratio >= 0.80
-                and comparison.test_inspection.is_json
-                and not comparison.test_inspection.is_empty_payload
-                and not comparison.test_inspection.is_spa_html_fallback
-            ):
-                final_role_verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
-                comparison.verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
-                comparison.is_confirmed = True
-
             if comparison.verdict in (
                 AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS,
                 AccessVerdict.SUSPICIOUS_ACCESS,
@@ -498,6 +505,27 @@ class AuthorizationTester:
                 is_discrepancy_detected=False,
                 is_confirmed=False,
                 summary=f"Resource ownership for '{owner_role.value}' could not be established on '{endpoint_str}'. IDOR test inconclusive without guessing arbitrary IDs."
+            )
+
+        owner_session = self.session_manager.get_session(owner_role)
+        if (
+            disc_ep.requires_owner_match
+            and disc_ep.resource_type
+            and effective_res_id
+            and not owner_session.owns_resource(disc_ep.resource_type, effective_res_id)
+        ):
+            return DifferentialResult(
+                endpoint=endpoint_str,
+                resolved_url="",
+                owner_role=owner_role,
+                resource_id=effective_res_id,
+                overall_verdict=AccessVerdict.INCONCLUSIVE,
+                is_discrepancy_detected=False,
+                is_confirmed=False,
+                summary=(
+                    f"Ownership of resource '{effective_res_id}' for role '{owner_role.value}' "
+                    "is not explicitly configured. No baseline or cross-role request was sent."
+                ),
             )
 
         # Step 4: Verify User A can access the resource (baseline verification)

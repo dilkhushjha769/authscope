@@ -144,9 +144,13 @@ def test_evidence_tampering_detected():
 
     # Tampering: attacker modifies response status or body
     tampered_canonical = f"GET|http://localhost:3000/rest/wallet/1|200|tampered body payload"
-    expected_original_hash = compute_sha256(f"GET|http://localhost:3000/rest/wallet/1|200|{raw_response.body}")
+    expected_original_hash = compute_sha256(
+        f"GET|{artifact.request_url}|200|{artifact.response_body}"
+    )
     assert artifact.evidence_sha256 == expected_original_hash
     assert compute_sha256(tampered_canonical) != artifact.evidence_sha256
+    artifact.response_body = "tampered body payload"
+    assert validator.validate_artifact_completeness(artifact) is False
 
 
 @pytest.mark.security

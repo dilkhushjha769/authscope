@@ -12,6 +12,7 @@ distinguishes between:
 from enum import Enum
 from typing import Dict, Any, List, Optional, Set
 from difflib import SequenceMatcher
+import hashlib
 from pydantic import BaseModel, Field
 
 from backend.scanner.request_executor import HttpResponseModel
@@ -235,6 +236,27 @@ class ResponseAnalyzer:
         return round(SequenceMatcher(None, sample_a, sample_b).ratio(), 4)
 
     @classmethod
+    def _sensitive_value_fingerprints(cls, value: Any, key: str = "") -> Set[str]:
+        """Returns hashes of matching sensitive values without retaining their content."""
+        sensitive_name = any(
+            marker in key.lower()
+            for marker in ("password", "secret", "token", "apikey", "cardnum", "cvv", "ssn", "privatekey")
+        )
+        if isinstance(value, dict):
+            found: Set[str] = set()
+            for child_key, child_value in value.items():
+                found.update(cls._sensitive_value_fingerprints(child_value, str(child_key)))
+            return found
+        if isinstance(value, list):
+            found = set()
+            for child_value in value[:25]:
+                found.update(cls._sensitive_value_fingerprints(child_value, key))
+            return found
+        if sensitive_name and value not in (None, "", 0, False):
+            return {hashlib.sha256(str(value).encode("utf-8")).hexdigest()}
+        return set()
+
+    @classmethod
     def compare_responses(
         cls,
         owner_response: HttpResponseModel,
@@ -334,7 +356,7 @@ class ResponseAnalyzer:
         if test_email and test_email.lower() in test_insp.extracted_emails:
             if not owner_email or owner_email.lower() not in test_insp.extracted_emails:
                 reasons.append(
-                    f"Response contains only the testing role's own account data ({test_email}), not another user's resource."
+                    "Response contains only the testing role's own account data, not another user's resource."
                 )
                 return ComparisonAnalysis(
                     verdict=AccessVerdict.ALLOWED_ACCESS,
@@ -392,31 +414,40 @@ class ResponseAnalyzer:
         owner_leaked = False
         if owner_user_id and str(owner_user_id) in test_insp.extracted_owner_ids:
             owner_leaked = True
-            reasons.append(f"Response explicitly exposes owner UserId '{owner_user_id}'.")
+            reasons.append("Response explicitly exposes the configured owner user ID.")
         elif owner_insp.extracted_owner_ids and (
             set(owner_insp.extracted_owner_ids) & set(test_insp.extracted_owner_ids)
         ):
             owner_leaked = True
-            leaked_uids = sorted(set(owner_insp.extracted_owner_ids) & set(test_insp.extracted_owner_ids))
-            reasons.append(f"Response contains owner identifier(s) matching baseline: {leaked_uids}.")
+            reasons.append("Response contains an owner identifier matching the authorized baseline.")
 
         if owner_email and owner_email.lower() in test_insp.extracted_emails:
             owner_leaked = True
-            reasons.append(f"Response exposes owner's email address '{owner_email}'.")
+            reasons.append("Response exposes the configured owner's email address.")
         elif owner_insp.extracted_emails and (
             set(owner_insp.extracted_emails) & set(test_insp.extracted_emails)
         ):
             owner_leaked = True
-            leaked_emails = sorted(set(owner_insp.extracted_emails) & set(test_insp.extracted_emails))
-            reasons.append(f"Response exposes baseline email address(es): {leaked_emails}.")
+            reasons.append("Response exposes an email address also present in the authorized baseline.")
 
         # Determine if unauthorized access is CONFIRMED vs SUSPICIOUS
         has_sensitive = len(test_insp.sensitive_fields_found) > 0
         high_similarity = similarity >= 0.85
 
-        if (shared_res_match and (owner_leaked or high_similarity or has_sensitive)) or (
-            owner_leaked and high_similarity
-        ) or (high_similarity and has_sensitive and test_insp.is_json):
+        # Confirmation needs evidence tying the unauthorized response to a
+        # protected owner resource or to the authenticated privileged baseline.
+        # Similar shape or the presence of generic sensitive-looking keys alone
+        # is insufficient (for example, public profile fields or UI config).
+        shared_sensitive_values = bool(
+            cls._sensitive_value_fingerprints(owner_response.json_data)
+            & cls._sensitive_value_fingerprints(test_response.json_data)
+        )
+        verified_owner_resource = bool(expected_resource_id and shared_res_match)
+        if (
+            verified_owner_resource and (owner_leaked or (high_similarity and has_sensitive))
+        ) or (owner_leaked and high_similarity) or (
+            shared_sensitive_values and test_insp.is_json
+        ):
             reasons.append(
                 f"Confirmed unauthorized access: high structural similarity ({similarity:.2f}) "
                 f"and verified protected resource/owner attributes ({test_insp.sensitive_fields_found})."

@@ -10,17 +10,22 @@ Provides HTTP REST and Server-Sent Events (SSE) endpoints streaming structured
 agent operational telemetry, thoughts, plans, tool actions, and validated findings.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import logging
+import re
 import uuid
 import asyncio
+import secrets
+import sqlite3
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+import httpx
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.agent.gemini_agent import GeminiAgent
@@ -29,11 +34,25 @@ from backend.agent.tools import ToolRegistry
 from backend.ai_agent import GeminiAgentConfig, GeminiAuthScopeAgent
 from backend.analysis.code_mapper import CodeMapper, MappingStatus
 from backend.analysis.remediation import RemediationEngine
+from backend.analysis.finding_review import FindingReviewService, ReviewProvider
+from backend.analysis.finding_chat import FindingChatRequest, FindingChatResponse, FindingChatService
+from backend.analysis.explanation_engine import ExplanationEngine
 from backend.config import settings
+from backend.github_integration import (
+    SESSION_COOKIE,
+    STATE_COOKIE,
+    GITHUB_API,
+    GitHubAppService,
+    GitHubIntegrationError,
+    new_random_value,
+)
+from backend.ai_agent.config import GeminiAgentConfig
+from backend.ai_agent.gemini_client import GeminiClient, GeminiClientException
 from backend.core.assessment_engine import (
     AssessmentEngine,
     AssessmentQueryAdapter,
     CancellationToken,
+    sanitize_event_text,
 )
 from backend.core.scope_guard import ScopeCheckResult, ScopeGuard
 from backend.retesting.retest_engine import RetestEngine
@@ -43,6 +62,7 @@ from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict
 from backend.storage.database import DatabaseManager
 from backend.storage.finding_repository import FindingRepository
+from backend.storage.github_repository import GitHubRepository
 from backend.storage.models import (
     AssessmentEvent,
     AssessmentStage,
@@ -55,37 +75,30 @@ from backend.storage.models import (
     TargetApprovalStatus,
     TargetProfileRecord,
 )
-from backend.api.lifecycle import (
-    AssessmentStatus,
-    InvalidStateTransitionError,
-    validate_state_transition,
-    is_terminal_state,
-    is_active_state,
-)
-from backend.api.security import (
-    RequestSizeLimitMiddleware,
-    RateLimiter,
-    assessment_creation_limiter,
-    validate_target_url,
-    MAX_PAYLOAD_BYTES,
-)
 from backend.storage.target_repository import TargetRepository
 from backend.utils.helpers import redact_sensitive_text, sanitize_dict_or_list
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-class CleanupStreamingResponse(StreamingResponse):
-    """Closes an async body iterator when a client disconnects mid-stream."""
 
-    async def stream_response(self, send: Any) -> None:
-        try:
-            await super().stream_response(send)
-        finally:
-            close_iterator = getattr(self.body_iterator, "aclose", None)
-            if close_iterator is not None:
-                await close_iterator()
+class _GitHubCallbackAccessLogFilter(logging.Filter):
+    """Redacts one-time OAuth authorization codes and state from Uvicorn access logs."""
 
+    def filter(self, record: logging.LogRecord) -> bool:
+        arguments = record.args
+        if isinstance(arguments, tuple):
+            record.args = tuple(
+                re.sub(r"(/api/github/callback)\?[^\s\"]*", r"\1?[REDACTED]", item)
+                if isinstance(item, str) else item
+                for item in arguments
+            )
+        return True
+
+
+_uvicorn_access_logger = logging.getLogger("uvicorn.access")
+if not any(isinstance(item, _GitHubCallbackAccessLogFilter) for item in _uvicorn_access_logger.filters):
+    _uvicorn_access_logger.addFilter(_GitHubCallbackAccessLogFilter())
 
 # Active background runners and cancellation tokens indexed by assessment_id
 active_tokens: Dict[str, CancellationToken] = {}
@@ -369,10 +382,17 @@ def _serialize_detailed_finding(
     recommended_fix = redact_sensitive_text(
         str(tech_details.get("recommended_fix") or (kb_item.remediation_guidance if kb_item else "Enforce strict server-side session and ownership validation before returning resource data."))
     )
-    proposed_code_fix = redact_sensitive_text(
-        finding.remediation_guidance
-        or finding.remediation_recommendation
-        or (kb_item.code_pattern_secure if kb_item else "// Enforce server-side authorization check\nif (resource.ownerId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });")
+    code_context_verified = bool(
+        source_code_available
+        and tech_details.get("language")
+        and tech_details.get("framework")
+        and tech_details.get("root_cause")
+        and tech_details.get("verified_secure_code_example")
+    )
+    proposed_code_fix = (
+        redact_sensitive_text(str(tech_details["verified_secure_code_example"]))
+        if code_context_verified
+        else ""
     )
     verification_procedure = redact_sensitive_text(
         str(tech_details.get("verification_procedure") or (kb_item.retesting_procedure if kb_item else f"Re-issue {finding.http_method} {endpoint_rel} using an unauthorized role and verify the server returns HTTP 401 or HTTP 403."))
@@ -389,7 +409,43 @@ def _serialize_detailed_finding(
     evi_sha = finding.evidence.evidence_sha256 if finding.evidence else ""
     redacted_fields = list(finding.evidence.redacted_fields) if finding.evidence else []
 
+    beginner_explanation = ExplanationEngine().generate_beginner_explanation(finding).model_dump(mode="json")
+    ai_review = tech_details.get("ai_review")
+    ai_beginner = ai_review.get("beginner_explanation") if isinstance(ai_review, dict) else None
+    if (
+        val_status == "CONFIRMED"
+        and isinstance(ai_review, dict)
+        and ai_review.get("verdict") == "LIKELY_REAL"
+        and isinstance(ai_beginner, dict)
+    ):
+        for field_name in (
+            "simple_title",
+            "what_is_the_problem",
+            "what_attacker_can_do",
+            "real_world_impact",
+            "why_it_matters",
+            "how_to_fix",
+            "how_to_verify_fix",
+            "additional_recommendations",
+            "evidence_summary",
+        ):
+            candidate = ai_beginner.get(field_name)
+            if isinstance(candidate, str) and candidate.strip():
+                beginner_explanation[field_name] = candidate
+            elif isinstance(candidate, list) and candidate and all(isinstance(item, str) for item in candidate):
+                beginner_explanation[field_name] = candidate
+        ai_unproven = ai_beginner.get("what_is_not_yet_proven", [])
+        if not isinstance(ai_unproven, list):
+            ai_unproven = []
+        beginner_explanation["what_is_not_yet_proven"] = list(dict.fromkeys(
+            beginner_explanation["what_is_not_yet_proven"]
+            + [item for item in ai_unproven if isinstance(item, str)]
+        ))
+        # Code remains omitted unless a future mapper verifies framework and root cause together.
+        beginner_explanation["secure_code_example"] = None
+
     base.update({
+        "beginner_explanation": beginner_explanation,
         # A. Bug identity
         "vulnerability_name": redact_sensitive_text(finding.title),
         "vulnerability_category": raw_cat,
@@ -451,13 +507,21 @@ def _serialize_detailed_finding(
         "root_cause": root_cause,
         "recommended_fix": recommended_fix,
         "proposed_code_fix": proposed_code_fix,
-        "proposed_fix_label": "Proposed Fix — Not automatically applied to the website",
+        "proposed_fix_label": (
+            "Verified-context example — not automatically applied"
+            if proposed_code_fix
+            else "No code example supplied; Not automatically applied; language and root cause need verification"
+        ),
         "verification_procedure": verification_procedure,
         "resolution_details": {
             "root_cause": root_cause,
             "recommended_fix": recommended_fix,
             "proposed_code_fix": proposed_code_fix,
-            "proposed_fix_label": "Proposed Fix — Not automatically applied to the website",
+            "proposed_fix_label": (
+                "Verified-context example — not automatically applied"
+                if proposed_code_fix
+                else "No code example supplied; Not automatically applied; language and root cause need verification"
+            ),
             "verification_procedure": verification_procedure,
         },
         # F. Evidence summary
@@ -565,23 +629,27 @@ class AssessmentTaskManager:
         self.agent = agent
         self.tool_registry = tool_registry
         self.memory_manager = memory_manager
+        self.finding_review_provider: Optional[ReviewProvider] = None
 
     def configure_dependencies(
         self,
         agent: Optional[Any] = None,
         tool_registry: Optional[Any] = None,
         memory_manager: Optional[Any] = None,
+        finding_review_provider: Optional[ReviewProvider] = None,
     ) -> None:
         """Configures injected components for the unified pipeline (or mock adapters in tests)."""
         self.agent = agent
         self.tool_registry = tool_registry
         self.memory_manager = memory_manager
+        self.finding_review_provider = finding_review_provider
 
     def reset_dependencies(self) -> None:
         """Resets injected dependencies back to production defaults."""
         self.agent = None
         self.tool_registry = None
         self.memory_manager = None
+        self.finding_review_provider = None
 
     def get_agent(self, repo: FindingRepository) -> Any:
         if self.agent is not None:
@@ -627,10 +695,8 @@ class AssessmentTaskManager:
         token = self._tokens.get(scan_id)
         if token:
             token.cancel()
-        task = self._tasks.get(scan_id)
-        if task and not task.done():
-            task.cancel()
-        return True
+            return True
+        return False
 
     def start_assessment_task(
         self,
@@ -675,7 +741,10 @@ class AssessmentTaskManager:
         target_profile: Optional[TargetProfileRecord] = None,
     ) -> None:
         """Background worker executing the unified assessment workflow decoupled from client connections."""
-        logger.info(f"Background assessment task started for {scan_id} ({target_url})")
+        logger.info(
+            "Background assessment task started",
+            extra={"assessment_id": scan_id, "target_url": redact_sensitive_text(target_url)},
+        )
 
         source_root: Optional[Path] = None
         if source_archive_path:
@@ -745,8 +814,9 @@ class AssessmentTaskManager:
             try:
                 await asyncio.wait_for(_execute_injected_steps(), timeout=settings.assessment_timeout_seconds)
             except Exception as exc:
-                logger.error(f"Injected task error: {exc}", exc_info=True)
-                await self._broadcast(scan_id, ("error", str(exc), None))
+                safe_error = sanitize_event_text(str(exc))
+                logger.error("Injected assessment task failed", extra={"error": safe_error})
+                await self._broadcast(scan_id, ("error", safe_error, None))
             finally:
                 final_session = repo.get_scan_session(scan_id)
                 done_payload = _build_done_payload(final_session, repo, target_url)
@@ -790,6 +860,50 @@ class AssessmentTaskManager:
                     break
 
                 event.assessment_id = scan_id
+                if event.event_type == EventType.FINDING_CONFIRMED.value:
+                    finding_id = event.metadata.get("finding_id")
+                    finding = repo.get_finding(str(finding_id)) if finding_id else None
+                    if finding is not None:
+                        review_service = FindingReviewService(
+                            provider=self.finding_review_provider or self._default_finding_review_provider(),
+                            scope_guard=scope_guard,
+                        )
+                        await self._broadcast(scan_id, ("activity", AssessmentEvent(
+                            assessment_id=scan_id,
+                            event_type="ai_review_started",
+                            stage="AI_REVIEW",
+                            message="Reviewing validated finding evidence.",
+                            metadata={"finding_id": finding.id},
+                        ), None))
+                        await self._broadcast(scan_id, ("activity", AssessmentEvent(
+                            assessment_id=scan_id,
+                            event_type="ai_review_progress",
+                            stage="AI_REVIEW",
+                            message="Preparing redacted evidence context for review.",
+                            metadata={"finding_id": finding.id},
+                        ), None))
+                        review = await asyncio.to_thread(
+                            review_service.review,
+                            finding,
+                            finding.technical_details.get("source_mapping"),
+                        )
+                        review_data = review.model_dump(mode="json")
+                        event.metadata["ai_review"] = review_data
+                        finding.technical_details["ai_review"] = review_data
+                        repo.update_finding(finding)
+                        for event_name, event_message, event_metadata in (
+                            ("ai_review_completed", "Advisory AI review completed.", {"finding_id": finding.id, "ai_review": review_data}),
+                            ("fix_recommendation_generated", "Advisory fix recommendation generated.", {"finding_id": finding.id, "fix_recommendation": review.fix_recommendation}),
+                        ):
+                            review_event = AssessmentEvent(
+                                assessment_id=scan_id,
+                                event_type=event_name,
+                                stage="AI_REVIEW",
+                                message=event_message,
+                                metadata=event_metadata,
+                            )
+                            repo.save_event(review_event)
+                            await self._broadcast(scan_id, ("activity", review_event, None))
                 msg_chunk = _format_event_message_chunk(event, repo=repo)
                 await self._broadcast(scan_id, ("activity", event, msg_chunk))
                 await asyncio.sleep(0.04)
@@ -817,10 +931,17 @@ class AssessmentTaskManager:
                     )
                     repo.save_event(timeout_ev)
             except Exception as e:
-                logger.warning(f"Error recording timeout for {scan_id}: {e}")
+                logger.warning(
+                    "Failed to record assessment timeout",
+                    extra={"assessment_id": scan_id, "error": sanitize_event_text(str(e))},
+                )
             await self._broadcast(scan_id, ("error", f"Assessment timed out after {settings.assessment_timeout_seconds}s", None))
         except Exception as exc:
-            logger.error(f"Error in background assessment task {scan_id}: {exc}", exc_info=True)
+            safe_error = sanitize_event_text(str(exc))
+            logger.error(
+                "Background assessment task failed",
+                extra={"assessment_id": scan_id, "error": safe_error},
+            )
             is_persist = "database" in str(exc).lower() or "no column" in str(exc).lower() or "sqlite" in str(type(exc)).lower() or "persistence" in str(exc).lower()
             fail_reason = "PERSISTENCE_ERROR" if is_persist else "EXECUTION_ERROR"
             try:
@@ -830,24 +951,27 @@ class AssessmentTaskManager:
                     curr_session.failure_reason = fail_reason
                     curr_session.completed_at = datetime.now(timezone.utc)
                     curr_session.updated_at = datetime.now(timezone.utc)
-                    curr_session.summary_text = f"Assessment failed: {exc}"
+                    curr_session.summary_text = f"Assessment failed: {safe_error}"
                     repo.save_scan_session(curr_session)
             except Exception as e:
-                logger.error(f"Error recording failure for session {scan_id}: {e}")
+                logger.error(
+                    "Failed to record assessment failure",
+                    extra={"assessment_id": scan_id, "error": sanitize_event_text(str(e))},
+                )
 
             fail_ev = AssessmentEvent(
                 assessment_id=scan_id,
                 event_type=EventType.ASSESSMENT_FAILED.value,
                 stage=AssessmentStage.REPORT_PREPARATION.value,
-                message=f"Assessment failed: {exc}",
-                metadata={"error": str(exc), "failure_reason": fail_reason},
+                message=f"Assessment failed: {safe_error}",
+                metadata={"error": safe_error, "failure_reason": fail_reason},
             )
             try:
                 repo.save_event(fail_ev)
             except Exception:
                 pass
-            await self._broadcast(scan_id, ("activity", fail_ev, f"### Assessment Execution Failed\n\n**Reason:** `{fail_reason}`\n\n```\n{exc}\n```"))
-            await self._broadcast(scan_id, ("error", str(exc), None))
+            await self._broadcast(scan_id, ("activity", fail_ev, f"### Assessment Execution Failed\n\n**Reason:** `{fail_reason}`\n\n```\n{safe_error}\n```"))
+            await self._broadcast(scan_id, ("error", safe_error, None))
         finally:
             final_session = repo.get_scan_session(scan_id)
             done_payload = _build_done_payload(final_session, repo, target_url)
@@ -874,6 +998,14 @@ class AssessmentTaskManager:
             self._subscribers[scan_id].remove(q)
             if not self._subscribers[scan_id]:
                 self._subscribers.pop(scan_id, None)
+
+    @staticmethod
+    def _default_finding_review_provider() -> Optional[ReviewProvider]:
+        """Build Gemini review provider when configured; keep deterministic fallback otherwise."""
+        config = GeminiAgentConfig.from_env()
+        if not config.is_configured:
+            return None
+        return GeminiClient(config=config)
 
 
 def _compute_endpoint_check_counts(
@@ -1204,10 +1336,14 @@ def _validate_target_authorization(
         else:
             detail_msg = f"Scope violation: {reason}"
 
-        logger.warning(f"Rejected out-of-scope assessment request for {target_clean}: {detail_msg}")
+        safe_detail = redact_sensitive_text(detail_msg)
+        logger.warning(
+            "Rejected out-of-scope assessment request",
+            extra={"target_url": redact_sensitive_text(target_clean), "reason": safe_detail},
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=detail_msg,
+            detail=safe_detail,
         )
 
     return target_clean, check_result
@@ -1229,10 +1365,6 @@ async def startup_recovery() -> None:
         logger.warning(f"Failed to seed default target profiles: {exc}")
 
 
-# Enforce request payload size limit middleware (rejects > 1MB with HTTP 413)
-app.add_middleware(RequestSizeLimitMiddleware)
-
-
 # Enable CORS for explicit configured development origins only (never wildcard with credentials)
 cors_origins_list = (
     settings.cors_origins
@@ -1247,32 +1379,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
-
-@app.exception_handler(InvalidStateTransitionError)
-async def invalid_state_transition_handler(request: Request, exc: InvalidStateTransitionError) -> JSONResponse:
-    """Handles invalid lifecycle state transitions with HTTP 409 Conflict."""
-    logger.warning(f"Illegal state transition rejected: {exc.message}")
-    return JSONResponse(
-        status_code=status.HTTP_409_CONFLICT,
-        content={"detail": exc.message, "status_code": 409},
-    )
-
-
-@app.exception_handler(Exception)
-async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Catches unhandled exceptions to prevent leaking raw tracebacks or secrets."""
-    if isinstance(exc, HTTPException):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail, "status_code": exc.status_code},
-            headers=getattr(exc, "headers", None),
-        )
-    logger.error(f"Unhandled error processing {request.method} {request.url.path}: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "An internal server error occurred.", "status_code": 500},
-    )
 
 
 class CreateAssessmentRequest(BaseModel):
@@ -1648,6 +1754,16 @@ def _map_event_to_agent_sse(
         )
         val_status = "CONFIRMED" if is_confirmed else "SUSPICIOUS"
 
+        results.append(("finding_detected", {
+            "type": "finding_detected",
+            "finding_id": finding.id if finding else finding_id,
+            "endpoint": ep,
+            "category": cat,
+            "severity": sev,
+            "validation_status": val_status,
+            "assessment_id": assessment_id,
+        }))
+
         # 1. Emit finding_hypothesis
         results.append(("finding_hypothesis", {
             "type": "finding_hypothesis",
@@ -1772,6 +1888,12 @@ def _map_event_to_agent_sse(
             "assessment_id": assessment_id,
         }))
     elif etype == EventType.EVIDENCE_VALIDATION_COMPLETED.value:
+        results.append(("evidence_validation_completed", {
+            "type": "evidence_validation_completed",
+            "message": event.message,
+            "assessment_id": assessment_id,
+            **meta,
+        }))
         results.append(("evidence_validated", {
             "type": "evidence_validated",
             "message": "Cryptographic evidence artifacts signed and verified (SHA-256)",
@@ -1824,6 +1946,13 @@ def _map_event_to_agent_sse(
         "evidence_validated",
         "source_location_found",
         "explanation_generated",
+        "finding_detected",
+        "evidence_validation_started",
+        "evidence_validation_completed",
+        "ai_review_started",
+        "ai_review_progress",
+        "ai_review_completed",
+        "fix_recommendation_generated",
         "assessment_completed",
         "assessment_failed",
         "assessment_cancelled",
@@ -2006,19 +2135,387 @@ def health_check() -> Dict[str, Any]:
     }
 
 
-@app.post("/api/assessments", response_model=CreateAssessmentResponse, status_code=status.HTTP_201_CREATED)
-async def create_assessment(req: CreateAssessmentRequest, request: Request = None) -> CreateAssessmentResponse:
-    """Validates the target URL with ScopeGuard, creates session, and launches background task."""
-    # 1. Rate limiter check per client IP
-    client_ip = request.client.host if (request and request.client) else "127.0.0.1"
-    is_allowed, remaining, retry_after = assessment_creation_limiter.is_allowed(client_ip)
-    if not is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
-            headers={"Retry-After": str(int(retry_after))},
-        )
+class GitHubScanRequest(BaseModel):
+    installation_id: int = Field(gt=0)
+    owner: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9-]+$")
+    repository: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_.-]+$")
+    branch: str = Field(min_length=1, max_length=255)
 
+
+def _github_service() -> GitHubAppService:
+    service = getattr(app.state, "github_service", None)
+    if service is None:
+        service = GitHubAppService(repository=GitHubRepository())
+        app.state.github_service = service
+    return service
+
+
+def _github_repository() -> GitHubRepository:
+    repository = getattr(app.state, "github_repository", None)
+    if repository is None:
+        repository = GitHubRepository()
+        app.state.github_repository = repository
+    return repository
+
+
+def _github_user_id(request: Request) -> str:
+    session_value = request.cookies.get(SESSION_COOKIE, "")
+    if not session_value:
+        raise HTTPException(status_code=401, detail={"code": "GITHUB_NOT_CONNECTED", "message": "Connect GitHub to continue."})
+    user_id = _github_repository().get_session_user(GitHubAppService.hash_value(session_value))
+    if not user_id:
+        raise HTTPException(status_code=401, detail={"code": "GITHUB_SESSION_EXPIRED", "message": "Your GitHub session expired. Connect again."})
+    return user_id
+
+
+def _require_frontend_origin(request: Request) -> None:
+    origin = (request.headers.get("origin") or "").rstrip("/")
+    expected = settings.github_frontend_url.rstrip("/")
+    if not origin or origin != expected:
+        raise HTTPException(status_code=403, detail={"code": "CSRF_REJECTED", "message": "Request origin was not accepted."})
+
+
+def _github_cookie_secure() -> bool:
+    return settings.github_session_cookie_secure or settings.authscope_env.lower() not in {"development", "dev", "local"}
+
+
+def _raise_github_error(exc: GitHubIntegrationError) -> None:
+    raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+def _github_redirect(status_value: str) -> RedirectResponse:
+    return RedirectResponse(f"{settings.github_frontend_url.rstrip('/')}/?github_status={quote(status_value)}", status_code=303)
+
+
+@app.get("/api/github/connect")
+async def github_connect() -> RedirectResponse:
+    """Starts the GitHub App user authorization flow with one-time, browser-bound state."""
+    service = _github_service()
+    try:
+        service.ensure_configured()
+    except GitHubIntegrationError:
+        return _github_redirect("not_configured")
+    state_value = new_random_value()
+    _github_repository().save_oauth_state(
+        service.hash_value(state_value), "oauth", (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    )
+    params = {
+        "client_id": settings.github_client_id,
+        "redirect_uri": settings.github_callback_url,
+        "state": state_value,
+        "scope": "offline_access",
+    }
+    response = RedirectResponse(f"https://github.com/login/oauth/authorize?{urlencode(params)}", status_code=302)
+    response.set_cookie(
+        STATE_COOKIE, state_value, max_age=600, httponly=True, secure=_github_cookie_secure(),
+        samesite="lax", path="/api/github",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/github/install")
+async def github_install(request: Request) -> RedirectResponse:
+    """Starts the distinct GitHub App installation flow for repository selection."""
+    user_id = _github_user_id(request)
+    service = _github_service()
+    try:
+        service.ensure_configured(require_app_slug=True)
+    except GitHubIntegrationError:
+        return _github_redirect("install_not_configured")
+    state_value = new_random_value()
+    _github_repository().save_oauth_state(
+        service.hash_value(state_value), "install", (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(), user_id
+    )
+    url = f"https://github.com/apps/{quote(settings.github_app_slug, safe='')}/installations/new?{urlencode({'state': state_value})}"
+    response = RedirectResponse(url, status_code=302)
+    response.set_cookie(
+        STATE_COOKIE, state_value, max_age=600, httponly=True, secure=_github_cookie_secure(),
+        samesite="lax", path="/api/github",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/github/callback")
+async def github_callback(
+    request: Request,
+    state: str = "",
+    code: Optional[str] = None,
+    error: Optional[str] = None,
+    installation_id: Optional[int] = None,
+    setup_action: Optional[str] = None,
+) -> RedirectResponse:
+    """Handles both the OAuth callback and GitHub App's separate install callback."""
+    state_cookie = request.cookies.get(STATE_COOKIE, "")
+    if not state or not state_cookie or not secrets.compare_digest(state, state_cookie):
+        response = _github_redirect("state_error")
+        response.delete_cookie(STATE_COOKIE, path="/api/github")
+        return response
+    service = _github_service()
+    repository = _github_repository()
+    state_hash = service.hash_value(state)
+    if installation_id is not None:
+        github_user_id = repository.consume_oauth_state(state_hash, "install")
+        if not github_user_id:
+            result = _github_redirect("install_state_error")
+        elif setup_action in {"install", "update"}:
+            try:
+                installs = await service.installations(github_user_id)
+                if not any(item["id"] == installation_id for item in installs):
+                    raise GitHubIntegrationError("GITHUB_INSTALLATION_UNAVAILABLE", "The completed installation is not accessible to this account.", 403)
+                result = _github_redirect("installed")
+            except GitHubIntegrationError:
+                result = _github_redirect("install_failed")
+        else:
+            result = _github_redirect("install_cancelled")
+        result.delete_cookie(STATE_COOKIE, path="/api/github")
+        return result
+    if error:
+        repository.consume_oauth_state(state_hash, "oauth")
+        result = _github_redirect("denied")
+        result.delete_cookie(STATE_COOKIE, path="/api/github")
+        return result
+    if not code:
+        result = _github_redirect("callback_error")
+        result.delete_cookie(STATE_COOKIE, path="/api/github")
+        return result
+    if not repository.consume_oauth_state(state_hash, "oauth"):
+        result = _github_redirect("state_error")
+        result.delete_cookie(STATE_COOKIE, path="/api/github")
+        return result
+    try:
+        token_data = await service.exchange_code(code)
+        access_token = str(token_data["access_token"])
+        profile = await service._profile(access_token)
+        user_id = str(profile["id"])
+        expires_in = int(token_data.get("expires_in") or 0)
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat() if expires_in else None
+        repository.save_connection(
+            user_id,
+            str(profile["login"]),
+            str(profile.get("avatar_url") or ""),
+            service.encrypt_credentials(access_token, str(token_data.get("refresh_token") or "")),
+            expires_at,
+        )
+        session_value = new_random_value()
+        repository.create_session(
+            service.hash_value(session_value), user_id,
+            (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        )
+        result = _github_redirect("connected")
+        result.set_cookie(
+            SESSION_COOKIE, session_value, max_age=7 * 24 * 60 * 60, httponly=True,
+            secure=_github_cookie_secure(), samesite="lax", path="/api/github",
+        )
+    except GitHubIntegrationError:
+        result = _github_redirect("connect_failed")
+    result.delete_cookie(STATE_COOKIE, path="/api/github")
+    result.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@app.get("/api/github/status")
+async def github_status(request: Request) -> Dict[str, Any]:
+    session_value = request.cookies.get(SESSION_COOKIE, "")
+    if not session_value:
+        return {"connected": False, "account": None, "installations": []}
+    user_id = _github_repository().get_session_user(GitHubAppService.hash_value(session_value))
+    if not user_id:
+        return {"connected": False, "account": None, "installations": []}
+    connection = _github_repository().get_connection(user_id)
+    if not connection:
+        return {"connected": False, "account": None, "installations": []}
+    expired = False
+    try:
+        installs = await _github_service().installations(user_id)
+    except GitHubIntegrationError as exc:
+        installs = _github_repository().list_installations(user_id)
+        expired = exc.code == "GITHUB_AUTH_EXPIRED"
+    return {
+        "connected": True,
+        "expired": expired,
+        "account": {"id": user_id, "login": connection["login"], "avatar_url": connection["avatar_url"]},
+        "installations": installs,
+    }
+
+
+@app.delete("/api/github/disconnect")
+async def github_disconnect(request: Request) -> Dict[str, Any]:
+    _require_frontend_origin(request)
+    user_id = _github_user_id(request)
+    service = _github_service()
+    connection = _github_repository().get_connection(user_id)
+    revoked = False
+    if connection:
+        try:
+            credentials = service.decrypt_credentials(str(connection["encrypted_credentials"]))
+            await service._request(
+                "DELETE", f"{GITHUB_API}/applications/{quote(settings.github_client_id, safe='')}/grant",
+                json_body={"access_token": credentials["access_token"]},
+                basic_auth=httpx.BasicAuth(settings.github_client_id, settings.github_client_secret),
+            )
+            revoked = True
+        except GitHubIntegrationError:
+            revoked = False
+        _github_repository().delete_connection(user_id)
+    response = JSONResponse({"connected": False, "revoked": revoked})
+    response.delete_cookie(SESSION_COOKIE, path="/api/github")
+    return response
+
+
+@app.get("/api/github/installations/{installation_id}/repositories")
+async def github_repositories(installation_id: int, request: Request) -> Dict[str, Any]:
+    user_id = _github_user_id(request)
+    try:
+        return {"repositories": await _github_service().list_repositories(user_id, installation_id)}
+    except GitHubIntegrationError as exc:
+        _raise_github_error(exc)
+
+
+@app.get("/api/github/installations/{installation_id}/repositories/{owner}/{repository}/branches")
+async def github_branches(installation_id: int, owner: str, repository: str, request: Request) -> Dict[str, Any]:
+    user_id = _github_user_id(request)
+    try:
+        return {"branches": await _github_service().branches(user_id, installation_id, owner, repository)}
+    except GitHubIntegrationError as exc:
+        _raise_github_error(exc)
+
+
+_github_background_tasks: Set[asyncio.Task[Any]] = set()
+
+
+async def _run_github_scan(scan: Dict[str, Any]) -> None:
+    repository = _github_repository()
+    service = _github_service()
+    scan_id = str(scan["id"])
+    user_id = str(scan["github_user_id"])
+
+    def event(event_type: str, stage: str, message: str, metadata: Dict[str, Any]) -> None:
+        repository.save_scan_event(scan_id, event_type, stage, redact_sensitive_text(message), metadata)
+
+    try:
+        event("activity", "repository_validation", "Connecting to GitHub...", {})
+        event("activity", "authorization", "Checking repository installation access...", {})
+        event("activity", "analysis", "Checking authentication and authorization...", {})
+        result = await asyncio.wait_for(
+            service.scan_repository(
+                user_id, int(scan["installation_id"]), str(scan["owner"]), str(scan["repository"]),
+                str(scan["branch"]), str(scan["commit_sha"]), scan_id, event,
+            ),
+            timeout=settings.assessment_timeout_seconds,
+        )
+        event("activity", "fixes", "Generating recommended fixes...", {"findings": len(result["findings"])})
+        repository.update_scan(
+            scan_id, user_id, "COMPLETED", findings=result["findings"], languages=result["languages"],
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        event("done", "completed", "Scan completed.", {"findings": len(result["findings"]), "commit_sha": scan["commit_sha"]})
+    except asyncio.TimeoutError:
+        repository.update_scan(
+            scan_id, user_id, "FAILED", error_code="SCAN_TIMEOUT",
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        event("error", "failed", "The scan exceeded the allowed duration.", {"code": "SCAN_TIMEOUT"})
+    except GitHubIntegrationError as exc:
+        repository.update_scan(
+            scan_id, user_id, "FAILED", error_code=exc.code,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        event("error", "failed", str(exc), {"code": exc.code})
+    except Exception as exc:
+        repository.update_scan(
+            scan_id, user_id, "FAILED", error_code="SCAN_FAILED",
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        event("error", "failed", "The source scan could not be completed.", {"code": "SCAN_FAILED"})
+        logger.error("GitHub source scan failed", extra={"scan_id": scan_id, "error_type": type(exc).__name__})
+
+
+@app.post("/api/github/scans", status_code=status.HTTP_202_ACCEPTED)
+async def github_start_scan(payload: GitHubScanRequest, request: Request) -> Dict[str, Any]:
+    _require_frontend_origin(request)
+    user_id = _github_user_id(request)
+    github_repository = _github_repository()
+    if github_repository.has_running_scan(user_id):
+        raise HTTPException(status_code=429, detail={"code": "SCAN_ALREADY_RUNNING", "message": "Wait for the current source scan to finish before starting another."})
+    service = _github_service()
+    try:
+        branches = await service.branches(user_id, payload.installation_id, payload.owner, payload.repository)
+    except GitHubIntegrationError as exc:
+        _raise_github_error(exc)
+    branch = next((item for item in branches if item["name"] == payload.branch), None)
+    if not branch:
+        raise HTTPException(status_code=404, detail={"code": "BRANCH_NOT_FOUND", "message": "The selected branch is no longer available."})
+    try:
+        repo_info = await service._assert_repo_installed(user_id, payload.installation_id, payload.owner, payload.repository)
+    except GitHubIntegrationError as exc:
+        _raise_github_error(exc)
+    scan_id = f"gscan_{uuid.uuid4().hex}"
+    scan = {
+        "id": scan_id, "github_user_id": user_id, "installation_id": payload.installation_id,
+        "repository_id": int(repo_info["id"]), "owner": payload.owner, "repository": payload.repository,
+        "branch": payload.branch, "commit_sha": branch["commit_sha"], "status": "RUNNING",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        github_repository.create_scan(scan)
+    except sqlite3.IntegrityError as exc:
+        if "idx_github_one_active_scan_per_user" in str(exc):
+            raise HTTPException(status_code=429, detail={"code": "SCAN_ALREADY_RUNNING", "message": "Wait for the current source scan to finish before starting another."}) from exc
+        raise
+    github_repository.save_scan_event(scan_id, "activity", "queued", "Scan queued.", {"commit_sha": branch["commit_sha"]})
+    task = asyncio.create_task(_run_github_scan(scan))
+    _github_background_tasks.add(task)
+    task.add_done_callback(_github_background_tasks.discard)
+    return {"scan_id": scan_id, "status": "RUNNING", "repository": repo_info["full_name"], "branch": payload.branch, "commit_sha": branch["commit_sha"]}
+
+
+@app.get("/api/github/scans")
+async def github_scan_history(request: Request) -> Dict[str, Any]:
+    user_id = _github_user_id(request)
+    return {"scans": _github_repository().list_scans(user_id)}
+
+
+@app.get("/api/github/scans/{scan_id}")
+async def github_scan_detail(scan_id: str, request: Request) -> Dict[str, Any]:
+    user_id = _github_user_id(request)
+    scan = _github_repository().get_scan(scan_id, user_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail={"code": "SCAN_NOT_FOUND", "message": "Source scan not found."})
+    return scan
+
+
+@app.get("/api/github/scans/{scan_id}/stream")
+async def github_scan_stream(scan_id: str, request: Request) -> StreamingResponse:
+    user_id = _github_user_id(request)
+    if not _github_repository().get_scan(scan_id, user_id):
+        raise HTTPException(status_code=404, detail={"code": "SCAN_NOT_FOUND", "message": "Source scan not found."})
+    try:
+        last_event_id = max(0, int(request.headers.get("last-event-id", "0")))
+    except ValueError:
+        last_event_id = 0
+
+    async def stream() -> AsyncGenerator[str, None]:
+        nonlocal last_event_id
+        while True:
+            if await request.is_disconnected():
+                break
+            for item in _github_repository().list_scan_events(scan_id, last_event_id):
+                last_event_id = int(item["id"])
+                yield f"id: {last_event_id}\nevent: {item['event_type']}\ndata: {json.dumps(item, ensure_ascii=True)}\n\n"
+            scan = _github_repository().get_scan(scan_id, user_id)
+            if not scan or scan["status"] in {"COMPLETED", "FAILED"}:
+                break
+            yield ": heartbeat\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/assessments", response_model=CreateAssessmentResponse, status_code=status.HTTP_201_CREATED)
+async def create_assessment(req: CreateAssessmentRequest) -> CreateAssessmentResponse:
+    """Validates the target URL with ScopeGuard, creates session, and launches background task."""
     target_clean, check_result = _validate_target_authorization(
         raw_url=req.target_url,
         target_profile=req.target_profile,
@@ -2037,22 +2534,6 @@ async def create_assessment(req: CreateAssessmentRequest, request: Request = Non
         matched_profile = target_reg.repository.get_profile_by_hostname(host)
 
     repo = _get_repository()
-
-    # Prevent duplicate active scans on identical target URL
-    for active_id in task_manager.get_active_scan_ids():
-        existing_sess = repo.get_scan_session(active_id)
-        if existing_sess and existing_sess.target_url == target_clean and is_active_state(existing_sess.status):
-            logger.info(f"Returning existing active assessment {active_id} for target {target_clean}")
-            return CreateAssessmentResponse(
-                assessment_id=existing_sess.id,
-                target_url=existing_sess.target_url,
-                scheme=scheme,
-                host=host,
-                port=port,
-                status=existing_sess.status,
-                created_at=existing_sess.started_at.isoformat(),
-                message="Assessment already running for this target. Connect to SSE stream to observe.",
-            )
     scan_id = f"scan_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     stages = AssessmentEngine._init_stages()
     session = ScanSessionRecord(
@@ -2072,7 +2553,6 @@ async def create_assessment(req: CreateAssessmentRequest, request: Request = Non
     )
     repo.save_scan_session(session)
 
-    # Create cancellation token and launch managed background execution task
     token = CancellationToken()
     active_tokens[scan_id] = token
     task_manager.start_assessment_task(
@@ -2085,7 +2565,10 @@ async def create_assessment(req: CreateAssessmentRequest, request: Request = Non
         target_profile=matched_profile,
     )
 
-    logger.info(f"Initialized assessment session {scan_id} for target {target_clean}")
+    logger.info(
+        "Initialized assessment session",
+        extra={"assessment_id": scan_id, "target_url": redact_sensitive_text(target_clean)},
+    )
     return CreateAssessmentResponse(
         assessment_id=scan_id,
         target_url=target_clean,
@@ -2113,7 +2596,6 @@ async def stream_assessment(
             detail=f"Assessment {assessment_id} not found.",
         )
 
-    # Determine cursor for incremental replay (Last-Event-ID header or query param)
     cursor_str = (request.headers.get("last-event-id") if request else None) or last_event_id
     after_id: Optional[int] = None
     if cursor_str:
@@ -2137,9 +2619,6 @@ async def stream_assessment(
 
     async def sse_generator() -> AsyncGenerator[str, None]:
         last_sent_id = after_id or 0
-        # A cursor means this is a reconnect; do not replay the synthetic startup plan.
-        emitted_initial_started = after_id is not None
-        last_heartbeat = asyncio.get_running_loop().time()
 
         # Emit initial AI Agent plan events on fresh stream connection (when not resuming from cursor)
         if after_id is None:
@@ -2202,19 +2681,18 @@ async def stream_assessment(
         queue = task_manager.subscribe(assessment_id)
         try:
             while True:
-                # Heartbeats keep idle SSE connections alive while work continues.
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=15.0)
                 except asyncio.TimeoutError:
-                    last_heartbeat = asyncio.get_running_loop().time()
-                    yield f": heartbeat {datetime.now(timezone.utc).isoformat()}\n\n"
+                    if request is not None and await request.is_disconnected():
+                        break
+                    yield ": heartbeat\n\n"
                     continue
                 kind = item[0]
 
                 if kind == "activity":
                     _, ev, msg_chunk = item
-                    ev_id = ev.id or (last_sent_id + 1)
-                    # Deduplicate against events already sent during replay
+                    ev_id = ev.id or 0
                     if ev_id > 0 and ev_id <= last_sent_id:
                         continue
                     if ev_id > 0:
@@ -2222,17 +2700,13 @@ async def stream_assessment(
 
                     yield f"id: {ev_id}\nevent: activity\ndata: {ev.model_dump_json()}\n\n"
                     if msg_chunk:
-                        yield f"id: {ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
+                        yield f"id: msg_{ev_id}\nevent: message\ndata: {json.dumps({'text': msg_chunk})}\n\n"
 
                     agent_events = _map_event_to_agent_sse(ev, assessment_id, agent, repo=repo)
                     for event_type, payload in agent_events:
-                        if after_id is not None and event_type in {"assessment_started", "agent_thinking", "agent_plan"}:
-                            continue
-                        if event_type == "assessment_started" and emitted_initial_started:
-                            continue
                         if event_type == "assessment_started":
-                            emitted_initial_started = True
-                        yield f"id: {ev_id}\nevent: {event_type}\ndata: {json.dumps(payload)}\n\n"
+                            continue
+                        yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
                 elif kind == "done":
                     _, done_payload, _ = item
@@ -2255,14 +2729,18 @@ async def stream_assessment(
             logger.info(f"SSE client disconnected for {assessment_id}; background task continues.")
             raise
         except Exception as exc:
-            logger.error(f"Error streaming live SSE events for {assessment_id}: {exc}")
-            err_data = json.dumps({"type": "assessment_failed", "error": str(exc), "assessment_id": assessment_id})
+            safe_error = sanitize_event_text(str(exc))
+            logger.error(
+                "SSE event stream failed",
+                extra={"assessment_id": assessment_id, "error": safe_error},
+            )
+            err_data = json.dumps({"type": "assessment_failed", "error": safe_error, "assessment_id": assessment_id})
             yield f"event: assessment_failed\ndata: {err_data}\n\n"
             yield f"event: error\ndata: {err_data}\n\n"
         finally:
             task_manager.unsubscribe(assessment_id, queue)
 
-    return CleanupStreamingResponse(
+    return StreamingResponse(
         sse_generator(),
         media_type="text/event-stream",
         headers={
@@ -2276,54 +2754,22 @@ async def stream_assessment(
 @app.post("/api/assessments/{assessment_id}/stop")
 def stop_assessment(assessment_id: str) -> Dict[str, Any]:
     """Signals an in-progress assessment to safely cancel execution."""
+    token = active_tokens.get(assessment_id) or task_manager.get_token(assessment_id)
+    if token:
+        token.cancel()
+        task_manager.cancel(assessment_id)
+        return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
+
     repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
         raise HTTPException(status_code=404, detail=f"Assessment {assessment_id} not found.")
-
-    if is_terminal_state(session.status):
-        return {"status": session.status, "message": f"Assessment is already in terminal state {session.status}."}
-
-    # Signal cancellation to token and task manager
-    token = active_tokens.get(assessment_id) or task_manager.get_token(assessment_id)
-    if token:
-        token.cancel()
-    task_manager.cancel(assessment_id)
-
-    # Persist CANCELLED status
-    session.status = AssessmentStatus.CANCELLED.value
-    session.completed_at = datetime.now(timezone.utc)
-    session.updated_at = datetime.now(timezone.utc)
-    session.summary_text = "Assessment was safely cancelled by operator."
-    repo.save_scan_session(session)
-
-    # Record cancellation event
-    cancel_ev = AssessmentEvent(
-        assessment_id=assessment_id,
-        event_type=EventType.ASSESSMENT_CANCELLED.value,
-        stage=AssessmentStage.REPORT_PREPARATION.value,
-        message="Assessment was safely stopped by the operator.",
-        metadata={"cancelled_by": "operator"},
-    )
-    repo.save_event(cancel_ev)
-
-    return {"status": "CANCELLING", "message": "Cancellation signal dispatched."}
-
+    return {"status": session.status, "message": "Assessment was not actively running."}
 
 
 @app.post("/api/assessments/{assessment_id}/retry", response_model=CreateAssessmentResponse)
-async def retry_assessment(assessment_id: str, request: Request) -> CreateAssessmentResponse:
+async def retry_assessment(assessment_id: str) -> CreateAssessmentResponse:
     """Retries an interrupted, failed, or cancelled assessment."""
-    # 1. Rate limiter check per client IP
-    client_ip = request.client.host if (request and request.client) else "127.0.0.1"
-    is_allowed, remaining, retry_after = assessment_creation_limiter.is_allowed(client_ip)
-    if not is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
-            headers={"Retry-After": str(int(retry_after))},
-        )
-
     repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
@@ -2332,20 +2778,11 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
             detail=f"Assessment {assessment_id} not found.",
         )
 
-    if is_active_state(session.status):
+    if task_manager.is_running(assessment_id):
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Assessment {assessment_id} is already actively running.",
         )
-
-    # If the prior task is winding down, cancel and clean up its reference
-    old_task = task_manager._tasks.get(assessment_id)
-    if old_task and not old_task.done():
-        old_task.cancel()
-        try:
-            await asyncio.sleep(0.05)
-        except Exception:
-            pass
 
     _, check = _validate_target_authorization(session.target_url)
     scheme = check.normalized_scheme or "http"
@@ -2378,7 +2815,10 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
         github_repo=cfg.get("github_repo"),
     )
 
-    logger.info(f"Retried assessment session {assessment_id} for target {session.target_url}")
+    logger.info(
+        "Retried assessment session",
+        extra={"assessment_id": assessment_id, "target_url": redact_sensitive_text(session.target_url)},
+    )
     return CreateAssessmentResponse(
         assessment_id=assessment_id,
         target_url=session.target_url,
@@ -2393,7 +2833,7 @@ async def retry_assessment(assessment_id: str, request: Request) -> CreateAssess
 
 @app.post("/api/assessments/{assessment_id}/retest")
 async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
-    """Re-verifies findings for a given assessment session using RetestEngine."""
+    """Runs safe, evidence-grounded GET verification for findings in this assessment."""
     repo = _get_repository()
     session = repo.get_scan_session(assessment_id)
     if not session:
@@ -2403,15 +2843,10 @@ async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
         )
 
     scope_guard = _get_active_scope_guard()
-    check = scope_guard.validate_request(url=session.target_url, method="GET")
-    if not check.is_allowed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Scope violation: {check.reason}",
-        )
-
     findings = repo.list_findings(assessment_id)
-    retest_engine = RetestEngine(repository=repo)
+    from backend.core.session_manager import SessionManager
+
+    retest_engine = RetestEngine(repository=repo, scope_guard=scope_guard, session_manager=SessionManager(load_from_env=True), base_url=session.target_url)
     retest_results = []
     for f in findings:
         log_rec = retest_engine.retest_finding(f.id)
@@ -2425,6 +2860,88 @@ async def retest_assessment(assessment_id: str) -> Dict[str, Any]:
         "retested_count": len(retest_results),
         "results": retest_results,
     }
+
+
+@app.post("/api/assessments/{assessment_id}/findings/{finding_id}/verify-fix")
+async def verify_finding_fix(assessment_id: str, finding_id: str) -> Dict[str, Any]:
+    """Revalidates assessment ownership and scope before replaying one finding's GET evidence."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assessment not found.")
+    finding = repo.get_finding(finding_id)
+    if not finding or finding.scan_id != assessment_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found in this assessment.")
+
+    scope_guard = _get_active_scope_guard()
+
+    from backend.core.session_manager import SessionManager
+
+    engine = RetestEngine(
+        repository=repo,
+        scope_guard=scope_guard,
+        session_manager=SessionManager(load_from_env=True),
+        base_url=session.target_url,
+    )
+    result = engine.retest_finding(finding_id)
+    repo.save_retest_result(result)
+    return {
+        "assessment_id": assessment_id,
+        "finding_id": finding_id,
+        "verification": result.model_dump(mode="json"),
+        "history": [entry.model_dump(mode="json") for entry in repo.get_retest_history(finding_id)],
+    }
+
+
+@app.get("/api/assessments/{assessment_id}/findings/{finding_id}/verification-history")
+def get_finding_verification_history(assessment_id: str, finding_id: str) -> List[Dict[str, Any]]:
+    """Returns verification records only after confirming the finding belongs to this assessment."""
+    repo = _get_repository()
+    if not repo.get_scan_session(assessment_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assessment not found.")
+    finding = repo.get_finding(finding_id)
+    if not finding or finding.scan_id != assessment_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found in this assessment.")
+    return [entry.model_dump(mode="json") for entry in repo.get_retest_history(finding_id)]
+
+
+@app.post(
+    "/api/assessments/{assessment_id}/findings/{finding_id}/chat",
+    response_model=FindingChatResponse,
+)
+async def chat_about_finding(
+    assessment_id: str,
+    finding_id: str,
+    request: FindingChatRequest,
+) -> FindingChatResponse:
+    """Answers a question using only the finding and its sanitized stored evidence."""
+    repo = _get_repository()
+    if not repo.get_scan_session(assessment_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assessment not found.")
+    finding = repo.get_finding(finding_id)
+    if finding is None or finding.scan_id != assessment_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finding not found in this assessment.")
+
+    service = getattr(app.state, "finding_chat_service", None)
+    if service is None:
+        config = GeminiAgentConfig.from_env()
+        if not config.is_configured:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Gemini is not configured. Set GEMINI_API_KEY on the backend to enable finding Q&A.",
+            )
+        service = FindingChatService(generator=GeminiClient(config=config), model=config.model)
+    try:
+        return await asyncio.to_thread(service.answer, finding, request)
+    except GeminiClientException as exc:
+        logger.warning(
+            "Finding Q&A provider unavailable",
+            extra={"finding_id": finding_id, "error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Gemini could not answer right now. Please retry in a moment.",
+        ) from exc
 
 
 @app.get("/api/assessments/{assessment_id}/findings")
@@ -2466,6 +2983,10 @@ def get_assessment(assessment_id: str) -> AssessmentSummaryResponse:
         _serialize_detailed_finding(f, session.target_url, source_archive_path=source_archive_path)
         for f in findings
     ]
+    for finding, serialized in zip(findings, serialized_findings):
+        serialized["verification_history"] = [
+            entry.model_dump(mode="json") for entry in repo.get_retest_history(finding.id)
+        ]
     counts = _compute_endpoint_check_counts(assessment_id, repo, findings=findings)
 
     conf_count = max(session.confirmed_findings_count, counts["confirmed"])

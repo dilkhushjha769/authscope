@@ -499,8 +499,8 @@ class TestFindingSerializationAndStatuses:
         # E. How to resolve it (clearly labeled as proposed fix)
         assert len(f_out["root_cause"]) > 10
         assert len(f_out["recommended_fix"]) > 10
-        assert "Basket.findOne" in f_out["proposed_code_fix"]
-        assert "Proposed Fix" in f_out["proposed_fix_label"]
+        assert f_out["proposed_code_fix"] == ""
+        assert "No code example supplied" in f_out["proposed_fix_label"]
         assert "Not automatically applied" in f_out["proposed_fix_label"]
         assert len(f_out["verification_procedure"]) > 10
 
@@ -776,3 +776,27 @@ class TestCancellationAndSSEReconnection:
             assert f"id: {id2}\n" in text
             assert "Second event after cursor" in text
             assert "event: done" in text
+
+
+def test_finding_api_includes_beginner_explanation_without_model_response() -> None:
+    finding = FindingRecord(
+        id="fnd_beginner_missing_ai",
+        scan_id="scan_beginner_missing_ai",
+        endpoint="/api/basket/1",
+        target_endpoint="/api/basket/1",
+        title="Potential BOLA",
+        vulnerability_category="BOLA_IDOR",
+        vulnerability_type="BOLA_IDOR",
+        status="suspected",
+        confirmation_status="suspected",
+        validation_status="SUSPICIOUS",
+        severity="HIGH",
+    )
+
+    serialized = _serialize_detailed_finding(finding, "http://localhost:3000")
+
+    explanation = serialized["beginner_explanation"]
+    assert explanation["simple_title"]
+    assert explanation["confirmation_status"] == "SUSPICIOUS"
+    assert "We need more evidence to confirm this." in explanation["what_is_not_yet_proven"]
+    assert explanation["secure_code_example"] is None

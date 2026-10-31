@@ -107,8 +107,9 @@ _JSON_SECRET_PATTERN = re.compile(
     r'("(?i:[a-zA-Z0-9_\-]*(?:password|passwd|secret|token|api_key|apikey|auth_token|authorization|credential|privkey|private_key)[a-zA-Z0-9_\-]*)"\s*:\s*)"(?:[^"\\]|\\.)*"'
 )
 _QUERY_SECRET_PATTERN = re.compile(
-    r'(?i)\b(password|access_token|secret|api_key|apikey|auth_token)=([^&\s"\']+)'
+    r'(?i)([?&;](?:password|passwd|access_token|refresh_token|token|jwt|session_id|sessionid|sid|secret|api_key|apikey|auth_token|cookie)=)([^&\s"\']+)'
 )
+_EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _PROSE_PASSWORD_PATTERN = re.compile(
     r'(?i)\b(password|passwd|pwd)\s*[:= ]\s*([^\s,;"\'\]}]+)'
 )
@@ -131,9 +132,10 @@ def redact_sensitive_text(text: str) -> str:
     sanitized = _BASIC_AUTH_PATTERN.sub("Basic [REDACTED_BASIC_AUTH]", sanitized)
     sanitized = _JWT_PATTERN.sub("[REDACTED_JWT]", sanitized)
     sanitized = _JSON_SECRET_PATTERN.sub(r'\1"[REDACTED_SECRET]"', sanitized)
-    sanitized = _QUERY_SECRET_PATTERN.sub(r'\1=[REDACTED_SECRET]', sanitized)
+    sanitized = _QUERY_SECRET_PATTERN.sub(r'\1[REDACTED_SECRET]', sanitized)
     sanitized = _COOKIE_PATTERN.sub(r'\1=[REDACTED_COOKIE]', sanitized)
     sanitized = _PROSE_PASSWORD_PATTERN.sub(r'\1 [REDACTED_PASSWORD]', sanitized)
+    sanitized = _EMAIL_PATTERN.sub("[REDACTED_EMAIL]", sanitized)
     return sanitized
 
 
