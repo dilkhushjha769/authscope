@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Union
 import uuid
 from pydantic import BaseModel, ConfigDict, Field
+from backend.agent.attack_chain import AttackChainPlan
 
 
 # ==============================================================================
@@ -160,6 +161,18 @@ class DiscoverEndpointsOutput(BaseModel):
     base_url: str
     endpoint_count: int
     endpoints: List[DiscoveredEndpointSummary]
+
+
+class PlanAttackChainsInput(BaseModel):
+    """Bounded deterministic chain planning request for a persisted assessment."""
+    max_steps: int = Field(default=5, ge=2, le=5)
+    max_candidates: int = Field(default=25, ge=1, le=100)
+
+
+class PlanAttackChainsOutput(BaseModel):
+    """Unverified candidate plans; never an authorization or execution result."""
+    assessment_id: str
+    plan: AttackChainPlan
 
 
 class InspectEndpointInput(BaseModel):

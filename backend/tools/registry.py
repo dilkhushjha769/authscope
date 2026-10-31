@@ -39,6 +39,8 @@ from backend.tools.schemas import (
     DetectIdorOutput,
     DiscoverEndpointsInput,
     DiscoverEndpointsOutput,
+    PlanAttackChainsInput,
+    PlanAttackChainsOutput,
     EvidenceValidatedEvent,
     ExplainFindingInput,
     ExplainFindingOutput,
@@ -402,6 +404,28 @@ class ToolRegistry:
             })
         return declarations
 
+    def _handle_plan_attack_chains(
+        self,
+        payload: PlanAttackChainsInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> PlanAttackChainsOutput:
+        """Plans only over persisted endpoints for the caller's active scan session."""
+        assessment_id = context.session_id if context else None
+        if not assessment_id:
+            raise InvalidDataError("An active assessment session is required to plan attack chains.")
+        session = self.report_tools.repository.get_scan_session(assessment_id)
+        if session is None:
+            raise InvalidDataError("The active assessment session was not found.")
+        endpoints = self.report_tools.repository.list_discovered_endpoints(assessment_id)
+        from backend.agent.attack_chain import AttackChainPlanner
+
+        plan = AttackChainPlanner().plan(
+            endpoints,
+            max_steps=payload.max_steps,
+            max_candidates=payload.max_candidates,
+        )
+        return PlanAttackChainsOutput(assessment_id=assessment_id, plan=plan)
+
     # --------------------------------------------------------------------------
     # Default Tool Registration
     # --------------------------------------------------------------------------
@@ -441,6 +465,16 @@ class ToolRegistry:
                 output_model=DiscoverEndpointsOutput,
                 handler=lambda args, ctx: self.website_tools.discover_endpoints(args, ctx),
                 requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="plan_attack_chains",
+                description="Builds ranked, unverified authorization chain candidates from endpoints discovered in the active assessment. Does not authorize or execute requests.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=PlanAttackChainsInput,
+                output_model=PlanAttackChainsOutput,
+                handler=self._handle_plan_attack_chains,
             )
         )
         self.register_tool(

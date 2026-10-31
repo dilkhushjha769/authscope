@@ -1201,13 +1201,15 @@ class ApprovedToolRegistry:
             full_url = self._resolve_url(target_url, endpoint)
             if self.executor is not None:
                 role_statuses: Dict[str, int] = {}
-                for r_name in ("anonymous", "user_a", "user_b", "admin"):
-                    try:
-                        r_resp = self.executor.get(url=full_url, role=r_name)
-                        role_statuses[r_name] = r_resp.status_code
-                    except Exception:
-                        pass
+                if tool_name == "test_four_role_access":
+                    for r_name in ("anonymous", "user_a", "user_b", "admin"):
+                        try:
+                            r_resp = self.executor.get(url=full_url, role=r_name)
+                            role_statuses[r_name] = r_resp.status_code
+                        except Exception:
+                            pass
                 resp = self.executor.get(url=full_url, role="user_b")
+                role_statuses.setdefault("user_b", resp.status_code)
                 sanitized_body, _ = self.evidence_validator.sanitize_body(resp.body, max_excerpt_len=1200)
                 is_200_json = resp.status_code == 200 and (
                     "{" in sanitized_body or "application/json" in resp.headers.get("content-type", "").lower()
