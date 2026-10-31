@@ -183,3 +183,57 @@ button { color: inherit; }
   .panel, .report-panel, .finding-card { break-inside: avoid; background: white !important; color: black !important; }
   .panel-title, .activity-item p, .finding-main strong, .report-grid dd, .finding-details h3 { color: black !important; }
 }
+
+/* Chat-style assessment layout inspired by the supplied AuthScope prototype. */
+.content-results { width: min(100%, 1000px); }
+.conversation-view { width: min(100%, 790px); margin: 0 auto; }
+.target-bubble { width: fit-content; max-width: min(88%, 560px); margin: 0 0 28px auto; padding: 12px 16px; border: 1px solid #414141; border-radius: 16px 16px 4px 16px; background: #2a2a2a; }
+.target-bubble span { display: block; margin-bottom: 5px; color: #929292; font-size: 10px; }
+.target-bubble p { margin: 0; overflow-wrap: anywhere; color: #f1f1f1; font-size: 13px; }
+.assistant-thread { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: start; gap: 13px; }
+.assistant-avatar { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 9px; background: var(--accent); color: #073a30; font-size: 14px; font-weight: 800; }
+.assistant-content { min-width: 0; }
+.assistant-byline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 9px; margin: 3px 0 10px; }
+.assistant-byline strong { color: #f1f1f1; font-size: 14px; font-weight: 600; }
+.assistant-byline span { color: #8f8f8f; font-size: 11px; }
+.assistant-intro { margin: 0 0 18px; color: #c2c2c2; font-size: 13px; line-height: 1.6; }
+.results-grid { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+.panel { overflow: visible; border: 0; border-radius: 0; background: transparent; }
+.panel-title { min-height: 38px; padding: 0 0 10px; border-bottom: 1px solid #383838; color: #e7e7e7; }
+.activity-feed { max-height: 420px; padding: 4px 0; }
+.activity-item { grid-template-columns: 8px minmax(0, 1fr); gap: 10px; padding: 10px 0; border-bottom-color: #303030; }
+.activity-item p { font-size: 12px; }
+.activity-item small { font-size: 10px; }
+.findings-panel { padding-top: 4px; }
+.findings-panel > .empty-note { padding-left: 0; }
+.finding-list { padding: 10px 0 0; }
+.finding-card { margin-bottom: 10px; border-radius: 12px; background: #252525; }
+.finding-summary { min-height: 62px; padding: 12px 14px; }
+.finding-main strong { font-size: 13px; }
+.finding-main small { font-size: 10px; }
+.finding-details { padding: 0 14px 15px; }
+.report-panel { margin-top: 24px; }
+
+.workspace-light .target-bubble { border-color: #dedbd7; background: #f0eeeb; }
+.workspace-light .target-bubble p, .workspace-light .assistant-byline strong { color: #282624; }
+.workspace-light .assistant-intro, .workspace-light .activity-item p { color: #4e4b47; }
+.workspace-light .panel-title { border-color: #dedbd7; color: #333; }
+.workspace-light .activity-item { border-color: #e7e4e0; }
+.workspace-light .finding-card { background: #fff; }
+
+@media (max-width: 600px) {
+  .content-results { padding-right: 15px; padding-left: 15px; }
+  .conversation-view { width: 100%; }
+  .target-bubble { max-width: 92%; margin-bottom: 22px; }
+  .assistant-thread { grid-template-columns: 28px minmax(0, 1fr); gap: 9px; }
+  .assistant-avatar { width: 26px; height: 26px; border-radius: 8px; font-size: 12px; }
+  .assistant-byline { gap: 6px; }
+  .assistant-byline span { flex-basis: 100%; }
+  .finding-summary { gap: 8px; padding: 11px 9px; }
+  .finding-badges { display: none; }
+}
+
+@media print {
+  .target-bubble { margin-right: 0; border: 1px solid #bbb; background: white; }
+  .target-bubble p, .assistant-byline strong, .assistant-intro, .activity-item p { color: black !important; }
+}
