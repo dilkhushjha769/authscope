@@ -15,16 +15,29 @@ from backend.core.scope_guard import ScopeGuard
 from backend.scanner.endpoint_discovery import EndpointDiscovery
 from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import ResponseAnalyzer, AccessVerdict
+from backend.scanner.security_inspector import SecurityInspector
 from backend.tools.schemas import (
     AnalyzeResponseInput,
     AnalyzeResponseOutput,
+    CheckAuthWeaknessesInput,
+    CheckAuthWeaknessesOutput,
+    CheckCorsInput,
+    CheckCorsOutput,
     CheckHttpMethodsInput,
     CheckHttpMethodsOutput,
+    CheckSecurityHeadersInput,
+    CheckSecurityHeadersOutput,
+    CheckSessionSecurityInput,
+    CheckSessionSecurityOutput,
+    CheckTransportSecurityInput,
+    CheckTransportSecurityOutput,
     DiscoverEndpointsInput,
     DiscoverEndpointsOutput,
     DiscoveredEndpointSummary,
     InspectEndpointInput,
     InspectEndpointOutput,
+    RunMisconfigurationScanInput,
+    RunMisconfigurationScanOutput,
     ToolExecutionContext,
     ValidateTargetInput,
     ValidateTargetOutput,
@@ -49,6 +62,7 @@ class WebsiteTools:
         self.executor = executor or RequestExecutor(scope_guard=self.scope_guard)
         self.discovery = discovery or EndpointDiscovery(scope_guard=self.scope_guard)
         self.analyzer = analyzer or ResponseAnalyzer()
+        self.inspector = SecurityInspector(executor=self.executor, scope_guard=self.scope_guard)
 
     def validate_target(
         self,
@@ -181,4 +195,129 @@ class WebsiteTools:
             url=payload.url,
             allowed_methods=["GET", "HEAD"],
             is_safe=True
+        )
+
+    def check_authentication_weaknesses(
+        self,
+        payload: CheckAuthWeaknessesInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> CheckAuthWeaknessesOutput:
+        """Inspects endpoints for unauthenticated access, verbose error leaks, or auth inconsistencies."""
+        result = self.inspector.inspect_authentication_weaknesses(
+            endpoint=payload.endpoint,
+            assessment_id=payload.assessment_id,
+        )
+        return CheckAuthWeaknessesOutput(
+            category=result.category,
+            target_url=result.target_url,
+            endpoint=result.endpoint,
+            status=result.status,
+            findings=[(f.model_dump() if hasattr(f, 'model_dump') else f) for f in result.findings],
+            inspected_items=result.inspected_items,
+            suppressed_duplicates_count=result.suppressed_duplicates_count,
+            summary=result.summary,
+        )
+
+    def check_session_security(
+        self,
+        payload: CheckSessionSecurityInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> CheckSessionSecurityOutput:
+        """Inspects cookie flags (HttpOnly, Secure, SameSite, lifetime) and session token leakage."""
+        result = self.inspector.inspect_session_security(
+            endpoint=payload.endpoint,
+            assessment_id=payload.assessment_id,
+        )
+        return CheckSessionSecurityOutput(
+            category=result.category,
+            target_url=result.target_url,
+            endpoint=result.endpoint,
+            status=result.status,
+            findings=[(f.model_dump() if hasattr(f, 'model_dump') else f) for f in result.findings],
+            inspected_items=result.inspected_items,
+            suppressed_duplicates_count=result.suppressed_duplicates_count,
+            summary=result.summary,
+        )
+
+    def check_security_headers(
+        self,
+        payload: CheckSecurityHeadersInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> CheckSecurityHeadersOutput:
+        """Evaluates presence and adequacy of key HTTP security headers (CSP, HSTS, frame protection, etc.)."""
+        result = self.inspector.inspect_security_headers(
+            endpoint=payload.endpoint,
+            assessment_id=payload.assessment_id,
+        )
+        return CheckSecurityHeadersOutput(
+            category=result.category,
+            target_url=result.target_url,
+            endpoint=result.endpoint,
+            status=result.status,
+            findings=[(f.model_dump() if hasattr(f, 'model_dump') else f) for f in result.findings],
+            inspected_items=result.inspected_items,
+            suppressed_duplicates_count=result.suppressed_duplicates_count,
+            summary=result.summary,
+        )
+
+    def check_cors_misconfiguration(
+        self,
+        payload: CheckCorsInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> CheckCorsOutput:
+        """Evaluates Cross-Origin Resource Sharing headers for unsafe credentialed trust combinations."""
+        result = self.inspector.inspect_cors_configuration(
+            endpoint=payload.endpoint,
+            probe_origin=payload.probe_origin,
+            assessment_id=payload.assessment_id,
+        )
+        return CheckCorsOutput(
+            category=result.category,
+            target_url=result.target_url,
+            endpoint=result.endpoint,
+            status=result.status,
+            findings=[(f.model_dump() if hasattr(f, 'model_dump') else f) for f in result.findings],
+            inspected_items=result.inspected_items,
+            suppressed_duplicates_count=result.suppressed_duplicates_count,
+            summary=result.summary,
+        )
+
+    def check_transport_security(
+        self,
+        payload: CheckTransportSecurityInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> CheckTransportSecurityOutput:
+        """Evaluates HTTPS availability, HTTP-to-HTTPS redirect, HSTS, and mixed content references."""
+        result = self.inspector.inspect_transport_security(
+            target_url=payload.target_url,
+            assessment_id=payload.assessment_id,
+        )
+        return CheckTransportSecurityOutput(
+            category=result.category,
+            target_url=result.target_url,
+            endpoint=result.endpoint,
+            status=result.status,
+            findings=[(f.model_dump() if hasattr(f, 'model_dump') else f) for f in result.findings],
+            inspected_items=result.inspected_items,
+            suppressed_duplicates_count=result.suppressed_duplicates_count,
+            summary=result.summary,
+        )
+
+    def run_security_misconfiguration_scan(
+        self,
+        payload: RunMisconfigurationScanInput,
+        context: Optional[ToolExecutionContext] = None,
+    ) -> RunMisconfigurationScanOutput:
+        """Runs comprehensive Sprint 2 defensive security checks on an endpoint."""
+        data = self.inspector.run_comprehensive_inspection(
+            endpoint=payload.endpoint,
+            assessment_id=payload.assessment_id,
+        )
+        return RunMisconfigurationScanOutput(
+            assessment_id=data["assessment_id"],
+            endpoint=data["endpoint"],
+            total_findings=data["total_findings"],
+            suppressed_duplicates_count=data["suppressed_duplicates_count"],
+            categories=data["categories"],
+            findings=data["findings"],
         )

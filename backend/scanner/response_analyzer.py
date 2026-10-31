@@ -26,6 +26,8 @@ class AccessVerdict(str, Enum):
     CORRECTLY_DENIED = "CORRECTLY_DENIED"
     SUSPICIOUS_ACCESS = "SUSPICIOUS_ACCESS"
     CONFIRMED_UNAUTHORIZED_ACCESS = "CONFIRMED_UNAUTHORIZED_ACCESS"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    NOT_TESTED = "NOT_TESTED"
 
 
 class ResponseInspection(BaseModel):
@@ -191,7 +193,8 @@ class ResponseAnalyzer:
         if isinstance(node, dict):
             for key, val in node.items():
                 key_lower = str(key).lower()
-                if key_lower in cls.SENSITIVE_FIELD_NAMES and val not in (None, "", [], {}):
+                is_sens = key_lower in cls.SENSITIVE_FIELD_NAMES or any(s in key_lower for s in ("secret", "token", "password", "apikey", "credential"))
+                if is_sens and val not in (None, "", [], {}):
                     sensitive_fields.add(str(key))
 
                 if key_lower in cls.OWNER_FIELD_NAMES and val is not None and isinstance(val, (str, int)):

@@ -21,7 +21,18 @@ from backend.tools.schemas import (
     AnalyzeSourceCodeInput,
     AnalyzeSourceCodeOutput,
     CheckHttpMethodsInput,
+    CheckAuthWeaknessesInput,
+    CheckAuthWeaknessesOutput,
+    CheckCorsInput,
+    CheckCorsOutput,
+    CheckHttpMethodsInput,
     CheckHttpMethodsOutput,
+    CheckSecurityHeadersInput,
+    CheckSecurityHeadersOutput,
+    CheckSessionSecurityInput,
+    CheckSessionSecurityOutput,
+    CheckTransportSecurityInput,
+    CheckTransportSecurityOutput,
     CompareEndpointAccessInput,
     CompareEndpointAccessOutput,
     DetectIdorInput,
@@ -37,12 +48,16 @@ from backend.tools.schemas import (
     GetAssessmentSummaryOutput,
     InspectEndpointInput,
     InspectEndpointOutput,
+    RunMisconfigurationScanInput,
+    RunMisconfigurationScanOutput,
     MapEndpointToCodeInput,
     MapEndpointToCodeOutput,
     ProbeAccessControlInput,
     ProbeAccessControlOutput,
     TestAccessControlInput,
     TestAccessControlOutput,
+    TestBflaInput,
+    TestBflaOutput,
     ToolCategory,
     ToolCompletedEvent,
     ToolEventBase,
@@ -455,6 +470,73 @@ class ToolRegistry:
             )
         )
 
+        self.register_tool(
+            ToolDefinition(
+                name="check_authentication_weaknesses",
+                description="Inspects endpoints for unauthenticated access, verbose error leaks, or auth inconsistencies.",
+                category=ToolCategory.WEBSITE_ASSESSMENT,
+                input_model=CheckAuthWeaknessesInput,
+                output_model=CheckAuthWeaknessesOutput,
+                handler=lambda args, ctx: self.website_tools.check_authentication_weaknesses(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="check_session_security",
+                description="Inspects cookie flags (HttpOnly, Secure, SameSite, lifetime) and session token leakage.",
+                category=ToolCategory.WEBSITE_ASSESSMENT,
+                input_model=CheckSessionSecurityInput,
+                output_model=CheckSessionSecurityOutput,
+                handler=lambda args, ctx: self.website_tools.check_session_security(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="check_security_headers",
+                description="Evaluates presence and adequacy of key HTTP security headers (CSP, HSTS, frame protection, etc.).",
+                category=ToolCategory.WEBSITE_ASSESSMENT,
+                input_model=CheckSecurityHeadersInput,
+                output_model=CheckSecurityHeadersOutput,
+                handler=lambda args, ctx: self.website_tools.check_security_headers(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="check_cors_misconfiguration",
+                description="Evaluates Cross-Origin Resource Sharing headers for unsafe credentialed trust combinations.",
+                category=ToolCategory.WEBSITE_ASSESSMENT,
+                input_model=CheckCorsInput,
+                output_model=CheckCorsOutput,
+                handler=lambda args, ctx: self.website_tools.check_cors_misconfiguration(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="check_transport_security",
+                description="Evaluates HTTPS availability, HTTP-to-HTTPS redirect, HSTS, and mixed content references.",
+                category=ToolCategory.WEBSITE_ASSESSMENT,
+                input_model=CheckTransportSecurityInput,
+                output_model=CheckTransportSecurityOutput,
+                handler=lambda args, ctx: self.website_tools.check_transport_security(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="run_security_misconfiguration_scan",
+                description="Runs comprehensive Sprint 2 defensive security checks on an endpoint.",
+                category=ToolCategory.WEBSITE_ASSESSMENT,
+                input_model=RunMisconfigurationScanInput,
+                output_model=RunMisconfigurationScanOutput,
+                handler=lambda args, ctx: self.website_tools.run_security_misconfiguration_scan(args, ctx),
+                requires_scope_check=True,
+            )
+        )
+
         # 2. Authorization Testing Tools
         self.register_tool(
             ToolDefinition(
@@ -498,6 +580,28 @@ class ToolRegistry:
                 input_model=DetectIdorInput,
                 output_model=DetectIdorOutput,
                 handler=lambda args, ctx: self.authorization_tools.detect_idor(args, ctx),
+                requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="test_bfla",
+                description="Tests Broken Function Level Authorization against an administrative route across roles.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=TestBflaInput,
+                output_model=TestBflaOutput,
+                handler=lambda args, ctx: self.authorization_tools.test_bfla(args, ctx),
+                requires_scope_check=True
+            )
+        )
+        self.register_tool(
+            ToolDefinition(
+                name="compare_authorization",
+                description="Canonical alias for compare_endpoint_access: multi-role authorization testing.",
+                category=ToolCategory.AUTHORIZATION_TESTING,
+                input_model=CompareEndpointAccessInput,
+                output_model=CompareEndpointAccessOutput,
+                handler=lambda args, ctx: self.authorization_tools.compare_endpoint_access(args, ctx),
                 requires_scope_check=True
             )
         )
