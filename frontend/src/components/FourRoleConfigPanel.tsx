@@ -6,12 +6,9 @@ import {
   KeyRound,
   CheckCircle2,
   AlertCircle,
-  Save,
   RefreshCw,
-  Sparkles,
   ShieldCheck,
   X,
-  Lock,
 } from "lucide-react";
 import { api } from "@/api/client";
 import type { FourRolesStatusResponse, RoleSessionStatus } from "@/types/assessment";
@@ -23,32 +20,36 @@ interface Props {
 
 const ROLE_DEFAULTS: Record<
   string,
-  { label: string; badge: string; userId: string; resourceType: string; resourceId: string }
+  { label: string; shortTitle: string; badge: string; userId: string; resourceType: string; resourceId: string }
 > = {
   anonymous: {
     label: "Anonymous",
-    badge: "Unauthenticated caller",
+    shortTitle: "ANONYMOUS",
+    badge: "Unauthenticated baseline requests without session credentials.",
     userId: "None",
     resourceType: "",
     resourceId: "",
   },
   user_a: {
     label: "User A (Owner)",
-    badge: "Primary resource owner",
+    shortTitle: "USER A",
+    badge: "Authenticated resource owner establishing baseline legitimate access.",
     userId: "101",
     resourceType: "basket",
     resourceId: "101",
   },
   user_b: {
     label: "User B (Peer)",
-    badge: "Cross-tenant test user",
+    shortTitle: "USER B",
+    badge: "Separate authenticated user testing horizontal cross-tenant access.",
     userId: "102",
     resourceType: "basket",
     resourceId: "102",
   },
   admin: {
     label: "Admin",
-    badge: "Privileged role baseline",
+    shortTitle: "ADMIN",
+    badge: "Authenticated administrator testing vertical privilege escalation.",
     userId: "1",
     resourceType: "user",
     resourceId: "1",
@@ -197,32 +198,37 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
   const roles = data?.roles || {};
 
   return (
-    <div className="text-[var(--text)] space-y-5">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[var(--line-subtle)] pb-4">
-        <div className="flex items-center gap-2.5">
-          <div className="p-2 rounded-lg bg-[var(--panel)] border border-[var(--line)] text-[#86efac]">
+    <div className="text-[var(--text)] space-y-4">
+      {/* Header matching Figma Image 3 */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3">
+        <div className="flex items-start gap-3">
+          <div className="p-2 rounded-lg bg-[var(--panel)] border border-[var(--line)] text-[#3d825e] shrink-0 mt-0.5">
             <Users className="w-4 h-4" />
           </div>
           <div>
-            <h3 className="serif-heading text-base text-[var(--text)]">
-              Four-Role Authorization Testing
-            </h3>
-            <p className="text-xs text-[var(--muted)]">
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="serif-heading text-lg text-[var(--text)]">
+                Four-Role Authorization Testing
+              </h3>
+              <span className="text-[10px] font-mono uppercase tracking-wider px-2 py-0.5 rounded-full bg-[var(--sidebar)] border border-[var(--line)] text-[var(--muted)]">
+                DEMO DATA
+              </span>
+            </div>
+            <p className="text-xs text-[var(--muted)] mt-0.5">
               Configure independent identity sessions (Anonymous, User A, User B, Admin) to verify access boundaries.
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 self-end sm:self-auto">
+        <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
           <button
             type="button"
             onClick={() => void handleQuickConfigureAll()}
             disabled={quickConfiguring || loading}
-            className="px-2.5 py-1 text-xs font-medium rounded-md bg-[#2d2d2a] hover:bg-[#373733] border border-[#41413d] hover:border-[#5fa37f] text-[#86efac] flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
+            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--panel)] hover:bg-[var(--surface-hover)] border border-[var(--line)] hover:border-[var(--accent)] text-[var(--text)] flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap"
             title="Automatically populate test credentials and owned resources for all 4 personas"
           >
-            <Sparkles className="w-3 h-3 text-[#86efac]" />
+            <RefreshCw className={`w-3.5 h-3.5 text-[#3d825e] ${quickConfiguring ? "animate-spin" : ""}`} />
             <span>{quickConfiguring ? "Configuring..." : "Quick-Configure All 4 Roles"}</span>
           </button>
 
@@ -240,80 +246,80 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
             <button
               type="button"
               onClick={onClose}
-              className="px-3 py-1.5 text-xs text-[var(--muted)] hover:text-[var(--text)] bg-[var(--panel)] hover:bg-[var(--surface-hover)] border border-[var(--line)] rounded-lg flex items-center gap-1 transition cursor-pointer"
+              className="px-3 py-1.5 text-xs font-medium text-[var(--text)] bg-[var(--panel)] hover:bg-[var(--surface-hover)] border border-[var(--line)] rounded-lg flex items-center gap-1.5 transition cursor-pointer"
             >
-              <X className="w-3.5 h-3.5" />
+              <X className="w-3.5 h-3.5 text-[var(--muted)]" />
               <span>Close</span>
             </button>
           )}
         </div>
       </div>
 
-      {/* Global Readiness Banner */}
-      {data && (
-        <div className="p-3.5 bg-[var(--sidebar)] rounded-xl border border-[var(--line)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <span
-              className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                data.four_role_ready
-                  ? "bg-[#5fa37f] ring-4 ring-[#5fa37f]/20"
-                  : data.multi_role_ready
-                  ? "bg-[#c5aa54] ring-4 ring-[#c5aa54]/20"
-                  : "bg-[#d2675f] ring-4 ring-[#d2675f]/20"
-              }`}
-            />
-            <div>
-              <p className="text-xs font-semibold text-[var(--text)]">
-                {data.four_role_ready
-                  ? "All Four Testing Personas Ready (Anonymous, User A, User B, Admin)"
-                  : data.multi_role_ready
-                  ? "Horizontal BOLA Testing Ready (User A & User B Configured)"
-                  : "Session Credentials Needed for Multi-Role Testing"}
-              </p>
-              <p className="text-[11px] text-[var(--muted)] mt-0.5">{data.summary}</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0">
-            <span
-              className={`text-[11px] px-2.5 py-0.5 rounded-full font-medium border flex items-center gap-1 ${
-                data.multi_role_ready
-                  ? "bg-[#132c1e] text-[#86efac] border-[#2b6443]"
-                  : "bg-[var(--panel)] text-[var(--faint)] border-[var(--line)]"
-              }`}
-            >
-              <ShieldCheck className="w-3 h-3 text-[#86efac]" />
-              BOLA Ready
-            </span>
-            <span
-              className={`text-[11px] px-2.5 py-0.5 rounded-full font-medium border flex items-center gap-1 ${
-                data.four_role_ready
-                  ? "bg-[#132c1e] text-[#86efac] border-[#2b6443]"
-                  : "bg-[var(--panel)] text-[var(--faint)] border-[var(--line)]"
-              }`}
-            >
-              <ShieldCheck className="w-3 h-3 text-[#86efac]" />
-              BFLA Ready
-            </span>
+      {/* Global Readiness Banner matching Figma Image 3 */}
+      <div className="p-3.5 bg-[var(--panel)] rounded-xl border border-[var(--line)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span
+            className={`w-2 h-2 rounded-full shrink-0 ${
+              data?.four_role_ready
+                ? "bg-[#3d825e]"
+                : data?.multi_role_ready
+                ? "bg-[#c2722c]"
+                : "bg-[#c2722c]"
+            }`}
+          />
+          <div>
+            <p className="text-xs font-semibold text-[var(--text)]">
+              {data?.four_role_ready
+                ? "All Four Testing Personas Ready (Anonymous, User A, User B, Admin)"
+                : data?.multi_role_ready
+                ? "Horizontal BOLA Testing Ready (User A & User B Configured)"
+                : "Session Credentials Needed for Multi-Role Testing"}
+            </p>
+            <p className="text-[11px] text-[var(--muted)] mt-0.5">
+              {data?.summary || "User A & User B credentials not configured. Admin role not configured."}
+            </p>
           </div>
         </div>
-      )}
+
+        <div className="flex items-center gap-2 shrink-0">
+          <span
+            className={`text-[11px] px-2.5 py-1 rounded-full font-medium border flex items-center gap-1 ${
+              data?.multi_role_ready
+                ? "bg-[#ebf5ee] text-[#2b744a] border-[#b8e2c7]"
+                : "bg-[var(--sidebar)] text-[var(--muted)] border-[var(--line)]"
+            }`}
+          >
+            <ShieldCheck className="w-3 h-3 text-[#3d825e]" />
+            BOLA Ready
+          </span>
+          <span
+            className={`text-[11px] px-2.5 py-1 rounded-full font-medium border flex items-center gap-1 ${
+              data?.four_role_ready
+                ? "bg-[#ebf5ee] text-[#2b744a] border-[#b8e2c7]"
+                : "bg-[var(--sidebar)] text-[var(--muted)] border-[var(--line)]"
+            }`}
+          >
+            <ShieldCheck className="w-3 h-3 text-[#3d825e]" />
+            BFLA Ready
+          </span>
+        </div>
+      </div>
 
       {error && (
-        <div className="p-3 bg-[#d2675f]/12 border border-[#d2675f]/35 rounded-lg text-[#d2675f] text-xs flex items-center gap-2">
+        <div className="p-3 bg-[#d2675f]/12 border border-[#d2675f]/35 rounded-lg text-[#c0433a] text-xs flex items-center gap-2">
           <AlertCircle className="w-4 h-4 shrink-0" />
           <span>{error}</span>
         </div>
       )}
 
       {saveSuccess && (
-        <div className="p-3 bg-[#5fa37f]/12 border border-[#5fa37f]/35 rounded-lg text-[#5fa37f] text-xs flex items-center gap-2">
+        <div className="p-3 bg-[#3d825e]/12 border border-[#3d825e]/35 rounded-lg text-[#2b744a] text-xs flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
           <span>{saveSuccess}</span>
         </div>
       )}
 
-      {/* Role Cards Grid */}
+      {/* 4 Persona Cards Grid matching Figma Image 3 */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {(["anonymous", "user_a", "user_b", "admin"] as const).map((r) => {
           const roleInfo: RoleSessionStatus | undefined = roles[r];
@@ -331,116 +337,116 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
             <div
               key={r}
               onClick={() => handleSelectRole(r)}
-              className={`p-3.5 rounded-xl border transition text-left flex flex-col justify-between ${
+              className={`p-4 rounded-xl border transition text-left flex flex-col justify-between bg-[var(--panel)] ${
                 isAnon
-                  ? "bg-[var(--sidebar)] border-[var(--line-subtle)] opacity-90 cursor-default"
+                  ? "border-[var(--line)] cursor-default"
                   : isSelected
-                  ? "bg-[var(--panel)] border-[#5fa37f] ring-1 ring-[#5fa37f]/35 cursor-pointer"
-                  : "bg-[var(--sidebar)] border-[var(--line)] hover:border-[var(--muted)] hover:bg-[var(--panel)] cursor-pointer"
+                  ? "border-[#2f6f4e] ring-1 ring-[#2f6f4e]/35 cursor-pointer shadow-xs"
+                  : "border-[var(--line)] hover:border-[var(--muted)] cursor-pointer"
               }`}
             >
               <div>
-                <div className="flex items-center justify-between gap-1 mb-2">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-[var(--text)]">
-                    {r.replace("_", " ")}
+                <div className="flex items-center justify-between gap-1 mb-2.5">
+                  <span className="text-xs font-bold uppercase tracking-wider text-[var(--text)]">
+                    {meta.shortTitle}
                   </span>
                   <span
                     className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium border ${
                       isAnon
-                        ? "bg-[#262624] text-[#d0cec8] border-[#41413d]"
+                        ? "bg-[var(--sidebar)] text-[var(--muted)] border-[var(--line)]"
                         : isAuth
-                        ? "bg-[#132c1e] text-[#86efac] border-[#2b6443]"
-                        : "bg-[#2f2410] text-[#fde047] border-[#5d491f]"
+                        ? "bg-[#ebf5ee] text-[#2b744a] border-[#b8e2c7]"
+                        : "bg-[var(--sidebar)] text-[var(--muted)] border-[var(--line)]"
                     }`}
                   >
-                    {isAnon ? "BASELINE" : isAuth ? "AUTHENTICATED" : "NOT SET"}
+                    {isAnon ? "BASELINE" : isAuth ? "READY" : "NOT SET"}
                   </span>
                 </div>
 
-                <p className="text-[11px] text-[var(--muted)] line-clamp-2 mb-3 leading-relaxed">
+                <p className="text-[11px] text-[var(--muted)] mb-4 leading-relaxed">
                   {roleInfo?.description || meta?.badge}
                 </p>
               </div>
 
-              <div className="space-y-1.5 text-[11px] font-mono border-t border-[var(--line-subtle)] pt-2.5 text-[var(--muted)]">
+              <div className="space-y-1.5 text-[11px] font-mono border-t border-[var(--line-subtle)] pt-3 text-[var(--muted)]">
                 <div className="flex justify-between">
                   <span>User ID:</span>
-                  <span className="text-[var(--text)] font-semibold">
+                  <span className="text-[var(--text)] font-medium">
                     {roleInfo?.user_id || (isAnon ? "None" : "—")}
                   </span>
                 </div>
                 <div className="flex justify-between items-center gap-2">
                   <span>Token:</span>
-                  <span className="text-[var(--soft)] truncate max-w-[115px]">
+                  <span className="text-[var(--text)] truncate max-w-[115px]">
                     {roleInfo?.token_preview || (isAnon ? "None" : "Not configured")}
                   </span>
                 </div>
-                {!isAnon && (
-                  <div className="flex justify-between items-center gap-2">
-                    <span>Owned Items:</span>
-                    <span
-                      className="text-[var(--soft)] truncate max-w-[115px]"
-                      title={ownedSummary || "0"}
-                    >
-                      {ownedSummary
-                        ? `${roleInfo?.owned_resources_count} (${ownedSummary})`
-                        : String(roleInfo?.owned_resources_count || 0)}
-                    </span>
-                  </div>
-                )}
+                <div className="flex justify-between items-center gap-2">
+                  <span>Owned Items:</span>
+                  <span
+                    className="text-[var(--text)] truncate max-w-[115px]"
+                    title={ownedSummary || "0"}
+                  >
+                    {isAnon
+                      ? "0"
+                      : ownedSummary
+                      ? `${roleInfo?.owned_resources_count} (${ownedSummary})`
+                      : String(roleInfo?.owned_resources_count || 0)}
+                  </span>
+                </div>
               </div>
             </div>
           );
         })}
       </div>
 
-      {/* Role Configuration Form */}
+      {/* Role Configuration Form matching Figma Image 3 */}
       {selectedRole !== "anonymous" && (
         <form
           onSubmit={handleSave}
-          className="p-4 bg-[var(--sidebar)] rounded-xl border border-[var(--line)] space-y-4"
+          className="p-4 sm:p-5 bg-[var(--panel)] rounded-xl border border-[var(--line)] space-y-4"
         >
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[var(--line-subtle)] pb-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-1">
             <h4 className="text-xs font-semibold text-[var(--text)] flex items-center gap-2">
-              <KeyRound className="w-3.5 h-3.5 text-[#5fa37f]" />
+              <KeyRound className="w-3.5 h-3.5 text-[#3d825e]" />
               <span>
                 Configure Credentials for{" "}
-                <span className="text-[#5fa37f]">
+                <span>
                   {ROLE_DEFAULTS[selectedRole]?.label || selectedRole.toUpperCase()}
                 </span>
               </span>
             </h4>
-            <span className="text-[11px] text-[var(--faint)] flex items-center gap-1">
-              <Lock className="w-3 h-3 text-[#5fa37f]" />
+            <span className="text-[11px] text-[var(--muted)] flex items-center gap-1">
+              <ShieldCheck className="w-3.5 h-3.5 text-[var(--muted)]" />
               Stored in memory only; raw tokens are redacted from all logs &amp; evidence.
             </span>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="block text-[11px] font-medium text-[var(--soft)]">
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-[11px] font-medium text-[var(--muted)]">
                   Bearer Token / JWT or Session Token
                 </label>
                 <button
                   type="button"
                   onClick={handleGenerateToken}
-                  className="text-[10px] text-[#5fa37f] hover:underline font-medium cursor-pointer"
+                  className="text-[11px] text-[#2f6f4e] hover:underline font-medium cursor-pointer"
                 >
                   Generate test token
                 </button>
               </div>
               <input
-                type="password"
-                placeholder="Leave blank to auto-generate test token, or paste JWT..."
+                type="text"
+                placeholder="Leave blank to auto-generate test token, or paste JWT"
                 value={tokenInput}
                 onChange={(e) => setTokenInput(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-[var(--panel)] border border-[var(--line)] rounded-lg text-[var(--text)] placeholder-[var(--faint)] focus:outline-none focus:border-[#5fa37f] font-mono"
+                className="w-full px-3 py-2 text-xs bg-[var(--sidebar)] border border-[var(--line)] rounded-lg text-[var(--text)] placeholder-[var(--muted)] focus:outline-none focus:border-[#2f6f4e] font-mono"
               />
             </div>
 
             <div>
-              <label className="block text-[11px] font-medium text-[var(--soft)] mb-1">
+              <label className="block text-[11px] font-medium text-[var(--muted)] mb-1.5">
                 User ID / Account Identifier (e.g. 101)
               </label>
               <input
@@ -448,27 +454,27 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
                 placeholder={ROLE_DEFAULTS[selectedRole]?.userId || "101"}
                 value={userIdInput}
                 onChange={(e) => setUserIdInput(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-[var(--panel)] border border-[var(--line)] rounded-lg text-[var(--text)] placeholder-[var(--faint)] focus:outline-none focus:border-[#5fa37f] font-mono"
+                className="w-full px-3 py-2 text-xs bg-[var(--sidebar)] border border-[var(--line)] rounded-lg text-[var(--text)] placeholder-[var(--muted)] focus:outline-none focus:border-[#2f6f4e] font-mono"
               />
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-[11px] font-medium text-[var(--soft)] mb-1">
+              <label className="block text-[11px] font-medium text-[var(--muted)] mb-1.5">
                 Owned Resource Type (for BOLA ownership baseline)
               </label>
               <input
                 type="text"
-                placeholder="basket, user, card, address, order"
+                placeholder="basket"
                 value={resourceType}
                 onChange={(e) => setResourceType(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-[var(--panel)] border border-[var(--line)] rounded-lg text-[var(--text)] placeholder-[var(--faint)] focus:outline-none focus:border-[#5fa37f] font-mono"
+                className="w-full px-3 py-2 text-xs bg-[var(--sidebar)] border border-[var(--line)] rounded-lg text-[var(--text)] placeholder-[var(--muted)] focus:outline-none focus:border-[#2f6f4e] font-mono"
               />
             </div>
 
             <div>
-              <label className="block text-[11px] font-medium text-[var(--soft)] mb-1">
+              <label className="block text-[11px] font-medium text-[var(--muted)] mb-1.5">
                 Owned Resource ID
               </label>
               <input
@@ -476,22 +482,22 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
                 placeholder={ROLE_DEFAULTS[selectedRole]?.resourceId || "101"}
                 value={resourceId}
                 onChange={(e) => setResourceId(e.target.value)}
-                className="w-full px-3 py-2 text-xs bg-[var(--panel)] border border-[var(--line)] rounded-lg text-[var(--text)] placeholder-[var(--faint)] focus:outline-none focus:border-[#5fa37f] font-mono"
+                className="w-full px-3 py-2 text-xs bg-[var(--sidebar)] border border-[var(--line)] rounded-lg text-[var(--text)] placeholder-[var(--muted)] focus:outline-none focus:border-[#2f6f4e] font-mono"
               />
             </div>
           </div>
 
-          <div className="flex items-center justify-between gap-3 pt-1">
-            <span className="text-[11px] text-[var(--faint)]">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
+            <span className="text-[11px] text-[var(--muted)]">
               Tip: Click another persona card above to configure User B or Admin, or use{" "}
-              <strong className="text-[var(--soft)]">Quick-Configure All 4 Roles</strong>.
+              <strong className="text-[var(--text)]">Quick-Configure All 4 Roles</strong>.
             </span>
             <button
               type="submit"
               disabled={saving}
-              className="px-3 py-1.5 bg-[#5fa37f] hover:bg-[#529471] disabled:opacity-50 text-[#102218] text-xs font-semibold rounded-md flex items-center gap-1.5 transition cursor-pointer shrink-0"
+              style={{ backgroundColor: "#2f6f4e", color: "#ffffff" }}
+              className="px-4 py-2 hover:brightness-105 disabled:opacity-50 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition cursor-pointer shrink-0 self-end sm:self-auto"
             >
-              <Save className="w-3.5 h-3.5" />
               <span>{saving ? "Saving..." : "Save Role"}</span>
             </button>
           </div>

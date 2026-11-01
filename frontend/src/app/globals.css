@@ -1632,3 +1632,36 @@ nextjs-portal {
   background: #3d825e;
   color: #ffffff !important;
 }
+
+
+/* Explicit light-mode contrast fixes for Secure Code Fix and primary buttons */
+.workspace-light .secure-code-container {
+  background: #f7f6f2 !important;
+  border-color: #e2e0d8 !important;
+}
+
+.workspace-light .secure-code-header {
+  background: #efede6 !important;
+  border-bottom-color: #e2e0d8 !important;
+  color: #575651 !important;
+}
+
+.workspace-light .secure-code-pre {
+  color: #14532d !important;
+  font-weight: 500;
+}
+
+.workspace-light .download-report-btn,
+.download-report-btn {
+  background: #2f6f4e !important;
+  border-color: #2f6f4e !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+}
+
+.workspace-light .filter-pill.active,
+.filter-pill.active {
+  background: #2f6f4e !important;
+  border-color: #2f6f4e !important;
+  color: #ffffff !important;
+}

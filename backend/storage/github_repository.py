@@ -113,6 +113,16 @@ class GitHubRepository:
     def create_scan(self, record: Dict[str, Any]) -> None:
         with self.database.session_scope() as conn:
             conn.execute(
+                """INSERT OR IGNORE INTO github_connections
+                   (github_user_id, login, avatar_url, encrypted_credentials, expires_at, updated_at)
+                   VALUES (?, ?, '', '', NULL, ?)""",
+                (
+                    record["github_user_id"],
+                    f"guest_{record.get('owner', 'user')}",
+                    record.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            conn.execute(
                 """INSERT INTO github_scans
                    (id, github_user_id, installation_id, repository_id, owner, repository, branch, commit_sha,
                     status, created_at, completed_at, error_code, languages_json, findings_json)

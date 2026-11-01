@@ -2839,7 +2839,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => void copySecureCode(fid, secureCodeFix)}
-                    className="inline-flex items-center gap-1 text-[#d0cec8] hover:text-white"
+                    className="inline-flex items-center gap-1 text-[var(--muted)] hover:text-[var(--text)]"
                   >
                     {copiedCodeId === fid ? <Check size={12} /> : <Copy size={12} />}
                     <span>{copiedCodeId === fid ? "Copied" : "Copy code"}</span>
@@ -3277,6 +3277,11 @@ export default function Home() {
                       className={`filter-pill ${
                         severityFilter === pill.key ? "active" : ""
                       }`}
+                      style={
+                        severityFilter === pill.key
+                          ? { backgroundColor: "#2f6f4e", color: "#ffffff", borderColor: "#2f6f4e" }
+                          : undefined
+                      }
                     >
                       {pill.label}
                     </button>
@@ -3434,7 +3439,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={downloadReportPdf}
-                    className="download-report-btn"
+                    className="download-report-btn" style={{ backgroundColor: "#2f6f4e", color: "#ffffff", borderColor: "#2f6f4e" }}
                   >
                     Download report
                   </button>
@@ -3527,7 +3532,7 @@ export default function Home() {
                             onClick={() =>
                               void copySecureCode(`global-${mIdx}`, msg.codeFix!)
                             }
-                            className="inline-flex items-center gap-1 text-[#d0cec8] hover:text-white"
+                            className="inline-flex items-center gap-1 text-[var(--muted)] hover:text-[var(--text)]"
                           >
                             {copiedCodeId === `global-${mIdx}` ? (
                               <Check size={12} />
@@ -3665,7 +3670,7 @@ export default function Home() {
       {/* =================================================================== */}
       {showGitHubModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs">
-          <div className="relative w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-xl bg-[#262624] border border-[#41413d] shadow-2xl p-6 text-left">
+          <div className="relative w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-xl bg-[var(--canvas)] border border-[var(--line)] text-[var(--text)] shadow-2xl p-6 text-left">
             <div className="flex items-center justify-between pb-3 border-b border-[#333330]">
               <div className="flex items-center gap-2.5">
                 <GitBranch className="w-4 h-4 text-[#5fa37f]" />
@@ -3748,7 +3753,7 @@ export default function Home() {
       {/* =================================================================== */}
       {showAuthModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
-          <div className="relative w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-xl bg-[#262624] border border-[#41413d] shadow-2xl p-6 text-left">
+          <div className="relative w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-xl bg-[var(--canvas)] border border-[var(--line)] text-[var(--text)] shadow-2xl p-6 text-left">
             <div className="flex items-center justify-between pb-4 border-b border-[#333330]">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-lg bg-[#2d2d2a] border border-[#41413d] text-[#5fa37f]">
