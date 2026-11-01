@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     # Scope Allowlist Rules
     target_base_url: str = Field(default="http://localhost:3000", alias="TARGET_BASE_URL")
     allowed_hosts: Union[List[str], str] = Field(default_factory=lambda: ["localhost", "127.0.0.1"], alias="ALLOWED_HOSTS")
-    allowed_ports: Union[List[int], int, str] = Field(default_factory=lambda: [3000, 80, 443, 8000, 8080, 8888, 5000, 5173, 4200, 8443], alias="ALLOWED_PORTS")
+    allowed_ports: Union[List[int], int, str] = Field(default_factory=lambda: [3000], alias="ALLOWED_PORTS")
     allowed_schemes: Union[List[str], str] = Field(default_factory=lambda: ["http"], alias="ALLOWED_SCHEMES")
     allowed_methods: Union[List[str], str] = Field(default_factory=lambda: ["GET"], alias="ALLOWED_METHODS")
 
