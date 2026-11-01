@@ -69,6 +69,10 @@ class DiscoveredEndpoint(BaseModel):
         default=False,
         description="True if testing this endpoint requires explicit human operator approval"
     )
+    parent_resource_type: Optional[str] = Field(default=None, description="Parent resource noun if nested/related")
+    related_resource_types: List[str] = Field(default_factory=list, description="Related resource nouns")
+    resource_sensitivity: Optional[str] = Field(default=None, description="Sensitivity classification (e.g. HIGH, CRITICAL)")
+    dependencies: List[str] = Field(default_factory=list, description="Explicit prerequisite endpoint paths")
     description: str = Field(default="", description="Human-readable route description")
 
 
@@ -89,6 +93,9 @@ class EndpointDiscovery:
             "method": "GET",
             "category": EndpointCategory.USER_OBJECT,
             "resource_type": "basket",
+            "parent_resource_type": "user",
+            "input_parameters": ["id"],
+            "resource_sensitivity": "HIGH",
             "requires_auth": True,
             "requires_owner_match": True,
             "expected_allowed_roles": [Role.USER_A, Role.USER_B, Role.ADMIN],
@@ -99,6 +106,10 @@ class EndpointDiscovery:
             "method": "GET",
             "category": EndpointCategory.USER_OBJECT,
             "resource_type": "user",
+            "input_parameters": ["id"],
+            "output_parameters": ["id"],
+            "resource_identifier_name": "id",
+            "resource_sensitivity": "HIGH",
             "requires_auth": True,
             "requires_owner_match": True,
             "expected_allowed_roles": [Role.USER_A, Role.USER_B, Role.ADMIN],
@@ -109,6 +120,9 @@ class EndpointDiscovery:
             "method": "GET",
             "category": EndpointCategory.USER_OBJECT,
             "resource_type": "address",
+            "parent_resource_type": "user",
+            "input_parameters": ["id"],
+            "resource_sensitivity": "MEDIUM",
             "requires_auth": True,
             "requires_owner_match": True,
             "expected_allowed_roles": [Role.USER_A, Role.USER_B],
@@ -119,6 +133,9 @@ class EndpointDiscovery:
             "method": "GET",
             "category": EndpointCategory.USER_OBJECT,
             "resource_type": "card",
+            "parent_resource_type": "user",
+            "input_parameters": ["id"],
+            "resource_sensitivity": "CRITICAL",
             "requires_auth": True,
             "requires_owner_match": True,
             "expected_allowed_roles": [Role.USER_A, Role.USER_B],
@@ -129,6 +146,9 @@ class EndpointDiscovery:
             "method": "GET",
             "category": EndpointCategory.ADMIN_FUNCTION,
             "resource_type": "user",
+            "output_parameters": ["id"],
+            "resource_identifier_name": "id",
+            "resource_sensitivity": "CRITICAL",
             "requires_auth": True,
             "requires_owner_match": False,
             "expected_allowed_roles": [Role.ADMIN],
@@ -139,6 +159,8 @@ class EndpointDiscovery:
             "method": "GET",
             "category": EndpointCategory.ADMIN_FUNCTION,
             "resource_type": "configuration",
+            "dependencies": ["/rest/user/whoami"],
+            "resource_sensitivity": "HIGH",
             "requires_auth": False,
             "requires_owner_match": False,
             "expected_allowed_roles": [Role.ADMIN],
@@ -158,7 +180,10 @@ class EndpointDiscovery:
             "path": "/rest/user/whoami",
             "method": "GET",
             "category": EndpointCategory.USER_COLLECTION,
-            "resource_type": "user_session",
+            "resource_type": "user",
+            "output_parameters": ["id"],
+            "resource_identifier_name": "id",
+            "resource_sensitivity": "HIGH",
             "requires_auth": False,
             "requires_owner_match": False,
             "expected_allowed_roles": [Role.ANONYMOUS, Role.USER_A, Role.USER_B, Role.ADMIN],
@@ -352,6 +377,21 @@ class EndpointDiscovery:
                 expected_allowed_roles=item.get("expected_allowed_roles"),
                 description=item.get("description", ""),
             )
+            updates: Dict[str, Any] = {}
+            for extra_key in (
+                "resource_type",
+                "input_parameters",
+                "output_parameters",
+                "resource_identifier_name",
+                "parent_resource_type",
+                "related_resource_types",
+                "resource_sensitivity",
+                "dependencies",
+            ):
+                if extra_key in item and item[extra_key] is not None:
+                    updates[extra_key] = item[extra_key]
+            if updates:
+                ep = ep.model_copy(update=updates)
             discovered.append(ep)
         return discovered
 

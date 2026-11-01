@@ -439,7 +439,8 @@ export interface AttackChainCandidateData {
   steps: AttackChainStepData[];
   risk_score: number;
   safety_classification: string;
-  hypothesis: string;
+  hypothesis?: string;
+  rationale?: string;
   estimated_complexity?: string;
 }
 
@@ -458,6 +459,7 @@ export interface AttackChainStepResult {
   expected_behavior: string;
   actual_behavior: string;
   evidence_sha256?: string | null;
+  error_message?: string | null;
 }
 
 export interface AttackChainExecutionData {

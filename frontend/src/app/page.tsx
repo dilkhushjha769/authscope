@@ -4048,7 +4048,7 @@ export default function Home() {
       {/* =================================================================== */}
       {showRolesModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
-          <div className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-900 border border-zinc-800 shadow-2xl p-6 text-left">
+          <div className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-xl bg-[var(--canvas)] border border-[var(--line)] shadow-2xl p-4 sm:p-5 text-left">
             <FourRoleConfigPanel
               onClose={() => setShowRolesModal(false)}
             />
@@ -4061,14 +4061,24 @@ export default function Home() {
       {/* =================================================================== */}
       {showAttackChainModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
-          <div className="relative w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-900 border border-zinc-800 shadow-2xl p-6 text-left">
-            <div className="flex justify-end mb-2">
+          <div className="relative w-full max-w-5xl max-h-[92vh] overflow-y-auto rounded-xl bg-[var(--canvas)] border border-[var(--line)] shadow-2xl p-4 sm:p-5 text-left">
+            <div className="flex items-center justify-between mb-3 pb-2.5 border-b border-[var(--line-soft)]">
+              <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
+                <GitFork className="w-3.5 h-3.5 text-[#5fa37f]" />
+                <span>
+                  Target:{" "}
+                  <strong className="text-[var(--text)] font-mono">
+                    {summaryData?.target_url || targetUrl || "http://localhost:3000"}
+                  </strong>
+                </span>
+              </div>
               <button
                 type="button"
                 onClick={() => setShowAttackChainModal(false)}
-                className="p-1 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-800"
+                className="px-3 py-1 rounded-md text-xs font-medium bg-[var(--sidebar)] border border-[var(--line)] text-[var(--text-soft)] hover:text-[var(--text)] hover:border-[var(--muted)] transition-colors flex items-center gap-1.5"
               >
-                <X className="w-5 h-5" />
+                <X className="w-3.5 h-3.5" />
+                <span>Close</span>
               </button>
             </div>
             <AttackChainPanel
