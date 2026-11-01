@@ -4298,7 +4298,7 @@ def get_assessment_role_matrix(assessment_id: str) -> Dict[str, Any]:
     }
 
 
-@app.get("/", include_in_schema=False)
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def root() -> Dict[str, Any]:
     """Root landing endpoint directing to documentation and health status."""
     return {
