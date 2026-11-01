@@ -212,14 +212,17 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed, 
   };
 
   const getHypothesisText = (cand: AttackChainCandidateData): string => {
+    const s = (cand.scenario || "").toUpperCase();
+    if (s.includes("BOLA") || s.includes("IDOR")) {
+      return "Checks if private data (e.g. user profile or shopping cart) belonging to User A can be viewed or changed by User B without permission.";
+    }
+    if (s.includes("PRIVILEGE") || s.includes("MIXED")) {
+      return "Checks if a normal user or visitor can access administrator endpoints discovered during scanning.";
+    }
     if (cand.hypothesis && cand.hypothesis.trim()) {
       return cand.hypothesis;
     }
-    const rawRationale = (cand as unknown as { rationale?: string[] }).rationale;
-    if (Array.isArray(rawRationale) && rawRationale.length > 0) {
-      return rawRationale.join(" ");
-    }
-    return "Sequential multi-endpoint chain testing whether resource identifiers discovered by one persona can be replayed across unauthorized roles.";
+    return "Multi-step test verifying whether unauthorized users can access private resources discovered across endpoints.";
   };
 
   return (
@@ -355,7 +358,7 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed, 
                     </div>
 
                     <h4 className="text-xs font-semibold text-[var(--text)] line-clamp-1">
-                      {c.chain_name || `${c.scenario} Chain (${c.candidate_id.slice(0, 8)})`}
+                      {c.chain_name || `${c.scenario.replace(/_/g, " ")} Attack Path`}
                     </h4>
 
                     {/* Step path preview */}

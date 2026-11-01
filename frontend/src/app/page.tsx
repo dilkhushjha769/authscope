@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import {
   Check,
   ChevronDown,
+  Code2,
   ChevronRight,
   ChevronUp,
   Copy,
@@ -633,6 +634,7 @@ export default function Home() {
   const [showGitHubModal, setShowGitHubModal] = useState<boolean>(false);
   const [showRolesModal, setShowRolesModal] = useState<boolean>(false);
   const [showAttackChainModal, setShowAttackChainModal] = useState<boolean>(false);
+  const [activeReportTab, setActiveReportTab] = useState<"bugs" | "attack_chains" | "roles">("bugs");
 
   // Assessment lifecycle states
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
@@ -2736,358 +2738,230 @@ export default function Home() {
 
   const renderProblemCard = (finding: FindingItem, idx: number) => {
     const fid = finding.id || `finding-${idx}`;
-                    const sevKey = String(finding.severity || "LOW").toLowerCase();
-                    const sevClass =
-                      sevKey === "critical" ||
-                      sevKey === "high" ||
-                      sevKey === "medium"
-                        ? sevKey
-                        : "low";
-                    const sevTitle =
-                      sevClass.charAt(0).toUpperCase() + sevClass.slice(1);
-                    const plainTitle =
-                      finding.beginner_explanation?.simple_title ||
-                      finding.title ||
-                      "Security problem detected";
-                    const categoryLabel =
-                      finding.beginner_explanation?.technical_name ||
-                      finding.vulnerability_name ||
-                      finding.vulnerability_category ||
-                      "Authorization issue";
-                    const normalizedCategory = normalizeFindingCategory(finding);
-                    const plainProblem =
-                      finding.beginner_explanation?.what_is_the_problem ||
-                      finding.description ||
-                      finding.actual_behavior;
-                    const routePath =
-                      finding.target_endpoint ||
-                      finding.endpoint ||
-                      finding.affected_endpoint ||
-                      "/";
-                    const fullUrlFound = resolveFullUrlFound(finding);
-                    const httpMethod =
-                      finding.http_method ||
-                      finding.evidence?.request_method ||
-                      "GET";
+    const sevKey = String(finding.severity || "LOW").toLowerCase();
+    const sevClass =
+      sevKey === "critical" ||
+      sevKey === "high" ||
+      sevKey === "medium"
+        ? sevKey
+        : "low";
+    const sevTitle =
+      sevClass.charAt(0).toUpperCase() + sevClass.slice(1);
+    const plainTitle =
+      finding.beginner_explanation?.simple_title ||
+      finding.title ||
+      "Security problem detected";
+    const categoryLabel =
+      finding.beginner_explanation?.technical_name ||
+      finding.vulnerability_name ||
+      finding.vulnerability_category ||
+      "Authorization issue";
+    const normalizedCategory = normalizeFindingCategory(finding);
+    const plainProblem =
+      finding.beginner_explanation?.what_is_the_problem ||
+      finding.description ||
+      finding.actual_behavior;
+    const routePath =
+      finding.target_endpoint ||
+      finding.endpoint ||
+      finding.affected_endpoint ||
+      "/";
+    const fullUrlFound = resolveFullUrlFound(finding);
+    const httpMethod =
+      finding.http_method ||
+      finding.evidence?.request_method ||
+      "GET";
 
-                    const enriched = bugAiEnrichment[fid];
-                    const whatBugCanDo =
-                      enriched?.what_bug_can_do ||
-                      finding.beginner_explanation?.what_attacker_can_do ||
-                      finding.impact_explanation ||
-                      finding.description;
-                    const fixBullets = extractFixBullets(finding, enriched);
-                    const secureCodeFix =
-                      enriched?.secure_code_fix ||
-                      finding.beginner_explanation?.secure_code_example ||
-                      finding.proposed_code_fix ||
-                      "";
-                    const chatMessages = bugChatHistory[fid] || [];
+    const enriched = bugAiEnrichment[fid];
+    const whatBugCanDo =
+      enriched?.what_bug_can_do ||
+      finding.beginner_explanation?.what_attacker_can_do ||
+      finding.impact_explanation ||
+      finding.description;
+    const fixBullets = extractFixBullets(finding, enriched);
+    const secureCodeFix =
+      enriched?.secure_code_fix ||
+      finding.beginner_explanation?.secure_code_example ||
+      finding.proposed_code_fix ||
+      "";
 
-                    return (
-                      <section
-                        key={fid}
-                        id={`problem-${fid}`}
-                        className="problem-section"
-                      >
-                        <div className="problem-header">
-                          <div className="problem-title-group">
-                            <span className="problem-index-badge">{idx + 1}</span>
-                            <h2 className="problem-title">{plainTitle}</h2>
-                          </div>
-                          <div className="problem-severity-score flex items-center gap-2">
-                            <span className={`severity-dot ${sevClass}`} />
-                            <span className={`severity-name ${sevClass}`}>
-                              {sevTitle}
-                            </span>
-                            <span className="text-[#aaa8a1] font-mono">
-                              {cvssForSeverity(sevClass, idx)}
-                            </span>
-                            <span className="inline-flex items-center gap-1 ml-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[#20201e] border border-[#41413d] text-[#aaa8a1]">
-                              <Tag size={10} className="text-[#5fa37f]" />
-                              {normalizedCategory}
-                            </span>
-                          </div>
-                        </div>
+    return (
+      <section
+        key={fid}
+        id={`problem-${fid}`}
+        className="problem-section"
+      >
+        <div className="problem-header">
+          <div className="problem-title-group">
+            <span className="problem-index-badge">{idx + 1}</span>
+            <h2 className="problem-title">{plainTitle}</h2>
+          </div>
+          <div className="problem-severity-score flex items-center gap-2">
+            <span className={`severity-dot ${sevClass}`} />
+            <span className={`severity-name ${sevClass}`}>
+              {sevTitle}
+            </span>
+            <span className="text-[#aaa8a1] font-mono">
+              {cvssForSeverity(sevClass, idx)}
+            </span>
+            <span className="inline-flex items-center gap-1 ml-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[#20201e] border border-[#41413d] text-[#aaa8a1]">
+              <Tag size={10} className="text-[#5fa37f]" />
+              {normalizedCategory}
+            </span>
+          </div>
+        </div>
 
-                        <div className="problem-body">
-                          <p className="problem-category-line">
-                            <strong>{categoryLabel}:</strong> {plainProblem}
-                          </p>
+        <div className="problem-body">
+          {/* Clean Problem & Risk Explanation */}
+          <div className="my-3 p-3.5 rounded-xl bg-[#20201e] border border-[#41413d] text-xs space-y-2.5">
+            <div className="flex items-start gap-2">
+              <span className="text-[#aaa8a1] font-medium shrink-0">Issue:</span>
+              <span className="text-[#f4f2ec] leading-relaxed">
+                <strong className="text-[#f4f2ec]">{categoryLabel}:</strong> {plainProblem}
+              </span>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="text-[#d89255] font-medium shrink-0">Risk:</span>
+              <span className="text-[#d0cec8] leading-relaxed">{whatBugCanDo}</span>
+            </div>
 
-                          {/* Explicit Bug Location (Website URL/Route + Source File & Line Numbers) */}
-                          <div className="bug-location-box">
-                            <div className="bug-location-header">
-                              <span>Bug Location</span>
-                              {fullUrlFound.includes("github.com/") && (
-                                <a
-                                  href={fullUrlFound}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-[#5fa37f] hover:underline lowercase font-normal"
-                                >
-                                  View exact lines on GitHub ↗
-                                </a>
-                              )}
-                            </div>
-                            <div className="bug-location-grid">
-                              <div className="bug-location-item">
-                                <span className="bug-location-label">
-                                  {httpMethod === "SOURCE"
-                                    ? "GitHub Location:"
-                                    : "URL / Route:"}
-                                </span>
-                                <span className="bug-location-value">
-                                  [{httpMethod}] {fullUrlFound}{" "}
-                                  {routePath && routePath !== fullUrlFound
-                                    ? `(route: ${routePath})`
-                                    : ""}
-                                </span>
-                              </div>
-                              {resolveBugSourceLocationLabel(finding) && (
-                                <div className="bug-location-item">
-                                  <span className="bug-location-label">
-                                    File &amp; Lines:
-                                  </span>
-                                  <span className="bug-location-value">
-                                    {resolveBugSourceLocationLabel(finding)}
-                                    {finding.source_function ||
-                                    finding.function_name
-                                      ? ` · fn: ${
-                                          finding.source_function ||
-                                          finding.function_name
-                                        }`
-                                      : ""}
-                                  </span>
-                                </div>
-                              )}
-                              {finding.source_repository && (
-                                <div className="bug-location-item">
-                                  <span className="bug-location-label">
-                                    Repo / Branch:
-                                  </span>
-                                  <span className="bug-location-value">
-                                    {finding.source_repository}
-                                  </span>
-                                </div>
-                              )}
-                            </div>
-                          </div>
+            {/* Location Bar */}
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-2 border-t border-[#333330] font-mono text-[11px] text-[#aaa8a1]">
+              <span>
+                Endpoint: <strong className="text-[#86efac]">[{httpMethod}] {routePath}</strong>
+              </span>
+              {resolveBugSourceLocationLabel(finding) && (
+                <span>
+                  Source: <strong className="text-[#f4f2ec]">{resolveBugSourceLocationLabel(finding)}</strong>
+                </span>
+              )}
+              {fullUrlFound.includes("github.com/") && (
+                <a
+                  href={fullUrlFound}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[#5fa37f] hover:underline"
+                >
+                  View on GitHub ↗
+                </a>
+              )}
+            </div>
+          </div>
 
-                          {/* Proof */}
-                          <h3 className="proof-heading">Proof</h3>
-                          <p className="proof-sub">
-                            Private values have been hidden.
-                          </p>
+          {/* Technical HTTP / Code Proof (Collapsible) */}
+          <details className="proof-details my-3 border border-[#41413d] rounded-lg bg-[#20201e]/60 overflow-hidden text-xs">
+            <summary className="px-3.5 py-2 text-xs font-medium text-[#aaa8a1] hover:text-[#f4f2ec] cursor-pointer flex items-center justify-between transition-colors select-none">
+              <span className="flex items-center gap-2">
+                <Code2 size={13} className="text-[#5fa37f]" />
+                <span>Technical Evidence Proof (Request &amp; Response)</span>
+              </span>
+              <span className="text-[11px] text-[#85837c]">Click to expand</span>
+            </summary>
+            <div className="p-3 border-t border-[#333330]">
+              <div className="proof-box mb-0">
+                <div className="proof-col">
+                  <div className="proof-col-header">
+                    {httpMethod === "SOURCE" ? "SOURCE FILE LOCATION" : "REQUEST SENT"}
+                  </div>
+                  <pre className="proof-col-pre">{formatRequestProof(finding)}</pre>
+                </div>
+                <div className="proof-col">
+                  <div className="proof-col-header">
+                    {httpMethod === "SOURCE" ? "VULNERABLE CODE" : "RESPONSE RECEIVED"}
+                  </div>
+                  <pre className="proof-col-pre">{formatResponseProof(finding)}</pre>
+                </div>
+              </div>
+            </div>
+          </details>
 
-                          <div className="proof-box">
-                            <div className="proof-col">
-                              <div className="proof-col-header">
-                                {httpMethod === "SOURCE"
-                                  ? "SOURCE FILE LOCATION"
-                                  : "REQUEST SENT"}
-                              </div>
-                              <pre className="proof-col-pre">
-                                {formatRequestProof(finding)}
-                              </pre>
-                            </div>
-                            <div className="proof-col">
-                              <div className="proof-col-header">
-                                {httpMethod === "SOURCE"
-                                  ? "VULNERABLE CODE EXCERPT"
-                                  : "RESPONSE RECEIVED"}
-                              </div>
-                              <pre className="proof-col-pre">
-                                {formatResponseProof(finding)}
-                              </pre>
-                            </div>
-                          </div>
+          {/* How to Fix Section */}
+          <div className="my-3 p-3.5 rounded-xl bg-[#20201e] border border-[#41413d] text-xs space-y-3">
+            <div className="flex items-center justify-between">
+              <h4 className="font-semibold text-[#f4f2ec] flex items-center gap-1.5">
+                <CheckCircle2 size={14} className="text-[#86efac]" />
+                <span>How to Fix</span>
+              </h4>
+              <button
+                type="button"
+                disabled={bugAiLoading[fid]}
+                onClick={() => void generateBugImpactAndFixWithGemini2(finding)}
+                className="inline-flex items-center gap-1 text-[11px] text-[#86efac] hover:underline cursor-pointer disabled:opacity-50"
+              >
+                <Sparkles size={11} />
+                <span>{bugAiLoading[fid] ? "Refreshing..." : "AI Fix"}</span>
+              </button>
+            </div>
 
-                          {/* What this bug can do & How to resolve it (Gemini API #2) */}
-                          <div className="impact-fix-callout">
-                            <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-                              <h4 className="callout-heading" style={{ margin: 0 }}>
-                                What could happen (What this bug can do)
-                              </h4>
-                              <button
-                                type="button"
-                                disabled={bugAiLoading[fid]}
-                                onClick={() =>
-                                  void generateBugImpactAndFixWithGemini2(finding)
-                                }
-                                className="inline-flex items-center gap-1.5 rounded-md border border-[#41413d] bg-[#2d2d2a] hover:bg-[#373733] px-2.5 py-1 text-[11px] text-[#5fa37f] disabled:opacity-50"
-                              >
-                                {bugAiLoading[fid] ? (
-                                  <Loader2 size={12} className="animate-spin" />
-                                ) : (
-                                  <Sparkles size={12} />
-                                )}
-                                <span>
-                                  {bugAiLoading[fid]
-                                    ? "Analyzing with Gemini API #2..."
-                                    : enriched
-                                    ? "Refresh AI Fix & Code (Gemini API #2)"
-                                    : "Generate AI Fix & Code (Gemini API #2)"}
-                                </span>
-                              </button>
-                            </div>
+            <ul className="space-y-1.5 text-xs text-[#d0cec8]">
+              {fixBullets.map((step, sIdx) => (
+                <li key={sIdx} className="flex items-start gap-2">
+                  <Check size={13} className="text-[#86efac] shrink-0 mt-0.5" />
+                  <span>{step}</span>
+                </li>
+              ))}
+            </ul>
 
-                            <p className="callout-text">{whatBugCanDo}</p>
+            {secureCodeFix && (
+              <div className="secure-code-container mt-2">
+                <div className="secure-code-header">
+                  <span>SECURE CODE FIX</span>
+                  <button
+                    type="button"
+                    onClick={() => void copySecureCode(fid, secureCodeFix)}
+                    className="inline-flex items-center gap-1 text-[#d0cec8] hover:text-white"
+                  >
+                    {copiedCodeId === fid ? <Check size={12} /> : <Copy size={12} />}
+                    <span>{copiedCodeId === fid ? "Copied" : "Copy code"}</span>
+                  </button>
+                </div>
+                <pre className="secure-code-pre">{secureCodeFix}</pre>
+              </div>
+            )}
 
-                            <h4 className="callout-heading">How to fix it (How to resolve)</h4>
-                            <ul className="fix-checklist">
-                              {fixBullets.map((step, sIdx) => (
-                                <li key={sIdx}>
-                                  <Check size={13} className="fix-check-icon" />
-                                  <span>{step}</span>
-                                </li>
-                              ))}
-                            </ul>
+            <div className="pt-2 border-t border-[#333330] flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={bugChatLoading[fid]}
+                  onClick={() => {
+                    setSelectedBugIdForChat(finding.id);
+                    void askGeminiQuestionAboutBug(finding, "How do I fix this bug step by step?");
+                    void submitBottomChatQuery(`How do I fix ${plainTitle} step by step?`);
+                  }}
+                  className="px-2.5 py-1 rounded-md bg-[#2d2d2a] hover:bg-[#373733] border border-[#41413d] hover:border-[#5fa37f] text-[#f4f2ec] text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <Sparkles size={12} className="text-[#86efac]" />
+                  <span>{bugChatLoading[fid] ? "Asking AI..." : "Ask AI how to fix this bug"}</span>
+                </button>
+                {bugChatError[fid] && (
+                  <span className="text-xs text-[#d2675f]">{bugChatError[fid]}</span>
+                )}
+              </div>
 
-                            {/* Secure Code Fix Block (Gemini API #2) */}
-                            {secureCodeFix && (
-                              <div className="secure-code-container">
-                                <div className="secure-code-header">
-                                  <span>
-                                    SECURE CODE FIX{" "}
-                                    {enriched?.model
-                                      ? `· Generated by Gemini API #2 (${enriched.model})`
-                                      : ""}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      void copySecureCode(fid, secureCodeFix)
-                                    }
-                                    className="inline-flex items-center gap-1 text-[#d0cec8] hover:text-white"
-                                  >
-                                    {copiedCodeId === fid ? (
-                                      <Check size={12} />
-                                    ) : (
-                                      <Copy size={12} />
-                                    )}
-                                    <span>
-                                      {copiedCodeId === fid ? "Copied" : "Copy code"}
-                                    </span>
-                                  </button>
-                                </div>
-                                <pre className="secure-code-pre">
-                                  {secureCodeFix}
-                                </pre>
-                              </div>
-                            )}
-
-                            {assessmentId && !assessmentId.startsWith("preset-") && (
-                              <div className="mt-3 flex items-center gap-3">
-                                <button
-                                  type="button"
-                                  disabled={verifyingFindingId === finding.id}
-                                  onClick={() => void verifyFix(finding.id)}
-                                  className="text-xs text-[#5fa37f] hover:underline disabled:opacity-50"
-                                >
-                                  {verifyingFindingId === finding.id
-                                    ? "Re-testing fix..."
-                                    : finding.retest_status
-                                    ? `Fix verification: ${finding.retest_status}`
-                                    : "Verify fix against live target"}
-                                </button>
-                                {verificationErrors[finding.id] && (
-                                  <span className="text-xs text-[#d2675f]">
-                                    {verificationErrors[finding.id]}
-                                  </span>
-                                )}
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Interactive Question & Answer Text Field (Gemini API #1) */}
-                          <div className="bug-qa-section">
-                            <div className="bug-qa-header">
-                              <span>
-                                Ask a question about this bug (Gemini API #1 · Text &amp; Q&amp;A)
-                              </span>
-                            </div>
-
-                            <div className="bug-qa-chips">
-                              {[
-                                "What can an attacker do with this bug?",
-                                "How do I fix this step by step?",
-                                "How can I test that this bug is resolved?",
-                              ].map((chip) => (
-                                <button
-                                  key={chip}
-                                  type="button"
-                                  disabled={bugChatLoading[fid]}
-                                  onClick={() =>
-                                    void askGeminiQuestionAboutBug(finding, chip)
-                                  }
-                                  className="bug-qa-chip"
-                                >
-                                  {chip}
-                                </button>
-                              ))}
-                            </div>
-
-                            {chatMessages.length > 0 && (
-                              <div className="bug-qa-messages">
-                                {chatMessages.map((msg, mIdx) => (
-                                  <div
-                                    key={mIdx}
-                                    className={`bug-qa-bubble ${msg.role}`}
-                                  >
-                                    {msg.content}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-
-                            {bugChatError[fid] && (
-                              <p className="text-xs text-[#d2675f] mb-2">
-                                {bugChatError[fid]}
-                              </p>
-                            )}
-
-                            <div className="bug-qa-input-box">
-                              <input
-                                type="text"
-                                value={bugQuestions[fid] || ""}
-                                onChange={(e) =>
-                                  setBugQuestions((prev) => ({
-                                    ...prev,
-                                    [fid]: e.target.value,
-                                  }))
-                                }
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    void askGeminiQuestionAboutBug(finding);
-                                  }
-                                }}
-                                placeholder={`Ask a question about ${routePath}...`}
-                                aria-label={`Ask a question about ${plainTitle}`}
-                              />
-                              <button
-                                type="button"
-                                disabled={
-                                  bugChatLoading[fid] ||
-                                  !(bugQuestions[fid] || "").trim()
-                                }
-                                onClick={() =>
-                                  void askGeminiQuestionAboutBug(finding)
-                                }
-                                className="bug-qa-send-btn"
-                                aria-label="Send question"
-                              >
-                                {bugChatLoading[fid] ? (
-                                  <Loader2 size={14} className="animate-spin" />
-                                ) : (
-                                  <ArrowUp size={15} />
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      </section>
+              {assessmentId && !assessmentId.startsWith("preset-") && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={verifyingFindingId === finding.id}
+                    onClick={() => void verifyFix(finding.id)}
+                    className="text-xs text-[#86efac] hover:underline font-medium disabled:opacity-50"
+                  >
+                    {verifyingFindingId === finding.id
+                      ? "Re-testing fix..."
+                      : finding.retest_status
+                      ? `Verification: ${finding.retest_status}`
+                      : "Verify fix against live target"}
+                  </button>
+                  {verificationErrors[finding.id] && (
+                    <span className="text-xs text-[#d2675f]">{verificationErrors[finding.id]}</span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
     );
   };
 
@@ -3342,38 +3216,67 @@ export default function Home() {
         {/* ================================================================= */}
         {status !== "ready" && !isRunningState && (
           <div className="scan-workspace" data-testid="final-assessment-summary">
-            <div className="target-url-pill-row" style={{ gap: "8px", flexWrap: "wrap" }}>
-              {status !== "failed" && (
+            {/* Top Navigation Tabs: Project Bugs | Attack Chains | Four Roles */}
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-6 pb-3 border-b border-[#333330]">
+              <div className="flex items-center bg-[#20201e] p-1 rounded-lg border border-[#41413d] text-xs">
                 <button
                   type="button"
-                  onClick={downloadReportPdf}
-                  className="download-report-btn"
-                  style={{ padding: "6px 12px", fontSize: "12px" }}
+                  onClick={() => setActiveReportTab("bugs")}
+                  className={`px-3 py-1.5 rounded-md font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                    activeReportTab === "bugs"
+                      ? "bg-[#2d2d2a] text-[#f4f2ec] border border-[#5a5a55] shadow-xs"
+                      : "text-[#aaa8a1] hover:text-[#f4f2ec]"
+                  }`}
                 >
-                  <Download size={13} />
-                  <span>Download PDF report</span>
+                  <Shield size={13} className={activeReportTab === "bugs" ? "text-[#5fa37f]" : ""} />
+                  <span>Project Bugs</span>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-[#20201e] border border-[#41413d] font-mono text-[#f4f2ec]">
+                    {displayFindings.length}
+                  </span>
                 </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setShowRolesModal(true)}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#2d2d2a] hover:bg-[#373733] border border-[#41413d] hover:border-[#5fa37f] text-[#f4f2ec] inline-flex items-center gap-1.5 transition-colors cursor-pointer"
-                title="Configure and review the four testing identities"
-              >
-                <Users size={13} className="text-[#86efac]" />
-                <span>Four-Role Status</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowAttackChainModal(true)}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#2d2d2a] hover:bg-[#373733] border border-[#41413d] hover:border-[#5fa37f] text-[#f4f2ec] inline-flex items-center gap-1.5 transition-colors cursor-pointer"
-                title="Open Autonomous Attack-Chain Engine"
-              >
-                <GitFork size={13} className="text-[#86efac]" />
-                <span>Attack-Chain Engine</span>
-              </button>
-              <div className="target-url-pill">
-                {summaryData?.target_url || targetUrl || "http://localhost:3000"}
+
+                <button
+                  type="button"
+                  onClick={() => setActiveReportTab("attack_chains")}
+                  className={`px-3 py-1.5 rounded-md font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                    activeReportTab === "attack_chains"
+                      ? "bg-[#2d2d2a] text-[#f4f2ec] border border-[#5a5a55] shadow-xs"
+                      : "text-[#aaa8a1] hover:text-[#f4f2ec]"
+                  }`}
+                >
+                  <GitFork size={13} className={activeReportTab === "attack_chains" ? "text-[#5fa37f]" : ""} />
+                  <span>Attack Chains</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveReportTab("roles")}
+                  className={`px-3 py-1.5 rounded-md font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                    activeReportTab === "roles"
+                      ? "bg-[#2d2d2a] text-[#f4f2ec] border border-[#5a5a55] shadow-xs"
+                      : "text-[#aaa8a1] hover:text-[#f4f2ec]"
+                  }`}
+                >
+                  <Users size={13} className={activeReportTab === "roles" ? "text-[#5fa37f]" : ""} />
+                  <span>Four-Role Status</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className="target-url-pill font-mono text-xs">
+                  {summaryData?.target_url || targetUrl || "http://localhost:3000"}
+                </div>
+                {status !== "failed" && activeReportTab === "bugs" && (
+                  <button
+                    type="button"
+                    onClick={downloadReportPdf}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#5fa37f] hover:bg-[#529471] text-[#102218] inline-flex items-center gap-1.5 transition cursor-pointer shrink-0"
+                    title="Download full security report as PDF"
+                  >
+                    <Download size={13} />
+                    <span>Download PDF</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -3732,41 +3635,7 @@ export default function Home() {
                   )}
                 </div>
 
-                {/* Autonomous Multi-Endpoint Attack-Chain Section */}
-                <div className="mt-8 mb-6">
-                  <AttackChainPanel
-                    assessmentId={assessmentId || activePastScanId || "preset-juice-shop"}
-                    targetUrl={summaryData?.target_url || targetUrl || "http://localhost:3000"}
-                    onFindingConfirmed={() => {
-                      if (assessmentId) {
-                        void selectPastScan({
-                          id: assessmentId,
-                          label: targetUrl || "Current Scan",
-                          target_url: targetUrl || "http://localhost:3000",
-                          status: "COMPLETED",
-                        });
-                      }
-                    }}
-                  />
-                </div>
 
-                {/* Autonomous Multi-Endpoint Attack-Chain Section */}
-                <div className="mt-8 mb-6">
-                  <AttackChainPanel
-                    assessmentId={assessmentId || activePastScanId || "preset-juice-shop"}
-                    targetUrl={summaryData?.target_url || targetUrl || "http://localhost:3000"}
-                    onFindingConfirmed={() => {
-                      if (assessmentId) {
-                        void selectPastScan({
-                          id: assessmentId,
-                          label: targetUrl || "Current Scan",
-                          target_url: targetUrl || "http://localhost:3000",
-                          status: "COMPLETED",
-                        });
-                      }
-                    }}
-                  />
-                </div>
 
                 {/* Bottom Report Action Buttons (Image 5) */}
                 <div className="report-bottom-actions">
@@ -3795,6 +3664,33 @@ export default function Home() {
                   </button>
                 </div>
               </>
+            )}
+
+            {/* TAB 2: ATTACK CHAINS */}
+            {status !== "failed" && activeReportTab === "attack_chains" && (
+              <div className="p-4 sm:p-5 rounded-xl bg-[var(--panel)] border border-[var(--line)]">
+                <AttackChainPanel
+                  assessmentId={assessmentId || activePastScanId || "preset-juice-shop"}
+                  targetUrl={summaryData?.target_url || targetUrl || "http://localhost:3000"}
+                  onFindingConfirmed={() => {
+                    if (assessmentId) {
+                      void selectPastScan({
+                        id: assessmentId,
+                        label: targetUrl || "Current Scan",
+                        target_url: targetUrl || "http://localhost:3000",
+                        status: "COMPLETED",
+                      });
+                    }
+                  }}
+                />
+              </div>
+            )}
+
+            {/* TAB 3: FOUR-ROLE TESTING */}
+            {status !== "failed" && activeReportTab === "roles" && (
+              <div className="p-4 sm:p-5 rounded-xl bg-[var(--panel)] border border-[var(--line)]">
+                <FourRoleConfigPanel />
+              </div>
             )}
           </div>
         )}
