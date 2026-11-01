@@ -309,12 +309,12 @@ class AttackChainPlanner:
         params = list(self._get(raw, "parameters", []) or [])
         params.extend(name for match in _TEMPLATE.finditer(normalized) for name in [(match.group(1) or "").lower()] if name not in params)
         input_params = list(self._get(raw, "input_parameters", params) or [])
-        output_params = list(self._get(raw, "output_parameters", []) or [])
         resource = self._get(raw, "resource_type")
         if not resource:
             segs = [seg for seg in normalized.strip("/").split("/") if seg]
             if len(segs) >= 2 and segs[0].lower() in ("rest", "api"):
                 resource = segs[1].strip("{}").lower().rstrip("s")
+        output_params = list(self._get(raw, "output_parameters", []) or [])
         category = self._get(raw, "category", "UNKNOWN")
         category = category.value if isinstance(category, Enum) else str(category or "UNKNOWN").upper()
         expected_roles = self._roles(raw)
@@ -386,7 +386,7 @@ class AttackChainPlanner:
         if not identifier:
             return None
         normalized_id = identifier.lower().replace("-", "_")
-        aliases = {source.resource_type, source.resource_type + "_id", source.resource_type + "id"}
+        aliases = {source.resource_type, source.resource_type + "_id", source.resource_type + "id", "id"}
         same_resource = source.resource_type == target.resource_type and ("id" in target_inputs or normalized_id in target_inputs)
         parent_child = (target.parent_resource_type or "").lower() == source.resource_type
         related = source.resource_type in target.related_resource_types

@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import uuid
+from urllib.parse import urlsplit, quote
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
@@ -62,7 +63,7 @@ from backend.utils.logger import get_logger
 logger = get_logger(__name__)
 
 _TEMPLATE_REGEX = re.compile(r"\{([A-Za-z0-9_]+)\}|:([A-Za-z0-9_]+)")
-_ALLOWED_METHODS = {"GET", "HEAD", "POST", "PUT", "PATCH"}
+_ALLOWED_METHODS = {"GET", "HEAD"}
 _IDENTIFIER_FIELDS = {
     "id",
     "userid",
@@ -105,6 +106,7 @@ class StepExecutionStatus(str, Enum):
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
     SKIPPED = "SKIPPED"
+    INCONCLUSIVE = "INCONCLUSIVE"
 
 
 class ChainValidationResult(BaseModel):
@@ -131,6 +133,7 @@ class StepExecutionResult(BaseModel):
     verdict: AccessVerdict
     response_excerpt: str
     extracted_identifiers: Dict[str, str] = Field(default_factory=dict)
+    resource_identifier_provenance: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     expected_behavior: str
     actual_behavior: str
     resource_ownership_result: Optional[str] = None
@@ -160,6 +163,7 @@ class ChainExecutionResult(BaseModel):
     remediation_code_patch: Optional[str] = None
     finding_id: Optional[str] = None
     summary: str
+    preflight_rejections: List[str] = Field(default_factory=list)
     reproducibility_steps: List[str] = Field(default_factory=list)
     execution_timestamp: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -238,16 +242,21 @@ class AttackChainValidator:
                 rejection_reasons.append(f"Duplicate step_id '{step_id}' found in chain.")
             seen_step_ids.add(step_id)
 
-            # Path format check
-            if not path or not path.startswith("/") or "\\" in path or ".." in path:
+            # Path format check: only relative HTTP request targets are accepted.
+            parsed_path = urlsplit(path)
+            path_segments = parsed_path.path.split("/")
+            if (not path or not path.startswith("/") or path.startswith("//")
+                    or parsed_path.scheme or parsed_path.netloc or "\\" in path
+                    or any(part == ".." for part in path_segments)
+                    or any(ord(char) < 32 for char in path) or "#" in path):
                 rejection_reasons.append(
                     f"Step '{step_id}': Invalid relative path '{path}'."
                 )
 
             # Permitted HTTP methods check (No DELETE)
-            if method not in _ALLOWED_METHODS or method == "DELETE":
+            if method not in _ALLOWED_METHODS:
                 rejection_reasons.append(
-                    f"Step '{step_id}': HTTP method '{method}' is not permitted. Only non-destructive methods {_ALLOWED_METHODS} are allowed."
+                    f"Step '{step_id}': HTTP method '{method}' is not permitted in the current read-only chain phase. Allowed methods: {sorted(_ALLOWED_METHODS)}."
                 )
 
             # ScopeGuard endpoint validation (test representative URL)
@@ -268,25 +277,38 @@ class AttackChainValidator:
                     )
 
             bindings = step_data.get("input_bindings") or []
+            bound_parameters: Set[str] = set()
             for b in bindings:
+                b_param = b.get("parameter") if isinstance(b, dict) else getattr(b, "parameter", None)
                 b_src = b.get("source_step_id") if isinstance(b, dict) else getattr(b, "source_step_id", None)
+                if b_param:
+                    bound_parameters.add(str(b_param).lower())
                 if b_src and b_src not in seen_step_ids:
                     rejection_reasons.append(
                         f"Step '{step_id}': Input binding source step '{b_src}' has not been executed prior to this step."
                     )
+                if not b_param:
+                    rejection_reasons.append(f"Step '{step_id}': Input binding has no parameter name.")
+            placeholders = {a or b for a, b in _TEMPLATE_REGEX.findall(path)}
+            unbound = placeholders - bound_parameters
+            if unbound:
+                rejection_reasons.append(
+                    f"Step '{step_id}': Resource parameters have no provenance binding: {sorted(unbound)}."
+                )
+
+            declared_params = {str(p).lower() for p in step_data.get("parameters") or []}
+            path_params = {str(p).lower() for p in step_data.get("input_parameters") or []}
+            accepted_params = declared_params | path_params | {str(p).lower() for p in placeholders}
+            for b in bindings:
+                b_param = b.get("parameter") if isinstance(b, dict) else getattr(b, "parameter", None)
+                if b_param and accepted_params and str(b_param).lower() not in accepted_params:
+                    rejection_reasons.append(
+                        f"Step '{step_id}': Bound parameter '{b_param}' is not declared by endpoint metadata."
+                    )
 
             # Check safe test payload if modification method
-            if method in {"POST", "PUT", "PATCH"}:
-                payload = step_data.get("json_body") or step_data.get("payload")
-                if payload and isinstance(payload, dict):
-                    destructive_keys = [
-                        k for k in payload.keys()
-                        if any(d in k.lower() for d in DESTRUCTIVE_MODIFICATION_KEYS)
-                    ]
-                    if destructive_keys:
-                        rejection_reasons.append(
-                            f"Step '{step_id}': Destructive keys {destructive_keys} detected in modification payload."
-                        )
+            if step_data.get("json_body") is not None or step_data.get("payload") is not None:
+                rejection_reasons.append(f"Step '{step_id}': Destructive or state-changing request bodies are prohibited in read-only chains.")
 
         # 4. Role authentication check
         if role_override:
@@ -403,8 +425,77 @@ class AttackChainExecutor:
                 summary=f"Attack chain '{chain_id}' was rejected: {'; '.join(validation.rejection_reasons)}",
             )
 
+        # Preflight every identity before the first network request. No role fallback is
+        # allowed during execution, and authenticated personas must be distinct.
+        planned_roles: List[Role] = []
+        preflight_rejections: List[str] = []
+        for idx, step_data in enumerate(steps):
+            step_id = str(step_data.get("step_id") or f"step-{idx + 1}")
+            try:
+                planned_roles.append(self._resolve_step_role(
+                    step_id=step_id,
+                    step_data=step_data,
+                    role_assignments=role_assignments,
+                    step_index=idx,
+                    scenario=scenario,
+                ))
+            except ValueError as exc:
+                preflight_rejections.append(f"Step '{step_id}' has an invalid role assignment: {exc}.")
+        for role in dict.fromkeys(planned_roles):
+            session = self.session_manager.get_session(role)
+            if role == Role.ANONYMOUS:
+                if session.token or session.cookies or session.custom_headers or session.user_id:
+                    preflight_rejections.append("Anonymous role contains authenticated identity material.")
+                continue
+            try:
+                self.session_manager.require_authenticated_session(role)
+            except MissingSessionError as exc:
+                preflight_rejections.append(str(exc))
+                continue
+            if not session.user_id:
+                preflight_rejections.append(f"Role '{role.value}' has no verified user_id; identity separation cannot be established.")
+        authenticated_roles = [r for r in dict.fromkeys(planned_roles) if r != Role.ANONYMOUS]
+        user_ids = [self.session_manager.get_session(role).user_id for role in authenticated_roles]
+        if len(user_ids) != len(set(user_ids)):
+            preflight_rejections.append("Required authenticated roles do not map to distinct user identities.")
+        credential_fingerprints: List[str] = []
+        for role in authenticated_roles:
+            session = self.session_manager.get_session(role)
+            fingerprint = json.dumps({"token": session.token, "cookies": session.cookies}, sort_keys=True)
+            credential_fingerprints.append(hashlib.sha256(fingerprint.encode()).hexdigest())
+        if len(credential_fingerprints) != len(set(credential_fingerprints)):
+            preflight_rejections.append("Required roles reuse authentication credentials; isolated sessions are mandatory.")
+        if preflight_rejections:
+            blocked_steps = [
+                StepExecutionResult(
+                    step_id=str(step.get("step_id") or f"step-{idx + 1}"),
+                    endpoint_path=str(step.get("path") or step.get("endpoint_path") or ""),
+                    resolved_url="",
+                    method=str(step.get("method") or "GET").upper(),
+                    role_used=(planned_roles[idx].value if idx < len(planned_roles) else "UNAVAILABLE"),
+                    status_code=0,
+                    is_success=False,
+                    status=StepExecutionStatus.BLOCKED,
+                    verdict=AccessVerdict.NOT_TESTED,
+                    response_excerpt="",
+                    expected_behavior="All chain role sessions must pass preflight before requests are sent.",
+                    actual_behavior="Chain rejected before network execution.",
+                    error_message="; ".join(preflight_rejections),
+                )
+                for idx, step in enumerate(steps)
+            ]
+            return ChainExecutionResult(
+                chain_id=chain_id, chain_name=chain_name, scenario=scenario, target_url=base,
+                scan_id=scan_id, status=ChainExecutionStatus.BLOCKED_BY_SAFETY,
+                is_confirmed=False, steps_executed=0, total_steps=len(steps),
+                step_results=blocked_steps, vulnerability_category=scenario,
+                severity="NONE", confidence="LOW", summary="Chain preflight failed; no requests were sent.",
+                preflight_rejections=preflight_rejections,
+            )
+
         # Step 2: Multi-step execution context
         extracted_context: Dict[str, str] = {}
+        identifier_provenance: Dict[str, Dict[str, Any]] = {}
         step_results: List[StepExecutionResult] = []
         confirmed_violation = False
         execution_failed = False
@@ -415,6 +506,7 @@ class AttackChainExecutor:
             step_id = str(step_data.get("step_id") or f"step-{idx + 1}")
             path_template = str(step_data.get("path") or step_data.get("endpoint_path") or "")
             method = str(step_data.get("method") or "GET").strip().upper()
+            step_role = planned_roles[idx]
             depends_on = step_data.get("depends_on_step_ids") or []
             input_bindings = step_data.get("input_bindings") or []
 
@@ -446,43 +538,104 @@ class AttackChainExecutor:
                 )
                 continue
 
-            # Resolve parameter bindings (e.g. {id} -> extracted resource ID)
+            # Resolve every symbolic parameter from an actual earlier response.
             resolved_path = path_template
+            missing_binding_reason: Optional[str] = None
             for b in input_bindings:
                 param = b.get("parameter") if isinstance(b, dict) else getattr(b, "parameter", None)
                 src_step = b.get("source_step_id") if isinstance(b, dict) else getattr(b, "source_step_id", None)
-                src_field = b.get("source_field", "resource_id") if isinstance(b, dict) else getattr(b, "source_field", "resource_id")
+                src_field = b.get("source_field", "response.resource_id") if isinstance(b, dict) else getattr(b, "source_field", "response.resource_id")
+                source_field = str(src_field).removeprefix("response.")
+                provenance_key = f"{src_step}.{source_field}"
+                if source_field == "resource_id":
+                    provenance_key = f"{src_step}.resource_id"
+                prov = identifier_provenance.get(provenance_key)
+                bound_val = prov.get("value") if prov else None
+                if not bound_val:
+                    missing_binding_reason = f"Resource binding '{param}' could not be resolved from successful response step '{src_step}' field '{src_field}'."
+                    break
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(bound_val)):
+                    missing_binding_reason = f"Resource binding '{param}' from step '{src_step}' failed safe identifier validation."
+                    break
+                replacement = quote(str(bound_val), safe="-_")
+                resolved_path = re.sub(r"\{" + re.escape(str(param)) + r"\}", replacement, resolved_path, flags=re.IGNORECASE)
+                resolved_path = re.sub(r":" + re.escape(str(param)) + r"\b", replacement, resolved_path, flags=re.IGNORECASE)
 
-                # Lookup in context
-                bound_val = (
-                    extracted_context.get(f"{src_step}.{src_field}")
-                    or extracted_context.get(f"{src_step}.id")
-                    or extracted_context.get(f"{src_step}.resource_id")
-                )
-                if bound_val and param:
-                    resolved_path = re.sub(r"\{" + re.escape(param) + r"\}", str(bound_val), resolved_path, flags=re.IGNORECASE)
-                    resolved_path = re.sub(r":" + re.escape(param) + r"\b", str(bound_val), resolved_path, flags=re.IGNORECASE)
-
-            # If template placeholders remain, check for fallback concrete ID or owned resource
+            # Never substitute a guessed value for an unresolved placeholder.
             unresolved = _TEMPLATE_REGEX.findall(resolved_path)
-            if unresolved:
-                # Fallback to User A's registered basket/order or default fixture 1
-                fallback_id = "1"
-                for u in unresolved:
-                    token_name = u[0] or u[1]
-                    resolved_path = resolved_path.replace(f"{{{token_name}}}", fallback_id)
-                    resolved_path = resolved_path.replace(f":{token_name}", fallback_id)
+            if unresolved and not missing_binding_reason:
+                missing_binding_reason = f"Unresolved resource parameters remain: {[a or b for a, b in unresolved]}"
+            if missing_binding_reason:
+                step_results.append(StepExecutionResult(
+                    step_id=step_id, endpoint_path=path_template, resolved_url="", method=method,
+                    role_used=step_role.value,
+                    status_code=0, is_success=False, status=StepExecutionStatus.BLOCKED,
+                    verdict=AccessVerdict.NOT_TESTED, response_excerpt="",
+                    expected_behavior="A bound resource identifier must originate from a validated preceding response.",
+                    actual_behavior="Step blocked because resource identifier provenance was unavailable.",
+                    error_message=missing_binding_reason,
+                ))
+                execution_failed = True
+                for later_index in range(idx + 1, len(steps)):
+                    later = steps[later_index]
+                    step_results.append(StepExecutionResult(
+                        step_id=str(later.get("step_id") or f"step-{later_index + 1}"),
+                        endpoint_path=str(later.get("path") or later.get("endpoint_path") or ""),
+                        resolved_url="", method=str(later.get("method") or "GET").upper(),
+                        role_used=planned_roles[later_index].value, status_code=0, is_success=False,
+                        status=StepExecutionStatus.BLOCKED, verdict=AccessVerdict.NOT_TESTED,
+                        response_excerpt="", expected_behavior="Dependent steps require all prior resource bindings.",
+                        actual_behavior="Step not sent because an earlier resource binding was unresolved.",
+                        error_message=missing_binding_reason,
+                    ))
+                break
+
+            # Literal IDs are accepted only when the operator has registered the
+            # value as an explicitly approved fixture owned by a configured role.
+            if not input_bindings:
+                literal_ids = [
+                    segment for segment in urlsplit(resolved_path).path.split("/")
+                    if re.fullmatch(r"[0-9]{1,20}|[0-9a-fA-F-]{8,128}", segment)
+                ]
+                resource_type = str(step_data.get("resource_type") or "").lower()
+                for literal_id in literal_ids:
+                    if not resource_type or not any(
+                        self.session_manager.get_session(role).owns_resource(resource_type, literal_id)
+                        for role in Role
+                    ):
+                        missing_binding_reason = (
+                            f"Literal resource identifier '{literal_id}' is not backed by an explicitly "
+                            "registered test fixture or a preceding response binding."
+                        )
+                        break
+                if missing_binding_reason:
+                    step_results.append(StepExecutionResult(
+                        step_id=step_id, endpoint_path=path_template, resolved_url="", method=method,
+                        role_used=step_role.value, status_code=0, is_success=False,
+                        status=StepExecutionStatus.BLOCKED, verdict=AccessVerdict.NOT_TESTED,
+                        response_excerpt="", expected_behavior="Resource IDs must have explicit fixture or response provenance.",
+                        actual_behavior="Step blocked because a literal resource ID has no approved provenance.",
+                        error_message=missing_binding_reason,
+                    ))
+                    execution_failed = True
+                    for later_index in range(idx + 1, len(steps)):
+                        later = steps[later_index]
+                        step_results.append(StepExecutionResult(
+                            step_id=str(later.get("step_id") or f"step-{later_index + 1}"),
+                            endpoint_path=str(later.get("path") or later.get("endpoint_path") or ""),
+                            resolved_url="", method=str(later.get("method") or "GET").upper(),
+                            role_used=planned_roles[later_index].value, status_code=0, is_success=False,
+                            status=StepExecutionStatus.BLOCKED, verdict=AccessVerdict.NOT_TESTED,
+                            response_excerpt="", expected_behavior="Dependent steps require valid resource provenance.",
+                            actual_behavior="Step not sent because a preceding step was blocked.",
+                            error_message=missing_binding_reason,
+                        ))
+                    break
 
             resolved_url = f"{base}/{resolved_path.lstrip('/')}"
 
             # Determine testing role for this step
-            step_role = self._resolve_step_role(
-                step_id=step_id,
-                step_data=step_data,
-                role_assignments=role_assignments,
-                step_index=idx,
-                scenario=scenario,
-            )
+            step_role = planned_roles[idx]
 
             # Execute HTTP probe through RequestExecutor
             try:
@@ -515,14 +668,27 @@ class AttackChainExecutor:
                 execution_failed = True
                 break
 
-            # Extract resource identifiers from response body
+            # Extract only identifiers declared by discovery metadata; keep their
+            # response provenance explicit and never promote arbitrary JSON values.
             step_identifiers = self._extract_identifiers(resp.body)
-            for k, v in step_identifiers.items():
-                extracted_context[f"{step_id}.{k}"] = v
-            if step_identifiers:
-                first_val = next(iter(step_identifiers.values()))
-                extracted_context[f"{step_id}.resource_id"] = first_val
-                extracted_context[f"{step_id}.id"] = first_val
+            declared_outputs = {str(v).lower().replace("-", "_") for v in step_data.get("output_parameters", [])}
+            declared_identifier = str(step_data.get("resource_identifier_name") or "").lower().replace("-", "_")
+            if declared_identifier:
+                declared_outputs.add(declared_identifier)
+            for key, value in step_identifiers.items():
+                if key in declared_outputs:
+                    extracted_context[f"{step_id}.{key}"] = value
+                    identifier_provenance[f"{step_id}.{key}"] = {
+                        "value": value, "source_step_id": step_id, "source_field": key,
+                        "status_code": resp.status_code, "response_sha256": compute_sha256(resp.body),
+                    }
+            if declared_identifier and declared_identifier in step_identifiers:
+                value = step_identifiers[declared_identifier]
+                extracted_context[f"{step_id}.resource_id"] = value
+                identifier_provenance[f"{step_id}.resource_id"] = {
+                    "value": value, "source_step_id": step_id, "source_field": declared_identifier,
+                    "status_code": resp.status_code, "response_sha256": compute_sha256(resp.body),
+                }
 
             # Evaluate step authorization & false positive prevention
             step_eval = self._evaluate_step_authorization(
@@ -536,6 +702,16 @@ class AttackChainExecutor:
                 step_index=idx,
                 extracted_context=extracted_context,
             )
+            step_eval.resource_identifier_provenance = {
+                str(binding.get("parameter") if isinstance(binding, dict) else getattr(binding, "parameter", "")): {
+                    "source_step_id": str(binding.get("source_step_id") if isinstance(binding, dict) else getattr(binding, "source_step_id", "")),
+                    "source_field": str(binding.get("source_field", "response.resource_id") if isinstance(binding, dict) else getattr(binding, "source_field", "response.resource_id")),
+                    "response_sha256": identifier_provenance.get(
+                        f"{binding.get('source_step_id') if isinstance(binding, dict) else getattr(binding, 'source_step_id', '')}.{str(binding.get('source_field', 'response.resource_id') if isinstance(binding, dict) else getattr(binding, 'source_field', 'response.resource_id')).removeprefix('response.')}", {}
+                    ).get("response_sha256"),
+                }
+                for binding in input_bindings
+            }
             step_results.append(step_eval)
 
             if step_eval.verdict == AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS:
@@ -694,19 +870,16 @@ class AttackChainExecutor:
         if explicit_role:
             return Role(str(explicit_role).lower())
 
-        # 2. Canonical chain semantics
-        # Step 1: Baseline resource discovery (User A for BOLA/IDOR, Admin for Admin routes, Anonymous for public)
+        # Deterministic scenario roles. Availability is checked for the complete
+        # chain before any request; never substitute a different identity.
         if step_index == 0:
-            if "ADMIN" in scenario:
-                return Role.ADMIN if self.session_manager.is_authenticated(Role.ADMIN) else Role.USER_A
-            return Role.USER_A if self.session_manager.is_authenticated(Role.USER_A) else Role.ANONYMOUS
-
-        # Step 2+: Cross-user or unauthenticated probe
-        if "PRIVILEGE" in scenario or "ADMIN" in scenario:
-            return Role.USER_B if self.session_manager.is_authenticated(Role.USER_B) else Role.USER_A
-        if "BOLA" in scenario or "IDOR" in scenario:
-            return Role.USER_B if self.session_manager.is_authenticated(Role.USER_B) else Role.ANONYMOUS
-
+            if "PRIVILEGE" in scenario or "BFLA" in scenario:
+                return Role.USER_A
+            return Role.USER_A
+        if "PRIVILEGE" in scenario or "BFLA" in scenario:
+            return Role.ANONYMOUS if step_data.get("test_anonymous") else Role.USER_A
+        if "BOLA" in scenario or "IDOR" in scenario or "RELATED" in scenario:
+            return Role.USER_B
         return Role.USER_B
 
     def _extract_identifiers(self, body_text: str) -> Dict[str, str]:
@@ -717,7 +890,7 @@ class AttackChainExecutor:
         try:
             parsed = json.loads(body_text)
             self._walk_and_extract(parsed, extracted)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             pass
         return extracted
 
@@ -779,18 +952,50 @@ class AttackChainExecutor:
             status = StepExecutionStatus.FAILED
             act_behavior = f"Request returned HTTP {code}."
         elif step_index > 0:
+            allowed_roles = {
+                str(value.value if isinstance(value, Role) else value).lower()
+                for value in step_data.get("expected_allowed_roles", [])
+            }
             if role in (Role.USER_B, Role.ANONYMOUS):
-                verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
-                if "PRIVILEGE" in scenario or "admin" in resolved_url.lower():
+                resource_type = str(step_data.get("resource_type") or "").lower()
+                resource_id = next((part for part in urlsplit(resolved_url).path.split("/") if part.isdigit()), None)
+                owner = self.session_manager.get_session(Role.USER_A)
+                verified_cross_user = bool(
+                    resource_type and resource_id and owner.owns_resource(resource_type, resource_id)
+                    and self.session_manager.get_session(role).user_id != owner.user_id
+                )
+                verified_permission_breach = bool(allowed_roles and role.value not in allowed_roles)
+                if not verified_cross_user and not verified_permission_breach:
+                    verdict = AccessVerdict.SUSPICIOUS_ACCESS
+                    status = StepExecutionStatus.INCONCLUSIVE
                     act_behavior = (
-                        f"Lower-privileged role '{role.value}' accessed administrative endpoint "
-                        f"(HTTP {code}) and received administrative data."
+                        f"Role '{role.value}' received HTTP {code}, but no registered ownership or permission "
+                        "evidence establishes unauthorized access."
                     )
                 else:
-                    act_behavior = (
+                    verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
+                if "PRIVILEGE" in scenario or "admin" in resolved_url.lower():
+                    if verified_permission_breach:
+                        act_behavior = (
+                            f"Role '{role.value}' accessed an endpoint whose discovered policy allows only "
+                            f"{sorted(allowed_roles)} (HTTP {code})."
+                        )
+                    elif verified_cross_user:
+                        act_behavior = (
+                        f"Lower-privileged role '{role.value}' accessed administrative endpoint "
+                        f"(HTTP {code}) and received administrative data."
+                        )
+                else:
+                    if verified_permission_breach:
+                        act_behavior = (
+                            f"Role '{role.value}' received HTTP {code} for a resource endpoint whose declared "
+                            f"allowed roles exclude that role ({sorted(allowed_roles)})."
+                        )
+                    elif verified_cross_user:
+                        act_behavior = (
                         f"Role '{role.value}' successfully accessed resource "
                         f"(HTTP {code}) and received structured data."
-                    )
+                        )
             else:
                 verdict = AccessVerdict.ALLOWED_ACCESS
                 act_behavior = f"Role '{role.value}' received HTTP {code} on step {step_index + 1}."

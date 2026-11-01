@@ -27,6 +27,7 @@ from backend.scanner.endpoint_discovery import (
 from backend.scanner.request_executor import RequestExecutor
 from backend.scanner.response_analyzer import AccessVerdict, ResponseAnalyzer
 from backend.scanner.authorization_tester import AuthorizationTester
+from backend.agent.attack_chain import AttackChainPlanner
 from backend.scanner.security_inspector import SecurityInspector
 from backend.analysis.evidence_validator import (
     BEARER_REGEX,
@@ -465,6 +466,11 @@ class AssessmentEngine:
                     discovery_status="DISCOVERED",
                     test_status="UNTESTED",
                     summary=route.description,
+                    planner_metadata={
+                        key: value
+                        for key, value in route.model_dump(mode="json").items()
+                        if key not in {"path", "method", "category", "parameters", "requires_auth", "description"}
+                    },
                 )
                 self.repository.save_discovered_endpoint(ep_rec)
                 endpoint_records[route.path] = ep_rec
@@ -484,6 +490,16 @@ class AssessmentEngine:
                 )
 
             session.endpoints_discovered_count = len(discovered_routes)
+            # Planning is part of the assessment inventory path. It produces
+            # untrusted candidates only; execution still requires an explicit
+            # operator action through the validated chain API.
+            chain_plan = AttackChainPlanner().plan(discovered_routes, max_steps=5, max_candidates=25)
+            if session.config is None:
+                session.config = {}
+            session.config["attack_chain_candidates"] = [
+                candidate.model_dump(mode="json") for candidate in chain_plan.candidates
+            ]
+            session.config["attack_chain_graph"] = chain_plan.graph.model_dump(mode="json")
             self.repository.save_scan_session(session)
             self._complete_stage(
                 session,
@@ -497,6 +513,18 @@ class AssessmentEngine:
                 AssessmentStage.ENDPOINT_DISCOVERY,
                 f"{len(discovered_routes)} GET routes discovered.",
                 {"count": len(discovered_routes)},
+            )
+            yield self._emit_event(
+                session,
+                EventType.ATTACK_CHAIN_CANDIDATES_PLANNED,
+                AssessmentStage.ENDPOINT_DISCOVERY,
+                f"Built endpoint graph and planned {len(chain_plan.candidates)} unverified chain candidates.",
+                {
+                    "endpoint_count": len(chain_plan.graph.nodes),
+                    "relationship_count": len(chain_plan.graph.relationships),
+                    "candidate_count": len(chain_plan.candidates),
+                    "candidates_are_unverified": True,
+                },
             )
 
             if is_cancelled():
