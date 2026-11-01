@@ -23,6 +23,9 @@ import {
   AlertTriangle,
   KeyRound,
   RefreshCw,
+  FolderLock,
+  Layers,
+  Tag,
 } from "lucide-react";
 import {
   AIProviderInfo,
@@ -539,6 +542,81 @@ const DEMO_FINDINGS: FindingItem[] = [
   },
 ];
 
+export function normalizeFindingCategory(finding: FindingItem): string {
+  const raw = [
+    finding.beginner_explanation?.technical_name,
+    finding.vulnerability_category,
+    finding.vulnerability_name,
+    finding.vulnerability_type,
+    finding.title,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (raw.includes("sql") || raw.includes("injection")) {
+    return "SQL & Code Injection";
+  }
+  if (
+    raw.includes("bola") ||
+    raw.includes("idor") ||
+    raw.includes("broken access") ||
+    raw.includes("object level") ||
+    raw.includes("basket")
+  ) {
+    return "Broken Access Control (IDOR / BOLA)";
+  }
+  if (
+    raw.includes("bfla") ||
+    raw.includes("function level") ||
+    raw.includes("privilege") ||
+    raw.includes("role")
+  ) {
+    return "Function-Level Auth (BFLA)";
+  }
+  if (
+    raw.includes("login") ||
+    raw.includes("session") ||
+    raw.includes("token") ||
+    raw.includes("cookie") ||
+    raw.includes("password") ||
+    raw.includes("jwt")
+  ) {
+    return "Authentication & Session Security";
+  }
+  if (
+    raw.includes("ftp") ||
+    raw.includes("file") ||
+    raw.includes("traversal") ||
+    raw.includes("secret") ||
+    raw.includes("hardcoded") ||
+    raw.includes("exposure") ||
+    raw.includes("listing")
+  ) {
+    return "Information Disclosure & File Exposure";
+  }
+  if (raw.includes("redirect") || raw.includes("ssrf") || raw.includes("url")) {
+    return "Unvalidated Redirects & SSRF";
+  }
+  if (
+    raw.includes("header") ||
+    raw.includes("cors") ||
+    raw.includes("transport") ||
+    raw.includes("tls") ||
+    raw.includes("hsts") ||
+    raw.includes("csp")
+  ) {
+    return "Security Headers & Transport";
+  }
+
+  const fallback =
+    finding.beginner_explanation?.technical_name ||
+    finding.vulnerability_category ||
+    finding.vulnerability_name ||
+    "General Authorization";
+  return fallback.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export default function Home() {
   // Theme & Navigation
   const [lightMode, setLightMode] = useState<boolean>(false);
@@ -581,6 +659,8 @@ export default function Home() {
   const [visibleStepCount, setVisibleStepCount] = useState<number>(1);
   const [hideWork, setHideWork] = useState<boolean>(false);
   const [severityFilter, setSeverityFilter] = useState<string>("ALL");
+  const [categoryFilter, setCategoryFilter] = useState<string>("ALL");
+  const [groupByCategory, setGroupByCategory] = useState<boolean>(false);
   const [showHowAiFound, setShowHowAiFound] = useState<boolean>(false);
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(1);
 
@@ -1432,6 +1512,7 @@ export default function Home() {
     setDiscoveredEndpoints([]);
     setSummaryData(null);
     setSeverityFilter("ALL");
+    setCategoryFilter("ALL");
     setReconnectAttempts(0);
     reconnectAttemptsRef.current = 0;
 
@@ -1763,12 +1844,46 @@ export default function Home() {
     return Math.min(100, weighted);
   }, [displayFindings.length, severityCounts]);
 
-  const filteredFindings = useMemo(() => {
-    if (severityFilter === "ALL") return displayFindings;
-    return displayFindings.filter(
-      (f) => String(f.severity || "LOW").toUpperCase() === severityFilter
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const f of displayFindings) {
+      const cat = normalizeFindingCategory(f);
+      counts[cat] = (counts[cat] || 0) + 1;
+    }
+    return counts;
+  }, [displayFindings]);
+
+  const uniqueCategories = useMemo(() => {
+    return Object.keys(categoryCounts).sort(
+      (a, b) => categoryCounts[b] - categoryCounts[a]
     );
-  }, [displayFindings, severityFilter]);
+  }, [categoryCounts]);
+
+  const filteredFindings = useMemo(() => {
+    return displayFindings.filter((f) => {
+      const matchSev =
+        severityFilter === "ALL" ||
+        String(f.severity || "LOW").toUpperCase() === severityFilter;
+      const matchCat =
+        categoryFilter === "ALL" ||
+        normalizeFindingCategory(f) === categoryFilter;
+      return matchSev && matchCat;
+    });
+  }, [displayFindings, severityFilter, categoryFilter]);
+
+  const categorizedGroups = useMemo(() => {
+    const map: Record<string, FindingItem[]> = {};
+    for (const finding of filteredFindings) {
+      const cat = normalizeFindingCategory(finding);
+      if (!map[cat]) {
+        map[cat] = [];
+      }
+      map[cat].push(finding);
+    }
+    return Object.keys(map)
+      .map((cat) => ({ category: cat, findings: map[cat] }))
+      .sort((a, b) => b.findings.length - a.findings.length);
+  }, [filteredFindings]);
 
   const durationSeconds = useMemo(() => {
     if (summaryData?.started_at && summaryData?.completed_at) {
@@ -2007,6 +2122,12 @@ export default function Home() {
         text: `${idx + 1}. [${sev}] ${title}`,
         bold: true,
         size: 12,
+      });
+      reportLines.push({
+        text: `   Category: ${normalizeFindingCategory(f)} (${category})`,
+        bold: true,
+        size: 9,
+        indent: 2,
       });
       reportLines.push({ text: `Category: ${category}`, bold: true, size: 9 });
       reportLines.push({ text: "BUG LOCATION:", bold: true, size: 9 });
@@ -2607,6 +2728,363 @@ export default function Home() {
     void startAssessment();
   };
 
+  const renderProblemCard = (finding: FindingItem, idx: number) => {
+    const fid = finding.id || `finding-${idx}`;
+                    const sevKey = String(finding.severity || "LOW").toLowerCase();
+                    const sevClass =
+                      sevKey === "critical" ||
+                      sevKey === "high" ||
+                      sevKey === "medium"
+                        ? sevKey
+                        : "low";
+                    const sevTitle =
+                      sevClass.charAt(0).toUpperCase() + sevClass.slice(1);
+                    const plainTitle =
+                      finding.beginner_explanation?.simple_title ||
+                      finding.title ||
+                      "Security problem detected";
+                    const categoryLabel =
+                      finding.beginner_explanation?.technical_name ||
+                      finding.vulnerability_name ||
+                      finding.vulnerability_category ||
+                      "Authorization issue";
+                    const normalizedCategory = normalizeFindingCategory(finding);
+                    const plainProblem =
+                      finding.beginner_explanation?.what_is_the_problem ||
+                      finding.description ||
+                      finding.actual_behavior;
+                    const routePath =
+                      finding.target_endpoint ||
+                      finding.endpoint ||
+                      finding.affected_endpoint ||
+                      "/";
+                    const fullUrlFound = resolveFullUrlFound(finding);
+                    const httpMethod =
+                      finding.http_method ||
+                      finding.evidence?.request_method ||
+                      "GET";
+
+                    const enriched = bugAiEnrichment[fid];
+                    const whatBugCanDo =
+                      enriched?.what_bug_can_do ||
+                      finding.beginner_explanation?.what_attacker_can_do ||
+                      finding.impact_explanation ||
+                      finding.description;
+                    const fixBullets = extractFixBullets(finding, enriched);
+                    const secureCodeFix =
+                      enriched?.secure_code_fix ||
+                      finding.beginner_explanation?.secure_code_example ||
+                      finding.proposed_code_fix ||
+                      "";
+                    const chatMessages = bugChatHistory[fid] || [];
+
+                    return (
+                      <section
+                        key={fid}
+                        id={`problem-${fid}`}
+                        className="problem-section"
+                      >
+                        <div className="problem-header">
+                          <div className="problem-title-group">
+                            <span className="problem-index-badge">{idx + 1}</span>
+                            <h2 className="problem-title">{plainTitle}</h2>
+                          </div>
+                          <div className="problem-severity-score flex items-center gap-2">
+                            <span className={`severity-dot ${sevClass}`} />
+                            <span className={`severity-name ${sevClass}`}>
+                              {sevTitle}
+                            </span>
+                            <span className="text-[#aaa8a1] font-mono">
+                              {cvssForSeverity(sevClass, idx)}
+                            </span>
+                            <span className="inline-flex items-center gap-1 ml-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[#20201e] border border-[#41413d] text-[#aaa8a1]">
+                              <Tag size={10} className="text-[#5fa37f]" />
+                              {normalizedCategory}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="problem-body">
+                          <p className="problem-category-line">
+                            <strong>{categoryLabel}:</strong> {plainProblem}
+                          </p>
+
+                          {/* Explicit Bug Location (Website URL/Route + Source File & Line Numbers) */}
+                          <div className="bug-location-box">
+                            <div className="bug-location-header">
+                              <span>Bug Location</span>
+                              {fullUrlFound.includes("github.com/") && (
+                                <a
+                                  href={fullUrlFound}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-[#5fa37f] hover:underline lowercase font-normal"
+                                >
+                                  View exact lines on GitHub ↗
+                                </a>
+                              )}
+                            </div>
+                            <div className="bug-location-grid">
+                              <div className="bug-location-item">
+                                <span className="bug-location-label">
+                                  {httpMethod === "SOURCE"
+                                    ? "GitHub Location:"
+                                    : "URL / Route:"}
+                                </span>
+                                <span className="bug-location-value">
+                                  [{httpMethod}] {fullUrlFound}{" "}
+                                  {routePath && routePath !== fullUrlFound
+                                    ? `(route: ${routePath})`
+                                    : ""}
+                                </span>
+                              </div>
+                              {resolveBugSourceLocationLabel(finding) && (
+                                <div className="bug-location-item">
+                                  <span className="bug-location-label">
+                                    File &amp; Lines:
+                                  </span>
+                                  <span className="bug-location-value">
+                                    {resolveBugSourceLocationLabel(finding)}
+                                    {finding.source_function ||
+                                    finding.function_name
+                                      ? ` · fn: ${
+                                          finding.source_function ||
+                                          finding.function_name
+                                        }`
+                                      : ""}
+                                  </span>
+                                </div>
+                              )}
+                              {finding.source_repository && (
+                                <div className="bug-location-item">
+                                  <span className="bug-location-label">
+                                    Repo / Branch:
+                                  </span>
+                                  <span className="bug-location-value">
+                                    {finding.source_repository}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Proof */}
+                          <h3 className="proof-heading">Proof</h3>
+                          <p className="proof-sub">
+                            Private values have been hidden.
+                          </p>
+
+                          <div className="proof-box">
+                            <div className="proof-col">
+                              <div className="proof-col-header">
+                                {httpMethod === "SOURCE"
+                                  ? "SOURCE FILE LOCATION"
+                                  : "REQUEST SENT"}
+                              </div>
+                              <pre className="proof-col-pre">
+                                {formatRequestProof(finding)}
+                              </pre>
+                            </div>
+                            <div className="proof-col">
+                              <div className="proof-col-header">
+                                {httpMethod === "SOURCE"
+                                  ? "VULNERABLE CODE EXCERPT"
+                                  : "RESPONSE RECEIVED"}
+                              </div>
+                              <pre className="proof-col-pre">
+                                {formatResponseProof(finding)}
+                              </pre>
+                            </div>
+                          </div>
+
+                          {/* What this bug can do & How to resolve it (Gemini API #2) */}
+                          <div className="impact-fix-callout">
+                            <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                              <h4 className="callout-heading" style={{ margin: 0 }}>
+                                What could happen (What this bug can do)
+                              </h4>
+                              <button
+                                type="button"
+                                disabled={bugAiLoading[fid]}
+                                onClick={() =>
+                                  void generateBugImpactAndFixWithGemini2(finding)
+                                }
+                                className="inline-flex items-center gap-1.5 rounded-md border border-[#41413d] bg-[#2d2d2a] hover:bg-[#373733] px-2.5 py-1 text-[11px] text-[#5fa37f] disabled:opacity-50"
+                              >
+                                {bugAiLoading[fid] ? (
+                                  <Loader2 size={12} className="animate-spin" />
+                                ) : (
+                                  <Sparkles size={12} />
+                                )}
+                                <span>
+                                  {bugAiLoading[fid]
+                                    ? "Analyzing with Gemini API #2..."
+                                    : enriched
+                                    ? "Refresh AI Fix & Code (Gemini API #2)"
+                                    : "Generate AI Fix & Code (Gemini API #2)"}
+                                </span>
+                              </button>
+                            </div>
+
+                            <p className="callout-text">{whatBugCanDo}</p>
+
+                            <h4 className="callout-heading">How to fix it (How to resolve)</h4>
+                            <ul className="fix-checklist">
+                              {fixBullets.map((step, sIdx) => (
+                                <li key={sIdx}>
+                                  <Check size={13} className="fix-check-icon" />
+                                  <span>{step}</span>
+                                </li>
+                              ))}
+                            </ul>
+
+                            {/* Secure Code Fix Block (Gemini API #2) */}
+                            {secureCodeFix && (
+                              <div className="secure-code-container">
+                                <div className="secure-code-header">
+                                  <span>
+                                    SECURE CODE FIX{" "}
+                                    {enriched?.model
+                                      ? `· Generated by Gemini API #2 (${enriched.model})`
+                                      : ""}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void copySecureCode(fid, secureCodeFix)
+                                    }
+                                    className="inline-flex items-center gap-1 text-[#d0cec8] hover:text-white"
+                                  >
+                                    {copiedCodeId === fid ? (
+                                      <Check size={12} />
+                                    ) : (
+                                      <Copy size={12} />
+                                    )}
+                                    <span>
+                                      {copiedCodeId === fid ? "Copied" : "Copy code"}
+                                    </span>
+                                  </button>
+                                </div>
+                                <pre className="secure-code-pre">
+                                  {secureCodeFix}
+                                </pre>
+                              </div>
+                            )}
+
+                            {assessmentId && !assessmentId.startsWith("preset-") && (
+                              <div className="mt-3 flex items-center gap-3">
+                                <button
+                                  type="button"
+                                  disabled={verifyingFindingId === finding.id}
+                                  onClick={() => void verifyFix(finding.id)}
+                                  className="text-xs text-[#5fa37f] hover:underline disabled:opacity-50"
+                                >
+                                  {verifyingFindingId === finding.id
+                                    ? "Re-testing fix..."
+                                    : finding.retest_status
+                                    ? `Fix verification: ${finding.retest_status}`
+                                    : "Verify fix against live target"}
+                                </button>
+                                {verificationErrors[finding.id] && (
+                                  <span className="text-xs text-[#d2675f]">
+                                    {verificationErrors[finding.id]}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Interactive Question & Answer Text Field (Gemini API #1) */}
+                          <div className="bug-qa-section">
+                            <div className="bug-qa-header">
+                              <span>
+                                Ask a question about this bug (Gemini API #1 · Text &amp; Q&amp;A)
+                              </span>
+                            </div>
+
+                            <div className="bug-qa-chips">
+                              {[
+                                "What can an attacker do with this bug?",
+                                "How do I fix this step by step?",
+                                "How can I test that this bug is resolved?",
+                              ].map((chip) => (
+                                <button
+                                  key={chip}
+                                  type="button"
+                                  disabled={bugChatLoading[fid]}
+                                  onClick={() =>
+                                    void askGeminiQuestionAboutBug(finding, chip)
+                                  }
+                                  className="bug-qa-chip"
+                                >
+                                  {chip}
+                                </button>
+                              ))}
+                            </div>
+
+                            {chatMessages.length > 0 && (
+                              <div className="bug-qa-messages">
+                                {chatMessages.map((msg, mIdx) => (
+                                  <div
+                                    key={mIdx}
+                                    className={`bug-qa-bubble ${msg.role}`}
+                                  >
+                                    {msg.content}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+
+                            {bugChatError[fid] && (
+                              <p className="text-xs text-[#d2675f] mb-2">
+                                {bugChatError[fid]}
+                              </p>
+                            )}
+
+                            <div className="bug-qa-input-box">
+                              <input
+                                type="text"
+                                value={bugQuestions[fid] || ""}
+                                onChange={(e) =>
+                                  setBugQuestions((prev) => ({
+                                    ...prev,
+                                    [fid]: e.target.value,
+                                  }))
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    e.preventDefault();
+                                    void askGeminiQuestionAboutBug(finding);
+                                  }
+                                }}
+                                placeholder={`Ask a question about ${routePath}...`}
+                                aria-label={`Ask a question about ${plainTitle}`}
+                              />
+                              <button
+                                type="button"
+                                disabled={
+                                  bugChatLoading[fid] ||
+                                  !(bugQuestions[fid] || "").trim()
+                                }
+                                onClick={() =>
+                                  void askGeminiQuestionAboutBug(finding)
+                                }
+                                className="bug-qa-send-btn"
+                                aria-label="Send question"
+                              >
+                                {bugChatLoading[fid] ? (
+                                  <Loader2 size={14} className="animate-spin" />
+                                ) : (
+                                  <ArrowUp size={15} />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </section>
+    );
+  };
+
   return (
     <div className={`workspace ${lightMode ? "workspace-light" : ""}`}>
       {/* =================================================================== */}
@@ -2968,382 +3446,146 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Filter Pills */}
-                <div className="filter-pills-row">
-                  {[
-                    { key: "ALL", label: "All", count: displayFindings.length },
-                    { key: "CRITICAL", label: "Critical", count: severityCounts.CRITICAL },
-                    { key: "HIGH", label: "High", count: severityCounts.HIGH },
-                    { key: "MEDIUM", label: "Medium", count: severityCounts.MEDIUM },
-                    { key: "LOW", label: "Low", count: severityCounts.LOW },
-                  ].map((pill) => (
+
+
+                {/* Filter Controls: Severity & Categories */}
+                <div className="filter-controls-container mb-6 flex flex-col gap-3">
+                  {/* Row 1: Severity Pills + View Toggle */}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-[#85837c] mr-1">
+                        Severity:
+                      </span>
+                      {[
+                        { key: "ALL", label: "All", count: displayFindings.length },
+                        { key: "CRITICAL", label: "Critical", count: severityCounts.CRITICAL },
+                        { key: "HIGH", label: "High", count: severityCounts.HIGH },
+                        { key: "MEDIUM", label: "Medium", count: severityCounts.MEDIUM },
+                        { key: "LOW", label: "Low", count: severityCounts.LOW },
+                      ].map((pill) => (
+                        <button
+                          key={pill.key}
+                          type="button"
+                          onClick={() => setSeverityFilter(pill.key)}
+                          className={`filter-pill ${
+                            severityFilter === pill.key ? "active" : ""
+                          }`}
+                        >
+                          <span>{pill.label}</span>
+                          <span className="opacity-80">({pill.count})</span>
+                        </button>
+                      ))}
+                    </div>
+
                     <button
-                      key={pill.key}
                       type="button"
-                      onClick={() => setSeverityFilter(pill.key)}
-                      className={`filter-pill ${
-                        severityFilter === pill.key ? "active" : ""
+                      onClick={() => setGroupByCategory((prev) => !prev)}
+                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                        groupByCategory
+                          ? "border-[#5fa37f] bg-[#5fa37f]/15 text-[#5fa37f]"
+                          : "border-[#41413d] bg-[#2d2d2a] text-[#aaa8a1] hover:text-[#f4f2ec]"
                       }`}
+                      title="Group findings into categorized sections"
                     >
-                      <span>{pill.label}</span>
-                      <span>{pill.count}</span>
+                      <Layers size={13} />
+                      <span>{groupByCategory ? "Categorized View" : "Group by Category"}</span>
                     </button>
-                  ))}
+                  </div>
+
+                  {/* Row 2: Category Filter Navigation Pills */}
+                  {uniqueCategories.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-[#333330]">
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-[#85837c] mr-1 flex items-center gap-1">
+                        <Tag size={11} className="text-[#5fa37f]" />
+                        Category:
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setCategoryFilter("ALL")}
+                        className={`filter-pill text-xs ${
+                          categoryFilter === "ALL" ? "active" : ""
+                        }`}
+                      >
+                        <span>All Categories</span>
+                        <span className="opacity-80">({displayFindings.length})</span>
+                      </button>
+                      {uniqueCategories.map((cat) => (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => setCategoryFilter(categoryFilter === cat ? "ALL" : cat)}
+                          className={`filter-pill text-xs ${
+                            categoryFilter === cat ? "active" : ""
+                          }`}
+                        >
+                          <span>{cat}</span>
+                          <span className="opacity-80">({categoryCounts[cat]})</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
-                {/* Numbered Problem List */}
+                {/* Numbered Problem List (Grouped or Sequential) */}
                 <div>
-                  {filteredFindings.map((finding, idx) => {
-                    const fid = finding.id || `finding-${idx}`;
-                    const sevKey = String(finding.severity || "LOW").toLowerCase();
-                    const sevClass =
-                      sevKey === "critical" ||
-                      sevKey === "high" ||
-                      sevKey === "medium"
-                        ? sevKey
-                        : "low";
-                    const sevTitle =
-                      sevClass.charAt(0).toUpperCase() + sevClass.slice(1);
-                    const plainTitle =
-                      finding.beginner_explanation?.simple_title ||
-                      finding.title ||
-                      "Security problem detected";
-                    const categoryLabel =
-                      finding.beginner_explanation?.technical_name ||
-                      finding.vulnerability_name ||
-                      finding.vulnerability_category ||
-                      "Authorization issue";
-                    const plainProblem =
-                      finding.beginner_explanation?.what_is_the_problem ||
-                      finding.description ||
-                      finding.actual_behavior;
-                    const routePath =
-                      finding.target_endpoint ||
-                      finding.endpoint ||
-                      finding.affected_endpoint ||
-                      "/";
-                    const fullUrlFound = resolveFullUrlFound(finding);
-                    const httpMethod =
-                      finding.http_method ||
-                      finding.evidence?.request_method ||
-                      "GET";
-
-                    const enriched = bugAiEnrichment[fid];
-                    const whatBugCanDo =
-                      enriched?.what_bug_can_do ||
-                      finding.beginner_explanation?.what_attacker_can_do ||
-                      finding.impact_explanation ||
-                      finding.description;
-                    const fixBullets = extractFixBullets(finding, enriched);
-                    const secureCodeFix =
-                      enriched?.secure_code_fix ||
-                      finding.beginner_explanation?.secure_code_example ||
-                      finding.proposed_code_fix ||
-                      "";
-                    const chatMessages = bugChatHistory[fid] || [];
-
-                    return (
-                      <section
-                        key={fid}
-                        id={`problem-${fid}`}
-                        className="problem-section"
+                  {filteredFindings.length === 0 ? (
+                    <div className="p-8 my-4 text-center rounded-xl border border-[#41413d] bg-[#2d2d2a]/50 text-[#aaa8a1] text-xs">
+                      No findings match the selected severity ({severityFilter}) and category ({categoryFilter}) filters.
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSeverityFilter("ALL");
+                          setCategoryFilter("ALL");
+                        }}
+                        className="ml-2 text-[#5fa37f] hover:underline font-medium"
                       >
-                        <div className="problem-header">
-                          <div className="problem-title-group">
-                            <span className="problem-index-badge">{idx + 1}</span>
-                            <h2 className="problem-title">{plainTitle}</h2>
-                          </div>
-                          <div className="problem-severity-score">
-                            <span className={`severity-dot ${sevClass}`} />
-                            <span className={`severity-name ${sevClass}`}>
-                              {sevTitle}
+                        Reset filters
+                      </button>
+                    </div>
+                  ) : groupByCategory ? (
+                    categorizedGroups.map((group) => (
+                      <div key={group.category} className="category-group-block mb-10">
+                        <div className="category-group-header flex items-center justify-between pb-2.5 mb-2 border-b border-[#333330]">
+                          <div className="flex items-center gap-2">
+                            <div className="p-1.5 rounded-md bg-[#2d2d2a] border border-[#41413d] text-[#5fa37f]">
+                              <FolderLock size={15} />
+                            </div>
+                            <h3 className="text-sm font-semibold text-[#f4f2ec]">
+                              {group.category}
+                            </h3>
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-[#20201e] border border-[#41413d] text-[#aaa8a1]">
+                              {group.findings.length} bug{group.findings.length === 1 ? "" : "s"}
                             </span>
-                            <span className="text-[#aaa8a1] font-mono">
-                              {cvssForSeverity(sevClass, idx)}
-                            </span>
                           </div>
-                        </div>
-
-                        <div className="problem-body">
-                          <p className="problem-category-line">
-                            <strong>{categoryLabel}:</strong> {plainProblem}
-                          </p>
-
-                          {/* Explicit Bug Location (Website URL/Route + Source File & Line Numbers) */}
-                          <div className="bug-location-box">
-                            <div className="bug-location-header">
-                              <span>Bug Location</span>
-                              {fullUrlFound.includes("github.com/") && (
-                                <a
-                                  href={fullUrlFound}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-[#5fa37f] hover:underline lowercase font-normal"
-                                >
-                                  View exact lines on GitHub ↗
-                                </a>
-                              )}
-                            </div>
-                            <div className="bug-location-grid">
-                              <div className="bug-location-item">
-                                <span className="bug-location-label">
-                                  {httpMethod === "SOURCE"
-                                    ? "GitHub Location:"
-                                    : "URL / Route:"}
-                                </span>
-                                <span className="bug-location-value">
-                                  [{httpMethod}] {fullUrlFound}{" "}
-                                  {routePath && routePath !== fullUrlFound
-                                    ? `(route: ${routePath})`
-                                    : ""}
-                                </span>
-                              </div>
-                              {resolveBugSourceLocationLabel(finding) && (
-                                <div className="bug-location-item">
-                                  <span className="bug-location-label">
-                                    File &amp; Lines:
-                                  </span>
-                                  <span className="bug-location-value">
-                                    {resolveBugSourceLocationLabel(finding)}
-                                    {finding.source_function ||
-                                    finding.function_name
-                                      ? ` · fn: ${
-                                          finding.source_function ||
-                                          finding.function_name
-                                        }`
-                                      : ""}
-                                  </span>
-                                </div>
-                              )}
-                              {finding.source_repository && (
-                                <div className="bug-location-item">
-                                  <span className="bug-location-label">
-                                    Repo / Branch:
-                                  </span>
-                                  <span className="bug-location-value">
-                                    {finding.source_repository}
-                                  </span>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Proof */}
-                          <h3 className="proof-heading">Proof</h3>
-                          <p className="proof-sub">
-                            Private values have been hidden.
-                          </p>
-
-                          <div className="proof-box">
-                            <div className="proof-col">
-                              <div className="proof-col-header">
-                                {httpMethod === "SOURCE"
-                                  ? "SOURCE FILE LOCATION"
-                                  : "REQUEST SENT"}
-                              </div>
-                              <pre className="proof-col-pre">
-                                {formatRequestProof(finding)}
-                              </pre>
-                            </div>
-                            <div className="proof-col">
-                              <div className="proof-col-header">
-                                {httpMethod === "SOURCE"
-                                  ? "VULNERABLE CODE EXCERPT"
-                                  : "RESPONSE RECEIVED"}
-                              </div>
-                              <pre className="proof-col-pre">
-                                {formatResponseProof(finding)}
-                              </pre>
-                            </div>
-                          </div>
-
-                          {/* What this bug can do & How to resolve it (Gemini API #2) */}
-                          <div className="impact-fix-callout">
-                            <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-                              <h4 className="callout-heading" style={{ margin: 0 }}>
-                                What could happen (What this bug can do)
-                              </h4>
-                              <button
-                                type="button"
-                                disabled={bugAiLoading[fid]}
-                                onClick={() =>
-                                  void generateBugImpactAndFixWithGemini2(finding)
-                                }
-                                className="inline-flex items-center gap-1.5 rounded-md border border-[#41413d] bg-[#2d2d2a] hover:bg-[#373733] px-2.5 py-1 text-[11px] text-[#5fa37f] disabled:opacity-50"
-                              >
-                                {bugAiLoading[fid] ? (
-                                  <Loader2 size={12} className="animate-spin" />
-                                ) : (
-                                  <Sparkles size={12} />
-                                )}
-                                <span>
-                                  {bugAiLoading[fid]
-                                    ? "Analyzing with Gemini API #2..."
-                                    : enriched
-                                    ? "Refresh AI Fix & Code (Gemini API #2)"
-                                    : "Generate AI Fix & Code (Gemini API #2)"}
-                                </span>
-                              </button>
-                            </div>
-
-                            <p className="callout-text">{whatBugCanDo}</p>
-
-                            <h4 className="callout-heading">How to fix it (How to resolve)</h4>
-                            <ul className="fix-checklist">
-                              {fixBullets.map((step, sIdx) => (
-                                <li key={sIdx}>
-                                  <Check size={13} className="fix-check-icon" />
-                                  <span>{step}</span>
-                                </li>
-                              ))}
-                            </ul>
-
-                            {/* Secure Code Fix Block (Gemini API #2) */}
-                            {secureCodeFix && (
-                              <div className="secure-code-container">
-                                <div className="secure-code-header">
-                                  <span>
-                                    SECURE CODE FIX{" "}
-                                    {enriched?.model
-                                      ? `· Generated by Gemini API #2 (${enriched.model})`
-                                      : ""}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      void copySecureCode(fid, secureCodeFix)
-                                    }
-                                    className="inline-flex items-center gap-1 text-[#d0cec8] hover:text-white"
-                                  >
-                                    {copiedCodeId === fid ? (
-                                      <Check size={12} />
-                                    ) : (
-                                      <Copy size={12} />
-                                    )}
-                                    <span>
-                                      {copiedCodeId === fid ? "Copied" : "Copy code"}
-                                    </span>
-                                  </button>
-                                </div>
-                                <pre className="secure-code-pre">
-                                  {secureCodeFix}
-                                </pre>
-                              </div>
-                            )}
-
-                            {assessmentId && !assessmentId.startsWith("preset-") && (
-                              <div className="mt-3 flex items-center gap-3">
-                                <button
-                                  type="button"
-                                  disabled={verifyingFindingId === finding.id}
-                                  onClick={() => void verifyFix(finding.id)}
-                                  className="text-xs text-[#5fa37f] hover:underline disabled:opacity-50"
-                                >
-                                  {verifyingFindingId === finding.id
-                                    ? "Re-testing fix..."
-                                    : finding.retest_status
-                                    ? `Fix verification: ${finding.retest_status}`
-                                    : "Verify fix against live target"}
-                                </button>
-                                {verificationErrors[finding.id] && (
-                                  <span className="text-xs text-[#d2675f]">
-                                    {verificationErrors[finding.id]}
-                                  </span>
-                                )}
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Interactive Question & Answer Text Field (Gemini API #1) */}
-                          <div className="bug-qa-section">
-                            <div className="bug-qa-header">
-                              <span>
-                                Ask a question about this bug (Gemini API #1 · Text &amp; Q&amp;A)
+                          <div className="flex items-center gap-2.5 text-xs text-[#aaa8a1]">
+                            {group.findings.filter((f) => String(f.severity).toUpperCase() === "CRITICAL").length > 0 && (
+                              <span className="inline-flex items-center gap-1 text-[#d2675f] font-medium">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#d2675f]" />
+                                {group.findings.filter((f) => String(f.severity).toUpperCase() === "CRITICAL").length} Critical
                               </span>
-                            </div>
-
-                            <div className="bug-qa-chips">
-                              {[
-                                "What can an attacker do with this bug?",
-                                "How do I fix this step by step?",
-                                "How can I test that this bug is resolved?",
-                              ].map((chip) => (
-                                <button
-                                  key={chip}
-                                  type="button"
-                                  disabled={bugChatLoading[fid]}
-                                  onClick={() =>
-                                    void askGeminiQuestionAboutBug(finding, chip)
-                                  }
-                                  className="bug-qa-chip"
-                                >
-                                  {chip}
-                                </button>
-                              ))}
-                            </div>
-
-                            {chatMessages.length > 0 && (
-                              <div className="bug-qa-messages">
-                                {chatMessages.map((msg, mIdx) => (
-                                  <div
-                                    key={mIdx}
-                                    className={`bug-qa-bubble ${msg.role}`}
-                                  >
-                                    {msg.content}
-                                  </div>
-                                ))}
-                              </div>
                             )}
-
-                            {bugChatError[fid] && (
-                              <p className="text-xs text-[#d2675f] mb-2">
-                                {bugChatError[fid]}
-                              </p>
+                            {group.findings.filter((f) => String(f.severity).toUpperCase() === "HIGH").length > 0 && (
+                              <span className="inline-flex items-center gap-1 text-[#d89255] font-medium">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#d89255]" />
+                                {group.findings.filter((f) => String(f.severity).toUpperCase() === "HIGH").length} High
+                              </span>
                             )}
-
-                            <div className="bug-qa-input-box">
-                              <input
-                                type="text"
-                                value={bugQuestions[fid] || ""}
-                                onChange={(e) =>
-                                  setBugQuestions((prev) => ({
-                                    ...prev,
-                                    [fid]: e.target.value,
-                                  }))
-                                }
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") {
-                                    e.preventDefault();
-                                    void askGeminiQuestionAboutBug(finding);
-                                  }
-                                }}
-                                placeholder={`Ask a question about ${routePath}...`}
-                                aria-label={`Ask a question about ${plainTitle}`}
-                              />
-                              <button
-                                type="button"
-                                disabled={
-                                  bugChatLoading[fid] ||
-                                  !(bugQuestions[fid] || "").trim()
-                                }
-                                onClick={() =>
-                                  void askGeminiQuestionAboutBug(finding)
-                                }
-                                className="bug-qa-send-btn"
-                                aria-label="Send question"
-                              >
-                                {bugChatLoading[fid] ? (
-                                  <Loader2 size={14} className="animate-spin" />
-                                ) : (
-                                  <ArrowUp size={15} />
-                                )}
-                              </button>
-                            </div>
+                            {group.findings.filter((f) => String(f.severity).toUpperCase() === "MEDIUM").length > 0 && (
+                              <span className="inline-flex items-center gap-1 text-[#c5aa54]">
+                                <span className="w-1.5 h-1.5 rounded-full bg-[#c5aa54]" />
+                                {group.findings.filter((f) => String(f.severity).toUpperCase() === "MEDIUM").length} Medium
+                              </span>
+                            )}
                           </div>
                         </div>
-                      </section>
-                    );
-                  })}
+                        <div>
+                          {group.findings.map((finding, idx) => renderProblemCard(finding, idx))}
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    filteredFindings.map((finding, idx) => renderProblemCard(finding, idx))
+                  )}
                 </div>
 
                 {/* How these problems can join together (Image 5) */}
@@ -3614,15 +3856,20 @@ export default function Home() {
                       aria-label="Select bug to ask about"
                     >
                       <option value="ALL">All bugs / Top critical</option>
-                      {displayFindings.map((f, i) => (
-                        <option key={f.id || i} value={f.id}>
-                          #{i + 1}:{" "}
-                          {(
-                            f.beginner_explanation?.simple_title ||
-                            f.title ||
-                            f.target_endpoint
-                          ).slice(0, 32)}
-                        </option>
+                      {uniqueCategories.map((cat) => (
+                        <optgroup key={cat} label={cat}>
+                          {displayFindings
+                            .filter((f) => normalizeFindingCategory(f) === cat)
+                            .map((f, i) => (
+                              <option key={f.id || i} value={f.id}>
+                                {(
+                                  f.beginner_explanation?.simple_title ||
+                                  f.title ||
+                                  f.target_endpoint
+                                ).slice(0, 32)}
+                              </option>
+                            ))}
+                        </optgroup>
                       ))}
                     </select>
                   )}
