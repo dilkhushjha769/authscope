@@ -2857,12 +2857,21 @@ async def _run_zip_upload_scan(
 async def github_upload_scan(file: UploadFile = File(...), request: Request = None) -> Dict[str, Any]:
     if request:
         _require_frontend_origin(request)
+    import io
+    import zipfile
+
     fname = (file.filename or "").lower()
-    if not fname.endswith(".zip"):
-        raise HTTPException(status_code=400, detail={"code": "INVALID_ARCHIVE", "message": "Only .zip project archives are supported."})
+    single_file_exts = (".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml")
+    if not fname.endswith((".zip",) + single_file_exts):
+        raise HTTPException(status_code=400, detail={"code": "INVALID_ARCHIVE", "message": "Upload a .zip project or a single source file (.py, .js, .ts, .tsx, .jsx, .json, .yaml, .yml)."})
     content = await file.read()
     if len(content) > 50 * 1024 * 1024:
         raise HTTPException(status_code=413, detail={"code": "FILE_TOO_LARGE", "message": "Project archive exceeds 50MB limit."})
+    if not fname.endswith(".zip"):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(Path(file.filename or "upload").name, content)
+        content = buffer.getvalue()
     scan_id = f"gscan_up_{uuid.uuid4().hex}"
     user_id = f"up_{uuid.uuid4().hex[:12]}"
     github_repository = _github_repository()

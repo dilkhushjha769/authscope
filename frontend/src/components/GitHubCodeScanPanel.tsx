@@ -738,14 +738,14 @@ export function GitHubCodeScanPanel({
   };
 
   return (
-    <section className="mt-4 rounded-xl border border-[#41413d] bg-[#20201e] p-4 sm:p-5 space-y-4 text-left">
+    <section className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--sidebar)] p-4 sm:p-5 space-y-4 text-left">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-[#f4f2ec]">
-            <GitBranch className="h-4 w-4 text-[#5fa37f]" />
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-[var(--text)]">
+            <GitBranch className="h-4 w-4 text-[var(--accent)]" />
             Connect &amp; AI-Scan GitHub Repository
           </h2>
-          <p className="mt-1 text-xs text-[#aaa8a1]">
+          <p className="mt-1 text-xs text-[var(--muted)]">
             Inspect all files in the selected branch with AST analysis + Gemini AI security review &amp; PDF export.
           </p>
         </div>
@@ -754,28 +754,28 @@ export function GitHubCodeScanPanel({
             type="button"
             onClick={() => void disconnect()}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#41413d] bg-[#2d2d2a] px-3 py-1.5 text-xs text-[#d0cec8] hover:bg-[#373733] disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--sidebar)] px-3 py-1.5 text-xs text-[var(--soft)] hover:bg-[var(--surface-hover)] disabled:opacity-50"
           >
             <Unplug className="h-3.5 w-3.5" />
             Disconnect
           </button>
         ) : (
-          <span className="rounded-full border border-[#41413d] bg-[#2d2d2a] px-2.5 py-1 text-[10px] text-[#aaa8a1]">
+          <span className="rounded-full border border-[var(--line)] bg-[var(--sidebar)] px-2.5 py-1 text-[10px] text-[var(--muted)]">
             Not connected
           </span>
         )}
       </div>
 
       {status.connected && status.account ? (
-        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[#5fa37f]/30 bg-[#5fa37f]/10 p-3">
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[#5fa37f]/20 text-[#5fa37f]">
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-[color-mix(in_srgb,var(--accent)_30%,transparent)] bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] p-3">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[color-mix(in_srgb,var(--accent)_20%,transparent)] text-[var(--accent)]">
             <GitBranch className="h-4 w-4" />
           </span>
           <div className="min-w-0">
-            <p className="text-xs font-medium text-[#f4f2ec]">
+            <p className="text-xs font-medium text-[var(--text)]">
               Connected as @{status.account.login}
             </p>
-            <p className="text-[10px] text-[#aaa8a1]">
+            <p className="text-[10px] text-[var(--muted)]">
               GitHub user {status.account.id} · read-only repository access
             </p>
           </div>
@@ -793,8 +793,8 @@ export function GitHubCodeScanPanel({
         <div className="space-y-4">
           <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3.5">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-medium text-[#f4f2ec] flex items-center gap-1.5">
-                <Sparkles size={14} className="text-[#5fa37f]" />
+              <span className="text-xs font-medium text-[var(--text)] flex items-center gap-1.5">
+                <Sparkles size={14} className="text-[var(--accent)]" />
                 Scan Public GitHub Repository (Instant · No Sign-in Required)
               </span>
             </div>
@@ -804,13 +804,13 @@ export function GitHubCodeScanPanel({
                 value={publicRepoUrl}
                 onChange={(e) => setPublicRepoUrl(e.target.value)}
                 placeholder="https://github.com/juice-shop/juice-shop"
-                className="flex-1 rounded-md border border-[#41413d] bg-[#20201e] px-3 py-2 text-xs text-[#f4f2ec] placeholder-[#85837c] font-mono focus:border-[#5fa37f] focus:outline-none"
+                className="flex-1 rounded-md border border-[var(--line)] bg-[var(--sidebar)] px-3 py-2 text-xs text-[var(--text)] placeholder-[var(--faint)] font-mono focus:border-[var(--accent)] focus:outline-none"
               />
               <button
                 type="button"
                 onClick={() => void startPublicScan()}
                 disabled={loading || !publicRepoUrl.trim()}
-                className="inline-flex items-center gap-1.5 rounded-md bg-[#5fa37f] px-3.5 py-2 text-xs font-semibold text-[#102218] hover:brightness-105 disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3.5 py-2 text-xs font-semibold !text-white hover:brightness-105 disabled:opacity-50"
               >
                 {loading ? <Loader2 size={13} className="animate-spin" /> : <GitBranch size={13} />}
                 <span>Scan Repository</span>
@@ -831,7 +831,7 @@ export function GitHubCodeScanPanel({
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={loading}
-                className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-[#20201e] px-3 py-1.5 text-xs text-[#d0cec8] hover:bg-[#2d2d2a] hover:text-[#f4f2ec] disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-[var(--sidebar)] px-3 py-1.5 text-xs text-[var(--soft)] hover:bg-[var(--sidebar)] hover:text-[var(--text)] disabled:opacity-50"
               >
                 <Upload size={13} />
                 <span>Upload Project (.ZIP)</span>
@@ -841,14 +841,14 @@ export function GitHubCodeScanPanel({
                 type="button"
                 onClick={connect}
                 disabled={loading}
-                className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-[#20201e] px-3 py-1.5 text-xs text-[#d0cec8] hover:bg-[#2d2d2a] hover:text-[#f4f2ec] disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-[var(--sidebar)] px-3 py-1.5 text-xs text-[var(--soft)] hover:bg-[var(--sidebar)] hover:text-[var(--text)] disabled:opacity-50"
               >
                 <GitBranch size={13} />
                 <span>Connect GitHub (OAuth)</span>
               </button>
             </div>
 
-            <p className="text-[11px] text-[#85837c]">
+            <p className="text-[11px] text-[var(--faint)]">
               Public repos &amp; uploads scan instantly without authentication.
             </p>
           </div>
@@ -858,15 +858,15 @@ export function GitHubCodeScanPanel({
       {status.connected && (
         <>
           {!status.installations.length ? (
-            <div className="rounded-lg border border-[#c5aa54]/30 bg-[#c5aa54]/10 p-3 text-xs text-[#f4f2ec]">
+            <div className="rounded-lg border border-[#c5aa54]/30 bg-[#c5aa54]/10 p-3 text-xs text-[var(--text)]">
               <p className="font-medium">Install the AuthScope GitHub App</p>
-              <p className="mt-1 text-[11px] text-[#aaa8a1]">
+              <p className="mt-1 text-[11px] text-[var(--muted)]">
                 Authorization and installation are separate. Choose only the repositories the App may read.
               </p>
               <button
                 type="button"
                 onClick={install}
-                className="mt-2 rounded-md border border-[#c5aa54]/40 bg-[#2d2d2a] px-3 py-1.5 text-xs hover:bg-[#373733]"
+                className="mt-2 rounded-md border border-[#c5aa54]/40 bg-[var(--sidebar)] px-3 py-1.5 text-xs hover:bg-[var(--surface-hover)]"
               >
                 Install App on repositories
               </button>
@@ -874,7 +874,7 @@ export function GitHubCodeScanPanel({
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               {status.installations.length > 1 && (
-                <label className="text-[11px] text-[#aaa8a1]">
+                <label className="text-[11px] text-[var(--muted)]">
                   GitHub account / installation
                   <select
                     value={installationId}
@@ -885,7 +885,7 @@ export function GitHubCodeScanPanel({
                       setBranches([]);
                       setSelectedBranch("");
                     }}
-                    className="mt-1 block w-full rounded-md border border-[#41413d] bg-[#2d2d2a] px-2.5 py-2 text-xs text-[#f4f2ec]"
+                    className="mt-1 block w-full rounded-md border border-[var(--line)] bg-[var(--sidebar)] px-2.5 py-2 text-xs text-[var(--text)]"
                   >
                     {status.installations.map((item) => (
                       <option key={item.id} value={item.id}>
@@ -895,7 +895,7 @@ export function GitHubCodeScanPanel({
                   </select>
                 </label>
               )}
-              <label className="text-[11px] text-[#aaa8a1]">
+              <label className="text-[11px] text-[var(--muted)]">
                 Repository
                 <select
                   value={selectedRepository}
@@ -905,7 +905,7 @@ export function GitHubCodeScanPanel({
                     setSelectedBranch("");
                   }}
                   disabled={loading || !repositories.length}
-                  className="mt-1 block w-full rounded-md border border-[#41413d] bg-[#2d2d2a] px-2.5 py-2 text-xs text-[#f4f2ec]"
+                  className="mt-1 block w-full rounded-md border border-[var(--line)] bg-[var(--sidebar)] px-2.5 py-2 text-xs text-[var(--text)]"
                 >
                   <option value="">
                     {loading
@@ -921,13 +921,13 @@ export function GitHubCodeScanPanel({
                   ))}
                 </select>
               </label>
-              <label className="text-[11px] text-[#aaa8a1]">
+              <label className="text-[11px] text-[var(--muted)]">
                 Branch
                 <select
                   value={selectedBranch}
                   onChange={(event) => setSelectedBranch(event.target.value)}
                   disabled={!branches.length || loading}
-                  className="mt-1 block w-full rounded-md border border-[#41413d] bg-[#2d2d2a] px-2.5 py-2 text-xs text-[#f4f2ec]"
+                  className="mt-1 block w-full rounded-md border border-[var(--line)] bg-[var(--sidebar)] px-2.5 py-2 text-xs text-[var(--text)]"
                 >
                   <option value="">
                     {chosenRepository
@@ -952,7 +952,7 @@ export function GitHubCodeScanPanel({
               <button
                 type="button"
                 onClick={install}
-                className="text-[11px] text-[#5fa37f] underline"
+                className="text-[11px] text-[var(--accent)] underline"
               >
                 Add or update installed repositories
               </button>
@@ -964,7 +964,7 @@ export function GitHubCodeScanPanel({
                 disabled={
                   !chosenRepository || !selectedBranch || scanning || loading
                 }
-                className="inline-flex items-center gap-2 rounded-lg bg-[#5fa37f] px-3.5 py-2 text-xs font-semibold text-[#102218] hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
+                className="inline-flex items-center gap-2 rounded-lg bg-[var(--accent)] px-3.5 py-2 text-xs font-semibold !text-white hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {scanning ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -981,7 +981,7 @@ export function GitHubCodeScanPanel({
       {notice && (
         <p
           role="status"
-          className="rounded-md border border-[#5fa37f]/30 bg-[#5fa37f]/10 px-3 py-2 text-xs text-[#f4f2ec]"
+          className="rounded-md border border-[color-mix(in_srgb,var(--accent)_30%,transparent)] bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] px-3 py-2 text-xs text-[var(--text)]"
         >
           {notice}
         </p>
@@ -989,7 +989,7 @@ export function GitHubCodeScanPanel({
       {error && (
         <p
           role="alert"
-          className="flex items-start gap-2 rounded-md border border-[#d2675f]/40 bg-[#d2675f]/15 px-3 py-2 text-xs text-[#f4d2d2]"
+          className="flex items-start gap-2 rounded-md border border-[#d2675f]/40 bg-[#d2675f]/15 px-3 py-2 text-xs text-[var(--critical)]"
         >
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           {error}
@@ -997,18 +997,18 @@ export function GitHubCodeScanPanel({
       )}
 
       {scanning && (
-        <div className="rounded-lg border border-[#5fa37f]/30 bg-[#2d2d2a] p-3">
-          <p className="text-xs font-medium text-[#f4f2ec] flex items-center gap-2">
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-[#5fa37f]" />
+        <div className="rounded-lg border border-[color-mix(in_srgb,var(--accent)_30%,transparent)] bg-[var(--sidebar)] p-3">
+          <p className="text-xs font-medium text-[var(--text)] flex items-center gap-2">
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--accent)]" />
             Live AI source scan activity
           </p>
           <ol
             aria-live="polite"
-            className="mt-2 space-y-1.5 text-[11px] text-[#d0cec8]"
+            className="mt-2 space-y-1.5 text-[11px] text-[var(--soft)]"
           >
             {events.map((item) => (
               <li key={item.id} className="flex gap-2">
-                <span className="text-[#5fa37f]">✓</span>
+                <span className="text-[var(--accent)]">✓</span>
                 <span>{item.message}</span>
               </li>
             ))}
@@ -1017,9 +1017,9 @@ export function GitHubCodeScanPanel({
       )}
 
       {status.connected && (
-        <section className="border-t border-[#333330] pt-3">
+        <section className="border-t border-[var(--line-subtle)] pt-3">
           <div className="flex items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold text-[#d0cec8]">
+            <h3 className="text-xs font-semibold text-[var(--soft)]">
               Source scan history (click a completed scan to open on main dashboard)
             </h3>
             <button
@@ -1031,14 +1031,14 @@ export function GitHubCodeScanPanel({
                   )
                 )
               }
-              className="inline-flex items-center gap-1 text-[10px] text-[#aaa8a1] hover:text-[#f4f2ec]"
+              className="inline-flex items-center gap-1 text-[10px] text-[var(--muted)] hover:text-[var(--text)]"
             >
               <RefreshCw className="h-3 w-3" />
               Refresh
             </button>
           </div>
           {!history.length ? (
-            <p className="mt-2 text-[11px] text-[#85837c]">
+            <p className="mt-2 text-[11px] text-[var(--faint)]">
               No source scans yet.
             </p>
           ) : (
@@ -1050,20 +1050,20 @@ export function GitHubCodeScanPanel({
                   onClick={() => void openHistory(scan.id)}
                   className={`flex w-full flex-wrap items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-left ${
                     selectedScan?.id === scan.id
-                      ? "border-[#5fa37f] bg-[#373733]"
-                      : "border-[#41413d] bg-[#2d2d2a] hover:bg-[#373733]"
+                      ? "border-[var(--accent)] bg-[var(--surface-hover)]"
+                      : "border-[var(--line)] bg-[var(--sidebar)] hover:bg-[var(--surface-hover)]"
                   }`}
                 >
                   <span className="min-w-0">
-                    <span className="block truncate text-[11px] text-[#f4f2ec]">
+                    <span className="block truncate text-[11px] text-[var(--text)]">
                       {scan.owner}/{scan.repository} · {scan.branch}
                     </span>
-                    <span className="block truncate font-mono text-[10px] text-[#85837c]">
+                    <span className="block truncate font-mono text-[10px] text-[var(--faint)]">
                       {scan.commit_sha.slice(0, 12)} ·{" "}
                       {new Date(scan.created_at).toLocaleString()}
                     </span>
                   </span>
-                  <span className="shrink-0 text-[10px] text-[#aaa8a1]">
+                  <span className="shrink-0 text-[10px] text-[var(--muted)]">
                     {scan.status} · {scan.findings.length} findings
                   </span>
                 </button>
@@ -1074,18 +1074,18 @@ export function GitHubCodeScanPanel({
       )}
 
       {selectedScan && (
-        <section className="space-y-3 border-t border-[#333330] pt-3">
+        <section className="space-y-3 border-t border-[var(--line-subtle)] pt-3">
           <div>
-            <h3 className="text-sm font-semibold text-[#f4f2ec]">
+            <h3 className="text-sm font-semibold text-[var(--text)]">
               {selectedScan.owner}/{selectedScan.repository} ·{" "}
               {selectedScan.branch}
             </h3>
-            <p className="mt-1 break-all font-mono text-[10px] text-[#85837c]">
+            <p className="mt-1 break-all font-mono text-[10px] text-[var(--faint)]">
               Commit {selectedScan.commit_sha} · {selectedScan.status}
             </p>
           </div>
           {selectedScan.findings.length === 0 ? (
-            <p className="text-xs text-[#aaa8a1]">
+            <p className="text-xs text-[var(--muted)]">
               {selectedScan.status === "COMPLETED"
                 ? "No findings from the supported static checks."
                 : "Findings are not available until the scan completes."}
@@ -1115,34 +1115,34 @@ export function GitHubCodeScanPanel({
               return (
                 <article
                   key={fid}
-                  className="rounded-lg border border-[#41413d] bg-[#262624] p-4 space-y-3"
+                  className="rounded-lg border border-[var(--line)] bg-[var(--canvas)] p-4 space-y-3"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div>
-                      <span className="rounded border border-[#5fa37f]/40 bg-[#5fa37f]/10 px-2 py-0.5 text-[10px] font-semibold text-[#5fa37f]">
+                      <span className="rounded border border-[color-mix(in_srgb,var(--accent)_40%,transparent)] bg-[color-mix(in_srgb,var(--accent)_10%,transparent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--accent)]">
                         AI Source Code Finding · {finding.language}
                       </span>
-                      <h4 className="mt-2 text-sm font-semibold text-[#f4f2ec]">
+                      <h4 className="mt-2 text-sm font-semibold text-[var(--text)]">
                         {review?.simple_title ||
                           finding.vulnerability_category.replaceAll("_", " ")}
                       </h4>
                     </div>
-                    <span className="rounded bg-[#2d2d2a] border border-[#41413d] px-2 py-1 text-[10px] text-[#d0cec8]">
+                    <span className="rounded bg-[var(--sidebar)] border border-[var(--line)] px-2 py-1 text-[10px] text-[var(--soft)]">
                       {finding.severity} · {finding.confidence}
                     </span>
                   </div>
 
                   {/* Location / URL */}
                   <div className="text-xs">
-                    <span className="text-[#85837c]">Found in file: </span>
-                    <code className="font-mono text-[#f4f2ec]">
+                    <span className="text-[var(--faint)]">Found in file: </span>
+                    <code className="font-mono text-[var(--text)]">
                       {finding.file_path}:{finding.start_line}-{finding.end_line}
                     </code>{" "}
                     <a
                       href={finding.github_url}
                       target="_blank"
                       rel="noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] text-[#5fa37f] hover:underline ml-2"
+                      className="inline-flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline ml-2"
                     >
                       View on GitHub <ExternalLink className="h-3 w-3" />
                     </a>
@@ -1150,25 +1150,25 @@ export function GitHubCodeScanPanel({
 
                   {/* Proof / Code Snippet */}
                   <div>
-                    <div className="text-[11px] font-semibold text-[#d0cec8] mb-1">
+                    <div className="text-[11px] font-semibold text-[var(--soft)] mb-1">
                       Proof (Vulnerable Source Code)
                     </div>
-                    <pre className="max-h-48 overflow-auto rounded border border-[#41413d] bg-[#20201e] p-2.5 text-[11px] font-mono text-[#d0cec8]">
+                    <pre className="max-h-48 overflow-auto rounded border border-[var(--line)] bg-[var(--sidebar)] p-2.5 text-[11px] font-mono text-[var(--soft)]">
                       {finding.code_snippet}
                     </pre>
                   </div>
 
                   {/* What this bug can do & How to resolve it */}
-                  <div className="border-l-2 border-[#5fa37f] pl-3.5 space-y-2">
+                  <div className="border-l-2 border-[var(--accent)] pl-3.5 space-y-2">
                     <div className="flex items-center justify-between gap-2">
-                      <h5 className="text-xs font-semibold text-[#f4f2ec]">
+                      <h5 className="text-xs font-semibold text-[var(--text)]">
                         What this bug can do
                       </h5>
                       <button
                         type="button"
                         onClick={() => void enrichWithGeminiCodeApi(finding)}
                         disabled={aiEnrichLoading[fid]}
-                        className="inline-flex items-center gap-1 rounded border border-[#41413d] bg-[#2d2d2a] px-2 py-1 text-[10px] text-[#5fa37f] hover:bg-[#373733] disabled:opacity-50"
+                        className="inline-flex items-center gap-1 rounded border border-[var(--line)] bg-[var(--sidebar)] px-2 py-1 text-[10px] text-[var(--accent)] hover:bg-[var(--surface-hover)] disabled:opacity-50"
                       >
                         <Sparkles className="h-3 w-3" />
                         {aiEnrichLoading[fid]
@@ -1176,19 +1176,19 @@ export function GitHubCodeScanPanel({
                           : "Generate AI Code Fix (Gemini API #2)"}
                       </button>
                     </div>
-                    <p className="text-xs leading-relaxed text-[#aaa8a1]">
+                    <p className="text-xs leading-relaxed text-[var(--muted)]">
                       {whatBugDoes}
                     </p>
 
                     <div className="flex items-center justify-between pt-1">
-                      <h5 className="text-xs font-semibold text-[#f4f2ec]">
+                      <h5 className="text-xs font-semibold text-[var(--text)]">
                         How to resolve it
                       </h5>
                       <button
                         type="button"
                         onClick={() => void copyText(finding, fixText)}
                         disabled={!fixText}
-                        className="inline-flex items-center gap-1 rounded border border-[#41413d] px-2 py-0.5 text-[10px] text-[#d0cec8] hover:bg-[#373733]"
+                        className="inline-flex items-center gap-1 rounded border border-[var(--line)] px-2 py-0.5 text-[10px] text-[var(--soft)] hover:bg-[var(--surface-hover)]"
                       >
                         {copiedFinding === fid ? (
                           <Check className="h-3 w-3" />
@@ -1198,10 +1198,10 @@ export function GitHubCodeScanPanel({
                         {copiedFinding === fid ? "Copied" : "Copy fix"}
                       </button>
                     </div>
-                    <ul className="space-y-1 text-xs text-[#d0cec8]">
+                    <ul className="space-y-1 text-xs text-[var(--soft)]">
                       {howToFixList.map((step, index) => (
                         <li key={index} className="flex items-baseline gap-2">
-                          <span className="text-[#5fa37f]">✓</span>
+                          <span className="text-[var(--accent)]">✓</span>
                           <span>{step}</span>
                         </li>
                       ))}
@@ -1209,10 +1209,10 @@ export function GitHubCodeScanPanel({
 
                     {codeChange && (
                       <div className="pt-1">
-                        <div className="text-[10px] font-mono text-[#85837c] mb-1">
+                        <div className="text-[10px] font-mono text-[var(--faint)] mb-1">
                           Secure code replacement (Gemini API #2):
                         </div>
-                        <pre className="overflow-auto rounded border border-[#41413d] bg-[#20201e] p-2.5 text-[11px] font-mono text-[#5fa37f]">
+                        <pre className="overflow-auto rounded border border-[var(--line)] bg-[var(--sidebar)] p-2.5 text-[11px] font-mono text-[var(--accent)]">
                           {codeChange}
                         </pre>
                       </div>
@@ -1220,8 +1220,8 @@ export function GitHubCodeScanPanel({
                   </div>
 
                   {/* Interactive Question-Answer for this GitHub finding (Gemini API #1) */}
-                  <div className="pt-2 border-t border-[#333330] space-y-2">
-                    <div className="text-[11px] font-medium text-[#aaa8a1]">
+                  <div className="pt-2 border-t border-[var(--line-subtle)] space-y-2">
+                    <div className="text-[11px] font-medium text-[var(--muted)]">
                       Ask a question about this bug (Gemini API #1)
                     </div>
                     {messages.length > 0 && (
@@ -1231,8 +1231,8 @@ export function GitHubCodeScanPanel({
                             key={mIdx}
                             className={`rounded-lg px-3 py-2 text-xs leading-relaxed ${
                               m.role === "user"
-                                ? "bg-[#373733] text-[#f4f2ec] ml-6"
-                                : "bg-[#20201e] border border-[#41413d] text-[#d0cec8]"
+                                ? "bg-[var(--surface-hover)] text-[var(--text)] ml-6"
+                                : "bg-[var(--sidebar)] border border-[var(--line)] text-[var(--soft)]"
                             }`}
                           >
                             {m.content}
@@ -1257,7 +1257,7 @@ export function GitHubCodeScanPanel({
                           }
                         }}
                         placeholder="Ask about this file, impact, or how to patch it..."
-                        className="flex-1 rounded-lg border border-[#41413d] bg-[#2d2d2a] px-3 py-1.5 text-xs text-[#f4f2ec] placeholder-[#85837c] focus:outline-none focus:border-[#5fa37f]"
+                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--sidebar)] px-3 py-1.5 text-xs text-[var(--text)] placeholder-[var(--faint)] focus:outline-none focus:border-[var(--accent)]"
                       />
                       <button
                         type="button"
@@ -1265,7 +1265,7 @@ export function GitHubCodeScanPanel({
                           qaLoading[fid] || !(qaInput[fid] || "").trim()
                         }
                         onClick={() => void askGeminiAboutRepoFinding(finding)}
-                        className="grid h-7 w-7 place-items-center rounded-md bg-[#373733] text-[#f4f2ec] hover:bg-[#5fa37f] hover:text-[#102218] disabled:opacity-40"
+                        className="grid h-7 w-7 place-items-center rounded-md bg-[var(--surface-hover)] text-[var(--text)] hover:bg-[var(--accent)] hover:!text-white disabled:opacity-40"
                       >
                         {qaLoading[fid] ? (
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1276,12 +1276,12 @@ export function GitHubCodeScanPanel({
                     </div>
                   </div>
 
-                  <details className="border-t border-[#333330] pt-2">
-                    <summary className="flex cursor-pointer list-none items-center gap-1 text-[11px] text-[#85837c]">
+                  <details className="border-t border-[var(--line-subtle)] pt-2">
+                    <summary className="flex cursor-pointer list-none items-center gap-1 text-[11px] text-[var(--faint)]">
                       <ChevronDown className="h-3 w-3" />
                       Technical detector details
                     </summary>
-                    <div className="mt-2 space-y-1 text-[10px] text-[#85837c]">
+                    <div className="mt-2 space-y-1 text-[10px] text-[var(--faint)]">
                       <p>
                         Rule: {finding.detection_method} · {finding.language}
                         {finding.function_name
@@ -1297,7 +1297,7 @@ export function GitHubCodeScanPanel({
           )}
         </section>
       )}
-      <p className="flex items-start gap-1.5 text-[10px] leading-relaxed text-[#85837c]">
+      <p className="flex items-start gap-1.5 text-[10px] leading-relaxed text-[var(--faint)]">
         <LockKeyhole className="mt-0.5 h-3 w-3 shrink-0" />
         Repository contents are treated as untrusted. AuthScope never executes repository code. Only redacted finding excerpts are sent to Gemini.
       </p>

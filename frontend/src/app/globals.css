@@ -515,6 +515,12 @@ textarea {
 
 /* Completed Report View */
 .report-check-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
   color: var(--accent);
   margin-bottom: 10px;
 }
@@ -1643,4 +1649,11 @@ nextjs-portal {
   background: #2f6f4e !important;
   border-color: #2f6f4e !important;
   color: #ffffff !important;
+}
+
+/* Failed state: keep status icon readable in both themes */
+.workspace-light .report-check-mark[style] {
+  background: #fdecea !important;
+  border-color: #f4c7c3 !important;
+  color: #b42318 !important;
 }

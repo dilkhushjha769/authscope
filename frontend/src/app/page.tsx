@@ -2758,7 +2758,7 @@ export default function Home() {
             <span className={`severity-name ${sevClass}`}>
               {sevTitle}
             </span>
-            <span className="text-[#aaa8a1] font-mono ml-1">
+            <span className="text-[var(--muted)] font-mono ml-1">
               {cvssForSeverity(sevClass, idx)}
             </span>
           </div>
@@ -2771,7 +2771,7 @@ export default function Home() {
 
           <div className="my-2.5 flex flex-wrap items-center gap-2 text-xs">
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[var(--line)] bg-[var(--panel)] font-mono text-[var(--text)]">
-              <span className="font-semibold text-[#5fa37f] uppercase">
+              <span className="font-semibold text-[var(--accent)] uppercase">
                 {httpMethod === "SOURCE" ? "FILE" : httpMethod}
               </span>
               <span>{routePath}</span>
@@ -2850,12 +2850,12 @@ export default function Home() {
             )}
 
             {assessmentId && !assessmentId.startsWith("preset-") && (
-              <div className="pt-2 mt-2 border-t border-[#333330] flex items-center gap-2">
+              <div className="pt-2 mt-2 border-t border-[var(--line-subtle)] flex items-center gap-2">
                 <button
                   type="button"
                   disabled={verifyingFindingId === finding.id}
                   onClick={() => void verifyFix(finding.id)}
-                  className="text-xs text-[#86efac] hover:underline font-medium disabled:opacity-50"
+                  className="text-xs text-[var(--accent)] hover:underline font-medium disabled:opacity-50"
                 >
                   {verifyingFindingId === finding.id
                     ? "Re-testing fix..."
@@ -2957,7 +2957,7 @@ export default function Home() {
                     className="start-action-pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                     title="Upload local project (.ZIP) or source code"
                   >
-                    <Upload size={13} className="text-[#5fa37f] shrink-0" />
+                    <Upload size={13} className="text-[var(--accent)] shrink-0" />
                     <span>Upload file</span>
                   </button>
 
@@ -2966,7 +2966,7 @@ export default function Home() {
                     onClick={() => setShowGitHubModal(true)}
                     className="start-action-pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <GitBranch size={13} className="text-[#5fa37f] shrink-0" />
+                    <GitBranch size={13} className="text-[var(--accent)] shrink-0" />
                     <span>Link GitHub project</span>
                   </button>
 
@@ -2975,7 +2975,7 @@ export default function Home() {
                     onClick={() => setShowRolesModal(true)}
                     className="start-action-pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <Users size={13} className="text-[#5fa37f] shrink-0" />
+                    <Users size={13} className="text-[var(--accent)] shrink-0" />
                     <span>Four-Role Testing</span>
                   </button>
 
@@ -2984,7 +2984,7 @@ export default function Home() {
                     onClick={() => setShowAttackChainModal(true)}
                     className="start-action-pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <Share2 size={13} className="text-[#5fa37f] shrink-0" />
+                    <Share2 size={13} className="text-[var(--accent)] shrink-0" />
                     <span>Attack-Chain Engine &gt;</span>
                   </button>
 
@@ -3034,7 +3034,7 @@ export default function Home() {
                 {error && (
                   <div
                     role="alert"
-                    className="mt-4 p-3.5 rounded-lg border border-[#713e3e] bg-[#362020] text-[#f4d2d2] text-xs flex items-center justify-between gap-3"
+                    className="mt-4 p-3.5 rounded-lg border border-[var(--critical)] bg-[var(--panel)] text-[var(--critical)] text-xs flex items-center justify-between gap-3"
                   >
                     <div className="leading-relaxed">{error}</div>
                     <div className="flex items-center gap-2 shrink-0">
@@ -3046,7 +3046,7 @@ export default function Home() {
                             setShowAuthModal(true);
                             setAuthActionMessage(null);
                           }}
-                          className="px-2.5 py-1.5 rounded-md border border-[#965454] bg-[#4a2828] hover:bg-[#5c3232] text-white font-medium text-xs"
+                          className="px-2.5 py-1.5 rounded-md border border-[var(--critical)] bg-[var(--panel)] hover:bg-[var(--surface-hover)] text-[var(--critical)] font-medium text-xs"
                         >
                           Authorize target
                         </button>
@@ -3054,7 +3054,7 @@ export default function Home() {
                       <button
                         type="button"
                         onClick={() => void startAssessment()}
-                        className="px-2.5 py-1.5 rounded-md border border-[#5a5a55] bg-[#2d2d2a] hover:bg-[#373733] text-[#f4f2ec] text-xs"
+                        className="px-2.5 py-1.5 rounded-md border border-[var(--line)] bg-[var(--sidebar)] hover:bg-[var(--surface-hover)] text-[var(--text)] text-xs"
                       >
                         Try again
                       </button>
@@ -3155,9 +3155,9 @@ export default function Home() {
               <div
                 className="report-check-mark"
                 style={{
-                  backgroundColor: "#2d1616",
-                  borderColor: "#7a2727",
-                  color: "#f87171",
+                  backgroundColor: "var(--panel)",
+                  borderColor: "var(--critical)",
+                  color: "var(--critical)",
                 }}
               >
                 <AlertTriangle size={16} />
@@ -3215,8 +3215,8 @@ export default function Home() {
                   className="scan-another-btn"
                   style={{
                     backgroundColor: "transparent",
-                    border: "1px solid #333330",
-                    color: "#f4f2ec",
+                    border: "1px solid var(--line-subtle)",
+                    color: "var(--text)",
                   }}
                 >
                   <span>Scan another site</span>
@@ -3363,7 +3363,7 @@ export default function Home() {
                   tabIndex={0}
                 >
                   <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-[var(--surface-hover)] text-[#5fa37f] shrink-0">
+                    <div className="p-2 rounded-lg bg-[var(--surface-hover)] text-[var(--accent)] shrink-0">
                       <GitBranch size={16} />
                     </div>
                     <div>
@@ -3381,7 +3381,7 @@ export default function Home() {
                     onClick={() => setShowAttackChainModal(true)}
                     className="outline-action-btn inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <GitBranch size={15} className="text-[#5fa37f] shrink-0" />
+                    <GitBranch size={15} className="text-[var(--accent)] shrink-0" />
                     <span>Attack-Chain Engine</span>
                   </button>
                   <button
@@ -3389,7 +3389,7 @@ export default function Home() {
                     onClick={() => setShowRolesModal(true)}
                     className="outline-action-btn inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <Users size={15} className="text-[#5fa37f] shrink-0" />
+                    <Users size={15} className="text-[var(--accent)] shrink-0" />
                     <span>Four-Role Authorization Testing</span>
                   </button>
                 </div>
@@ -3403,9 +3403,9 @@ export default function Home() {
                   >
                     <span>How the AI found these</span>
                     {showHowAiFound ? (
-                      <ChevronDown size={16} className="text-[#aaa8a1]" />
+                      <ChevronDown size={16} className="text-[var(--muted)]" />
                     ) : (
-                      <ChevronRight size={16} className="text-[#aaa8a1]" />
+                      <ChevronRight size={16} className="text-[var(--muted)]" />
                     )}
                   </button>
 
@@ -3483,7 +3483,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => setGlobalChatHistory([])}
-                    className="text-[11px] text-[#85837c] hover:text-[#f4f2ec]"
+                    className="text-[11px] text-[var(--faint)] hover:text-[var(--text)]"
                   >
                     Clear chat
                   </button>
@@ -3497,7 +3497,7 @@ export default function Home() {
                     <div>{msg.content}</div>
 
                     {msg.role === "assistant" && msg.locationLabel && (
-                      <div className="mt-3 pt-2 border-t border-[#333330] text-xs text-[#aaa8a1] font-mono">
+                      <div className="mt-3 pt-2 border-t border-[var(--line-subtle)] text-xs text-[var(--muted)] font-mono">
                         Bug Location: {msg.locationLabel}
                       </div>
                     )}
@@ -3506,7 +3506,7 @@ export default function Home() {
                       msg.howToFix &&
                       msg.howToFix.length > 0 && (
                         <div className="mt-3">
-                          <div className="text-xs font-semibold text-[#f4f2ec] mb-1.5">
+                          <div className="text-xs font-semibold text-[var(--text)] mb-1.5">
                             How to fix it (Gemini Remediation Steps):
                           </div>
                           <ul className="fix-checklist">
@@ -3671,24 +3671,24 @@ export default function Home() {
       {showGitHubModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-xs">
           <div className="relative w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-xl bg-[var(--canvas)] border border-[var(--line)] text-[var(--text)] shadow-2xl p-6 text-left">
-            <div className="flex items-center justify-between pb-3 border-b border-[#333330]">
+            <div className="flex items-center justify-between pb-3 border-b border-[var(--line-subtle)]">
               <div className="flex items-center gap-2.5">
-                <GitBranch className="w-4 h-4 text-[#5fa37f]" />
-                <h3 className="text-sm font-semibold text-[#f4f2ec]">
+                <GitBranch className="w-4 h-4 text-[var(--accent)]" />
+                <h3 className="text-sm font-semibold text-[var(--text)]">
                   Link GitHub project &amp; AI Source Code Scan
                 </h3>
               </div>
               <button
                 type="button"
                 onClick={() => setShowGitHubModal(false)}
-                className="p-1 rounded-md text-[#aaa8a1] hover:text-[#f4f2ec] hover:bg-[#373733]"
+                className="p-1 rounded-md text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--surface-hover)]"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <div className="mt-3">
-              <label className="block text-xs text-[#aaa8a1] mb-1.5">
+              <label className="block text-xs text-[var(--muted)] mb-1.5">
                 Optional repository URL for runtime-to-source mapping
               </label>
               <input
@@ -3696,7 +3696,7 @@ export default function Home() {
                 value={githubRepo}
                 onChange={(e) => setGithubRepo(e.target.value)}
                 placeholder="https://github.com/juice-shop/juice-shop"
-                className="w-full px-3 py-2 rounded-lg bg-[#2d2d2a] border border-[#41413d] text-xs text-[#f4f2ec] placeholder-[#85837c] focus:outline-none focus:border-[#5fa37f] font-mono"
+                className="w-full px-3 py-2 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] text-xs text-[var(--text)] placeholder-[var(--faint)] focus:outline-none focus:border-[var(--accent)] font-mono"
               />
             </div>
 
@@ -3754,16 +3754,16 @@ export default function Home() {
       {showAuthModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
           <div className="relative w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-xl bg-[var(--canvas)] border border-[var(--line)] text-[var(--text)] shadow-2xl p-6 text-left">
-            <div className="flex items-center justify-between pb-4 border-b border-[#333330]">
+            <div className="flex items-center justify-between pb-4 border-b border-[var(--line-subtle)]">
               <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-lg bg-[#2d2d2a] border border-[#41413d] text-[#5fa37f]">
+                <div className="p-2 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] text-[var(--accent)]">
                   <Shield className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="text-sm font-semibold text-[#f4f2ec]">
+                  <h3 className="text-sm font-semibold text-[var(--text)]">
                     Target Website Authorization Review
                   </h3>
-                  <p className="text-xs text-[#aaa8a1]">
+                  <p className="text-xs text-[var(--muted)]">
                     Server-Side Authorized Scope &amp; Boundary Approval
                   </p>
                 </div>
@@ -3771,32 +3771,32 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setShowAuthModal(false)}
-                className="p-1 rounded-lg text-[#aaa8a1] hover:text-[#f4f2ec] hover:bg-[#373733]"
+                className="p-1 rounded-lg text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--surface-hover)]"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <div className="mt-4 p-3.5 rounded-lg bg-[#20201e] border border-[#41413d] space-y-2">
-              <div className="text-xs font-semibold text-[#d0cec8]">
+            <div className="mt-4 p-3.5 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] space-y-2">
+              <div className="text-xs font-semibold text-[var(--soft)]">
                 Target Parameters (Exact Scope Boundaries)
               </div>
               <div className="grid grid-cols-3 gap-2 text-xs font-mono">
                 <div>
-                  <div className="text-[10px] text-[#85837c]">EXACT HOST</div>
-                  <div className="text-[#5fa37f] truncate">
+                  <div className="text-[10px] text-[var(--faint)]">EXACT HOST</div>
+                  <div className="text-[var(--accent)] truncate">
                     {targetAuth?.hostname || parsedTarget.host || "localhost"}
                   </div>
                 </div>
                 <div>
-                  <div className="text-[10px] text-[#85837c]">SCHEME</div>
-                  <div className="text-[#f4f2ec]">
+                  <div className="text-[10px] text-[var(--faint)]">SCHEME</div>
+                  <div className="text-[var(--text)]">
                     {(parsedTarget.scheme || "http").toUpperCase()}
                   </div>
                 </div>
                 <div>
-                  <div className="text-[10px] text-[#85837c]">PORT</div>
-                  <div className="text-[#f4f2ec]">
+                  <div className="text-[10px] text-[var(--faint)]">PORT</div>
+                  <div className="text-[var(--text)]">
                     {parsedTarget.port || 3000}
                   </div>
                 </div>
@@ -3804,20 +3804,20 @@ export default function Home() {
             </div>
 
             <div className="mt-4">
-              <div className="p-3 rounded-lg bg-[#2d2d2a] border border-[#41413d] text-xs flex items-center justify-between">
+              <div className="p-3 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] text-xs flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   {targetAuth?.is_authorized ? (
-                    <CheckCircle2 className="w-4 h-4 text-[#5fa37f] shrink-0" />
+                    <CheckCircle2 className="w-4 h-4 text-[var(--accent)] shrink-0" />
                   ) : targetAuth?.status === "PENDING" ? (
                     <AlertTriangle className="w-4 h-4 text-[#c5aa54] shrink-0" />
                   ) : (
-                    <Lock className="w-4 h-4 text-[#aaa8a1] shrink-0" />
+                    <Lock className="w-4 h-4 text-[var(--muted)] shrink-0" />
                   )}
                   <div>
-                    <div className="font-semibold text-[#f4f2ec]">
+                    <div className="font-semibold text-[var(--text)]">
                       Status: {targetAuth?.status || "UNREGISTERED"}
                     </div>
-                    <div className="text-[11px] text-[#aaa8a1]">
+                    <div className="text-[11px] text-[var(--muted)]">
                       {targetAuth?.reason || "Target requires review and approval."}
                     </div>
                   </div>
@@ -3827,13 +3827,13 @@ export default function Home() {
 
             <div className="mt-4 space-y-3">
               <div>
-                <label className="block text-xs font-semibold text-[#d0cec8] mb-1">
+                <label className="block text-xs font-semibold text-[var(--soft)] mb-1">
                   Authorization Grounds / Basis
                 </label>
                 <select
                   value={authBasis}
                   onChange={(e) => setAuthBasis(e.target.value as AuthorizationBasis)}
-                  className="w-full px-3 py-2 rounded-lg bg-[#2d2d2a] border border-[#41413d] text-xs text-[#f4f2ec] focus:outline-none focus:border-[#5fa37f]"
+                  className="w-full px-3 py-2 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] text-xs text-[var(--text)] focus:outline-none focus:border-[var(--accent)]"
                 >
                   <option value="admin_approved">
                     Admin Approved — Explicit security administrator authorization
@@ -3851,7 +3851,7 @@ export default function Home() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-[#d0cec8] mb-1">
+                <label className="block text-xs font-semibold text-[var(--soft)] mb-1">
                   Permission Evidence / Reference
                 </label>
                 <input
@@ -3859,13 +3859,13 @@ export default function Home() {
                   value={permissionRef}
                   onChange={(e) => setPermissionRef(e.target.value)}
                   placeholder="Ticket #, SOW document ID, or Bug Bounty policy link"
-                  className="w-full px-3 py-2 rounded-lg bg-[#2d2d2a] border border-[#41413d] text-xs text-[#f4f2ec] placeholder-[#85837c] focus:outline-none focus:border-[#5fa37f] font-mono"
+                  className="w-full px-3 py-2 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] text-xs text-[var(--text)] placeholder-[var(--faint)] focus:outline-none focus:border-[var(--accent)] font-mono"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-xs font-semibold text-[#d0cec8] mb-1">
+                  <label className="block text-xs font-semibold text-[var(--soft)] mb-1">
                     Approver Identifier
                   </label>
                   <input
@@ -3873,11 +3873,11 @@ export default function Home() {
                     value={adminApprover}
                     onChange={(e) => setAdminApprover(e.target.value)}
                     placeholder="security_admin"
-                    className="w-full px-3 py-2 rounded-lg bg-[#2d2d2a] border border-[#41413d] text-xs text-[#f4f2ec] focus:outline-none focus:border-[#5fa37f] font-mono"
+                    className="w-full px-3 py-2 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] text-xs text-[var(--text)] focus:outline-none focus:border-[var(--accent)] font-mono"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-[#d0cec8] mb-1">
+                  <label className="block text-xs font-semibold text-[var(--soft)] mb-1">
                     Validity (Days)
                   </label>
                   <input
@@ -3886,13 +3886,13 @@ export default function Home() {
                     max="365"
                     value={approvalDays}
                     onChange={(e) => setApprovalDays(Number(e.target.value) || 30)}
-                    className="w-full px-3 py-2 rounded-lg bg-[#2d2d2a] border border-[#41413d] text-xs text-[#f4f2ec] focus:outline-none focus:border-[#5fa37f] font-mono"
+                    className="w-full px-3 py-2 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] text-xs text-[var(--text)] focus:outline-none focus:border-[var(--accent)] font-mono"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-[#d0cec8] mb-1">
+                <label className="block text-xs font-semibold text-[var(--soft)] mb-1">
                   Operator Notes (Optional)
                 </label>
                 <input
@@ -3900,17 +3900,17 @@ export default function Home() {
                   value={authNotes}
                   onChange={(e) => setAuthNotes(e.target.value)}
                   placeholder="Notes regarding scope constraints or testing window"
-                  className="w-full px-3 py-2 rounded-lg bg-[#2d2d2a] border border-[#41413d] text-xs text-[#f4f2ec] placeholder-[#85837c] focus:outline-none focus:border-[#5fa37f] font-mono"
+                  className="w-full px-3 py-2 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] text-xs text-[var(--text)] placeholder-[var(--faint)] focus:outline-none focus:border-[var(--accent)] font-mono"
                 />
               </div>
 
               {authBasis === "domain_ownership_challenge" && (
-                <div className="p-3 rounded-lg bg-[#20201e] border border-[#41413d] text-xs text-[#d0cec8] space-y-1.5">
+                <div className="p-3 rounded-lg bg-[var(--sidebar)] border border-[var(--line)] text-xs text-[var(--soft)] space-y-1.5">
                   <div className="font-semibold flex items-center gap-1.5">
-                    <KeyRound className="w-3.5 h-3.5 text-[#5fa37f]" />
+                    <KeyRound className="w-3.5 h-3.5 text-[var(--accent)]" />
                     Domain Challenge Verification
                   </div>
-                  <div className="p-1.5 rounded bg-black/40 font-mono text-[11px] text-[#5fa37f] break-all select-all">
+                  <div className="p-1.5 rounded bg-black/40 font-mono text-[11px] text-[var(--accent)] break-all select-all">
                     {targetAuth?.profile?.verification_token
                       ? targetAuth.profile.verification_token
                       : "Submit target first to generate verification challenge token"}
@@ -3920,7 +3920,7 @@ export default function Home() {
                       type="button"
                       disabled={isSubmittingAuth}
                       onClick={() => verifyDomainChallengeAction(targetAuth.profile!.id)}
-                      className="mt-2 px-3 py-1.5 rounded-lg bg-[#5fa37f] text-[#102218] font-medium text-xs"
+                      className="mt-2 px-3 py-1.5 rounded-lg bg-[var(--accent)] !text-white font-medium text-xs"
                     >
                       Verify Challenge Now
                     </button>
@@ -3929,17 +3929,17 @@ export default function Home() {
               )}
 
               {authActionMessage && (
-                <div className="p-2.5 rounded-lg bg-[#2d2d2a] border border-[#5fa37f]/40 text-[#d0cec8] text-xs">
+                <div className="p-2.5 rounded-lg bg-[var(--sidebar)] border border-[color-mix(in_srgb,var(--accent)_40%,transparent)] text-[var(--soft)] text-xs">
                   {authActionMessage}
                 </div>
               )}
 
-              <div className="pt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[#333330]">
+              <div className="pt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line-subtle)]">
                 <button
                   type="button"
                   disabled={isSubmittingAuth}
                   onClick={() => void submitTargetForAuth()}
-                  className="px-3.5 py-2 rounded-lg bg-[#2d2d2a] hover:bg-[#373733] border border-[#41413d] text-[#f4f2ec] font-medium text-xs"
+                  className="px-3.5 py-2 rounded-lg bg-[var(--sidebar)] hover:bg-[var(--surface-hover)] border border-[var(--line)] text-[var(--text)] font-medium text-xs"
                 >
                   {isSubmittingAuth ? "Submitting..." : "1. Submit for Approval"}
                 </button>
@@ -3951,7 +3951,7 @@ export default function Home() {
                         type="button"
                         disabled={isSubmittingAuth}
                         onClick={() => void approveTargetAction(targetAuth.profile!.id)}
-                        className="px-3.5 py-2 rounded-lg bg-[#5fa37f] text-[#102218] font-medium text-xs flex items-center gap-1.5"
+                        className="px-3.5 py-2 rounded-lg bg-[var(--accent)] !text-white font-medium text-xs flex items-center gap-1.5"
                       >
                         <CheckCircle2 className="w-3.5 h-3.5" />
                         2. Admin Approve
@@ -3964,7 +3964,7 @@ export default function Home() {
                         type="button"
                         disabled={isSubmittingAuth}
                         onClick={() => void revokeTargetAction(targetAuth.profile!.id)}
-                        className="px-3 py-2 rounded-lg bg-[#402424] border border-[#713e3e] text-[#f0b9b9] font-medium text-xs"
+                        className="px-3 py-2 rounded-lg bg-[var(--panel)] border border-[var(--critical)] text-[var(--critical)] font-medium text-xs"
                       >
                         Revoke
                       </button>
@@ -3978,7 +3978,7 @@ export default function Home() {
                         void startAssessment();
                       }
                     }}
-                    className="px-4 py-2 rounded-lg bg-[#5fa37f] text-[#102218] font-medium text-xs"
+                    className="px-4 py-2 rounded-lg bg-[var(--accent)] !text-white font-medium text-xs"
                   >
                     {targetAuth?.is_authorized ? "Start Scan" : "Done"}
                   </button>
