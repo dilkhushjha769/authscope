@@ -401,8 +401,12 @@ class AssessmentEngine:
                 )
                 session.status = "FAILED"
                 session.completed_at = datetime.now(timezone.utc)
-                session.summary_text = f"Target unreachable: {exc}"
-                session.failure_reason = f"Target unreachable: {exc}"
+                unreachable_hint = ""
+                if any(h in str(exc).lower() for h in ("localhost", "127.0.0.1")):
+                    unreachable_hint = (" This server cannot reach localhost on your computer."
+                                        " Scan a publicly reachable website that is on this server's allowlist.")
+                session.summary_text = f"Target unreachable: {exc}{unreachable_hint}"
+                session.failure_reason = f"Target unreachable: {exc}{unreachable_hint}"
                 self._skip_remaining_stages(session, "Skipped because target application is unreachable.")
                 yield self._emit_event(
                     session,
