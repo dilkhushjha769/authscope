@@ -227,36 +227,36 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed, 
 
   return (
     <div className="text-[var(--text)] space-y-4">
-      {/* Header & Controls Toolbar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[var(--line-subtle)] pb-3">
-        <div className="flex items-center gap-2.5">
+      {/* Aesthetic Header & Controls Toolbar (Never Wraps Title) */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-[var(--line-subtle)] pb-3">
+        <div className="flex items-center gap-2.5 min-w-0 shrink-0">
           <div className="p-2 bg-[var(--panel)] border border-[var(--line)] rounded-lg text-[#86efac]">
             <GitFork className="w-4 h-4" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <h3 className="serif-heading text-base text-[var(--text)]">
-                Attack-Chain Engine
+            <div className="flex items-center gap-2 flex-wrap">
+              <h3 className="font-semibold text-sm text-[var(--text)] whitespace-nowrap">
+                Attack Chain Paths
               </h3>
-              <span className="text-[11px] font-mono text-[var(--muted)] hidden sm:inline">
-                · {targetUrl}
+              <span className="text-[11px] font-mono text-[var(--muted)] px-2 py-0.5 rounded bg-[var(--sidebar)] border border-[var(--line)] truncate max-w-[240px]">
+                {targetUrl}
               </span>
             </div>
             <p className="text-[11px] text-[var(--muted)]">
-              Multi-step dependency discovery, parameter binding, and cross-role execution.
+              Multi-step dependency discovery and cross-role authorization paths.
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap shrink-0">
-          {/* Compact Tab Selector */}
+        <div className="flex items-center gap-2 shrink-0 self-start md:self-auto">
+          {/* Aesthetic Segmented Tabs */}
           <div className="flex bg-[var(--sidebar)] p-0.5 rounded-lg border border-[var(--line)] text-xs">
             <button
               type="button"
               onClick={() => setActiveTab("candidates")}
-              className={`px-2.5 py-1 rounded-md transition cursor-pointer text-xs ${
+              className={`px-2.5 py-1 rounded-md transition cursor-pointer text-xs font-medium ${
                 activeTab === "candidates"
-                  ? "bg-[var(--panel)] text-[#f4f2ec] font-medium border border-[var(--line)] shadow-xs"
+                  ? "bg-[var(--panel)] text-[#f4f2ec] border border-[#52524d] shadow-xs"
                   : "text-[#aaa8a1] hover:text-[#f4f2ec]"
               }`}
             >
@@ -265,9 +265,9 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed, 
             <button
               type="button"
               onClick={() => setActiveTab("graph")}
-              className={`px-2.5 py-1 rounded-md transition cursor-pointer text-xs ${
+              className={`px-2.5 py-1 rounded-md transition cursor-pointer text-xs font-medium ${
                 activeTab === "graph"
-                  ? "bg-[var(--panel)] text-[#f4f2ec] font-medium border border-[var(--line)] shadow-xs"
+                  ? "bg-[var(--panel)] text-[#f4f2ec] border border-[#52524d] shadow-xs"
                   : "text-[#aaa8a1] hover:text-[#f4f2ec]"
               }`}
             >
@@ -276,13 +276,13 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed, 
             <button
               type="button"
               onClick={() => setActiveTab("execution")}
-              className={`px-2.5 py-1 rounded-md transition cursor-pointer text-xs ${
+              className={`px-2.5 py-1 rounded-md transition cursor-pointer text-xs font-medium ${
                 activeTab === "execution"
-                  ? "bg-[var(--panel)] text-[#f4f2ec] font-medium border border-[var(--line)] shadow-xs"
+                  ? "bg-[var(--panel)] text-[#f4f2ec] border border-[#52524d] shadow-xs"
                   : "text-[#aaa8a1] hover:text-[#f4f2ec]"
               }`}
             >
-              Execution {executionResult ? "• 1" : ""}
+              Live Execution {executionResult ? "• 1" : ""}
             </button>
           </div>
 

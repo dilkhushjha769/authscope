@@ -634,7 +634,7 @@ export default function Home() {
   const [showGitHubModal, setShowGitHubModal] = useState<boolean>(false);
   const [showRolesModal, setShowRolesModal] = useState<boolean>(false);
   const [showAttackChainModal, setShowAttackChainModal] = useState<boolean>(false);
-  const [activeReportTab, setActiveReportTab] = useState<"bugs" | "attack_chains" | "roles">("bugs");
+  const [activeReportTab, setActiveReportTab] = useState<"bugs" | "attack_chains">("bugs");
 
   // Assessment lifecycle states
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
@@ -3248,18 +3248,7 @@ export default function Home() {
                   <span>Attack Chains</span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => setActiveReportTab("roles")}
-                  className={`px-3 py-1.5 rounded-md font-medium transition cursor-pointer flex items-center gap-1.5 ${
-                    activeReportTab === "roles"
-                      ? "bg-[#2d2d2a] text-[#f4f2ec] border border-[#5a5a55] shadow-xs"
-                      : "text-[#aaa8a1] hover:text-[#f4f2ec]"
-                  }`}
-                >
-                  <Users size={13} className={activeReportTab === "roles" ? "text-[#5fa37f]" : ""} />
-                  <span>Four-Role Status</span>
-                </button>
+
               </div>
 
               <div className="flex items-center gap-2">
@@ -3395,42 +3384,45 @@ export default function Home() {
 
 
 
-                {/* Filter Controls: Severity & Categories */}
-                <div className="filter-controls-container mb-6 flex flex-col gap-3">
-                  {/* Row 1: Severity Pills + View Toggle */}
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[11px] font-semibold uppercase tracking-wider text-[#85837c] mr-1">
-                        Severity:
-                      </span>
+                {/* Aesthetic Filter Controls: Severity & Categories (Image 1 Redesign) */}
+                <div className="mb-6 p-2.5 rounded-xl bg-[#20201e] border border-[#383835] flex flex-col gap-2.5">
+                  {/* Row 1: Segmented Severity Filter + Group by Category Toggle */}
+                  <div className="flex flex-wrap items-center justify-between gap-2.5">
+                    <div className="flex items-center bg-[#282826] p-0.5 rounded-lg border border-[#3e3e3a] text-xs">
                       {[
-                        { key: "ALL", label: "All", count: displayFindings.length },
-                        { key: "CRITICAL", label: "Critical", count: severityCounts.CRITICAL },
-                        { key: "HIGH", label: "High", count: severityCounts.HIGH },
-                        { key: "MEDIUM", label: "Medium", count: severityCounts.MEDIUM },
-                        { key: "LOW", label: "Low", count: severityCounts.LOW },
-                      ].map((pill) => (
-                        <button
-                          key={pill.key}
-                          type="button"
-                          onClick={() => setSeverityFilter(pill.key)}
-                          className={`filter-pill ${
-                            severityFilter === pill.key ? "active" : ""
-                          }`}
-                        >
-                          <span>{pill.label}</span>
-                          <span className="opacity-80">({pill.count})</span>
-                        </button>
-                      ))}
+                        { key: "ALL", label: "All", count: displayFindings.length, dot: null },
+                        { key: "CRITICAL", label: "Critical", count: severityCounts.CRITICAL, dot: "bg-[#d2675f]" },
+                        { key: "HIGH", label: "High", count: severityCounts.HIGH, dot: "bg-[#d89255]" },
+                        { key: "MEDIUM", label: "Medium", count: severityCounts.MEDIUM, dot: "bg-[#c5aa54]" },
+                        { key: "LOW", label: "Low", count: severityCounts.LOW, dot: "bg-[#5fa37f]" },
+                      ].map((item) => {
+                        const isActive = severityFilter === item.key;
+                        return (
+                          <button
+                            key={item.key}
+                            type="button"
+                            onClick={() => setSeverityFilter(item.key)}
+                            className={`px-2.5 py-1 rounded-md text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                              isActive
+                                ? "bg-[#333330] text-[#f4f2ec] border border-[#52524d] shadow-xs"
+                                : "text-[#aaa8a1] hover:text-[#f4f2ec] border border-transparent"
+                            }`}
+                          >
+                            {item.dot && <span className={`w-1.5 h-1.5 rounded-full ${item.dot}`} />}
+                            <span>{item.label}</span>
+                            <span className="text-[10px] font-mono opacity-60">({item.count})</span>
+                          </button>
+                        );
+                      })}
                     </div>
 
                     <button
                       type="button"
                       onClick={() => setGroupByCategory((prev) => !prev)}
-                      className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium transition cursor-pointer ${
                         groupByCategory
-                          ? "border-[#5fa37f] bg-[#5fa37f]/15 text-[#5fa37f]"
-                          : "border-[#41413d] bg-[#2d2d2a] text-[#aaa8a1] hover:text-[#f4f2ec]"
+                          ? "border-[#5fa37f] bg-[#5fa37f]/15 text-[#86efac]"
+                          : "border-[#3e3e3a] bg-[#282826] text-[#aaa8a1] hover:text-[#f4f2ec]"
                       }`}
                       title="Group findings into categorized sections"
                     >
@@ -3439,36 +3431,44 @@ export default function Home() {
                     </button>
                   </div>
 
-                  {/* Row 2: Category Filter Navigation Pills */}
+                  {/* Row 2: Aesthetic Horizontal Category Filter Chips */}
                   {uniqueCategories.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-[#333330]">
-                      <span className="text-[11px] font-semibold uppercase tracking-wider text-[#85837c] mr-1 flex items-center gap-1">
+                    <div className="flex items-center gap-1.5 pt-2 border-t border-[#2e2e2b] overflow-x-auto text-xs pb-0.5">
+                      <span className="text-[11px] font-medium text-[#85837c] shrink-0 flex items-center gap-1 mr-1">
                         <Tag size={11} className="text-[#5fa37f]" />
-                        Category:
+                        <span>Category:</span>
                       </span>
+
                       <button
                         type="button"
                         onClick={() => setCategoryFilter("ALL")}
-                        className={`filter-pill text-xs ${
-                          categoryFilter === "ALL" ? "active" : ""
+                        className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 cursor-pointer ${
+                          categoryFilter === "ALL"
+                            ? "bg-[#333330] text-[#86efac] border border-[#5fa37f]/50"
+                            : "bg-[#282826] text-[#aaa8a1] hover:text-[#f4f2ec] border border-[#3e3e3a]"
                         }`}
                       >
-                        <span>All Categories</span>
-                        <span className="opacity-80">({displayFindings.length})</span>
+                        All Categories ({displayFindings.length})
                       </button>
-                      {uniqueCategories.map((cat) => (
-                        <button
-                          key={cat}
-                          type="button"
-                          onClick={() => setCategoryFilter(categoryFilter === cat ? "ALL" : cat)}
-                          className={`filter-pill text-xs ${
-                            categoryFilter === cat ? "active" : ""
-                          }`}
-                        >
-                          <span>{cat}</span>
-                          <span className="opacity-80">({categoryCounts[cat]})</span>
-                        </button>
-                      ))}
+
+                      {uniqueCategories.map((cat) => {
+                        const isActive = categoryFilter === cat;
+                        return (
+                          <button
+                            key={cat}
+                            type="button"
+                            onClick={() => setCategoryFilter(isActive ? "ALL" : cat)}
+                            className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 cursor-pointer ${
+                              isActive
+                                ? "bg-[#333330] text-[#86efac] border border-[#5fa37f]/50"
+                                : "bg-[#282826] text-[#aaa8a1] hover:text-[#f4f2ec] border border-[#3e3e3a]"
+                            }`}
+                          >
+                            <span>{cat}</span>
+                            <span className="text-[10px] font-mono opacity-60 ml-1">({categoryCounts[cat]})</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -3686,12 +3686,7 @@ export default function Home() {
               </div>
             )}
 
-            {/* TAB 3: FOUR-ROLE TESTING */}
-            {status !== "failed" && activeReportTab === "roles" && (
-              <div className="p-4 sm:p-5 rounded-xl bg-[var(--panel)] border border-[var(--line)]">
-                <FourRoleConfigPanel />
-              </div>
-            )}
+
           </div>
         )}
 
