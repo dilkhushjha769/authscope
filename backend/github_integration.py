@@ -379,13 +379,28 @@ class GitHubAppService:
         event: Any,
     ) -> Dict[str, Any]:
         """Fetches bounded source blobs, runs static analysis, and adds advisory Gemini reviews."""
-        repo_info = await self._assert_repo_installed(github_user_id, installation_id, owner, repo)
-        token = await self.access_token(github_user_id)
+        if installation_id > 0 and github_user_id and not github_user_id.startswith("pub_") and not github_user_id.startswith("up_"):
+            repo_info = await self._assert_repo_installed(github_user_id, installation_id, owner, repo)
+            token = await self.access_token(github_user_id)
+        else:
+            repo_info = {"id": 1, "full_name": f"{owner}/{repo}"}
+            token = None
         event("activity", "repository_read", "Reading repository files...", {})
         commit_url = f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/commits/{quote(commit_sha, safe='')}"
-        commit_resp = await self._request("GET", commit_url, token=token)
-        commit_data = self._json(commit_resp)
-        tree_sha = (commit_data.get("tree") or {}).get("sha") if isinstance(commit_data, dict) else None
+        try:
+            commit_resp = await self._request("GET", commit_url, token=token)
+            commit_data = self._json(commit_resp)
+        except GitHubIntegrationError as e:
+            if e.status_code == 404:
+                alt_url = f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/commits/{quote(commit_sha, safe='')}"
+                commit_resp = await self._request("GET", alt_url, token=token)
+                commit_data = self._json(commit_resp)
+            else:
+                raise
+        tree_sha = (
+            (commit_data.get("tree") or {}).get("sha")
+            or (commit_data.get("commit") or {}).get("tree", {}).get("sha")
+        ) if isinstance(commit_data, dict) else None
         if not tree_sha:
             raise GitHubIntegrationError("GITHUB_API_ERROR", "GitHub did not return the selected commit tree.", 502)
         tree_url = f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/trees/{quote(str(tree_sha), safe='')}?recursive=1"

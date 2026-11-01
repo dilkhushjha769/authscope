@@ -15,6 +15,7 @@ import {
   Shield,
   Sparkles,
   Unplug,
+  Upload,
 } from "lucide-react";
 
 export interface GitHubAccount {
@@ -140,10 +141,12 @@ async function readJson<T>(response: Response, fallback: string): Promise<T> {
 
 export function GitHubCodeScanPanel({
   apiBaseUrl,
+  initialRepoUrl,
   onScanStarted,
   onScanSelected,
 }: {
   apiBaseUrl: string;
+  initialRepoUrl?: string;
   onScanStarted?: (info: {
     scanId: string;
     owner: string;
@@ -172,6 +175,8 @@ export function GitHubCodeScanPanel({
   const [notice, setNotice] = useState<string | null>(null);
   const streamRef = useRef<EventSource | null>(null);
   const [copiedFinding, setCopiedFinding] = useState<string | null>(null);
+  const [publicRepoUrl, setPublicRepoUrl] = useState<string>(initialRepoUrl || "https://github.com/juice-shop/juice-shop");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Per-finding Q&A (Gemini API #1) and on-demand Code Analysis (Gemini API #2)
   const [qaInput, setQaInput] = useState<Record<string, string>>({});
@@ -273,12 +278,8 @@ export function GitHubCodeScanPanel({
           const running = scans.find((scan) => scan.status === "RUNNING");
           if (running) setActiveScanId(running.id);
         }
-      } catch (loadError) {
-        setError(
-          loadError instanceof Error
-            ? loadError.message
-            : "Could not load GitHub state."
-        );
+      } catch {
+        setStatus({ connected: false, account: null, installations: [] });
       }
     })();
     return () => streamRef.current?.close();
@@ -446,6 +447,87 @@ export function GitHubCodeScanPanel({
     };
     return () => stream.close();
   }, [activeScanId, api, loadHistory]);
+
+  const startPublicScan = async (overrideUrl?: string) => {
+    const rawUrl = (overrideUrl || publicRepoUrl).trim();
+    if (!rawUrl) {
+      setError("Enter a GitHub repository URL to scan.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(api("/api/github/public-scan"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ repo_url: rawUrl }),
+      });
+      const result = await readJson<{
+        scan_id: string;
+        repository: string;
+        branch: string;
+        commit_sha?: string;
+      }>(response, "Could not start public repository scan.");
+      setActiveScanId(result.scan_id);
+      if (onScanStarted) {
+        const parts = result.repository.split("/");
+        onScanStarted({
+          scanId: result.scan_id,
+          owner: parts[0] || "repo",
+          repository: parts[1] || result.repository,
+          branch: result.branch || "main",
+          commitSha: result.commit_sha,
+        });
+      }
+      void loadHistory();
+    } catch (scanErr) {
+      setError(scanErr instanceof Error ? scanErr.message : "Could not start public repository scan.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleZipUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith(".zip")) {
+      setError("Please select a .zip project archive.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch(api("/api/github/upload-scan"), {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+      const result = await readJson<{
+        scan_id: string;
+        repository: string;
+        branch: string;
+        commit_sha?: string;
+      }>(response, "Could not upload and scan project archive.");
+      setActiveScanId(result.scan_id);
+      if (onScanStarted) {
+        onScanStarted({
+          scanId: result.scan_id,
+          owner: "local",
+          repository: file.name.replace(/\.zip$/i, ""),
+          branch: "uploaded",
+          commitSha: "LOCAL",
+        });
+      }
+      void loadHistory();
+    } catch (upErr) {
+      setError(upErr instanceof Error ? upErr.message : "Could not scan project archive.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const connect = () => {
     window.location.href = api("/api/github/connect");
@@ -707,19 +789,68 @@ export function GitHubCodeScanPanel({
           )}
         </div>
       ) : (
-        <div className="flex flex-wrap items-center gap-3">
-          <button
-            type="button"
-            onClick={connect}
-            disabled={loading}
-            className="inline-flex items-center gap-2 rounded-lg bg-[#5fa37f] px-3.5 py-2 text-xs font-semibold text-[#102218] hover:brightness-105 disabled:opacity-50"
-          >
-            <GitBranch className="h-4 w-4" />
-            Connect GitHub
-          </button>
-          <p className="text-[11px] text-[#85837c]">
-            GitHub credentials stay on the backend. AuthScope never asks for a password or personal access token.
-          </p>
+        <div className="space-y-4">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--surface)] p-3.5">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-medium text-[#f4f2ec] flex items-center gap-1.5">
+                <Sparkles size={14} className="text-[#5fa37f]" />
+                Scan Public GitHub Repository (Instant · No Sign-in Required)
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={publicRepoUrl}
+                onChange={(e) => setPublicRepoUrl(e.target.value)}
+                placeholder="https://github.com/juice-shop/juice-shop"
+                className="flex-1 rounded-md border border-[#41413d] bg-[#20201e] px-3 py-2 text-xs text-[#f4f2ec] placeholder-[#85837c] font-mono focus:border-[#5fa37f] focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => void startPublicScan()}
+                disabled={loading || !publicRepoUrl.trim()}
+                className="inline-flex items-center gap-1.5 rounded-md bg-[#5fa37f] px-3.5 py-2 text-xs font-semibold text-[#102218] hover:brightness-105 disabled:opacity-50"
+              >
+                {loading ? <Loader2 size={13} className="animate-spin" /> : <GitBranch size={13} />}
+                <span>Scan Repository</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-[var(--line)]">
+            <div className="flex items-center gap-2">
+              <input
+                type="file"
+                ref={fileInputRef}
+                accept=".zip"
+                className="hidden"
+                onChange={(e) => void handleZipUpload(e)}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={loading}
+                className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-[#20201e] px-3 py-1.5 text-xs text-[#d0cec8] hover:bg-[#2d2d2a] hover:text-[#f4f2ec] disabled:opacity-50"
+              >
+                <Upload size={13} />
+                <span>Upload Project (.ZIP)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={connect}
+                disabled={loading}
+                className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line)] bg-[#20201e] px-3 py-1.5 text-xs text-[#d0cec8] hover:bg-[#2d2d2a] hover:text-[#f4f2ec] disabled:opacity-50"
+              >
+                <GitBranch size={13} />
+                <span>Connect GitHub (OAuth)</span>
+              </button>
+            </div>
+
+            <p className="text-[11px] text-[#85837c]">
+              Public repos &amp; uploads scan instantly without authentication.
+            </p>
+          </div>
         </div>
       )}
 

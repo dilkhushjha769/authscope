@@ -132,18 +132,28 @@ class GitHubRepository:
         scan["findings"] = json.loads(scan.pop("findings_json") or "[]")
         return scan
 
-    def get_scan(self, scan_id: str, github_user_id: str) -> Optional[Dict[str, Any]]:
+    def get_scan(self, scan_id: str, github_user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self.database.session_scope() as conn:
-            row = conn.execute(
-                "SELECT * FROM github_scans WHERE id = ? AND github_user_id = ?", (scan_id, github_user_id)
-            ).fetchone()
+            if github_user_id:
+                row = conn.execute(
+                    "SELECT * FROM github_scans WHERE id = ? AND github_user_id = ?", (scan_id, github_user_id)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM github_scans WHERE id = ?", (scan_id,)
+                ).fetchone()
         return self._scan_dict(row) if row else None
 
-    def list_scans(self, github_user_id: str) -> List[Dict[str, Any]]:
+    def list_scans(self, github_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self.database.session_scope() as conn:
-            rows = conn.execute(
-                "SELECT * FROM github_scans WHERE github_user_id = ? ORDER BY created_at DESC", (github_user_id,)
-            ).fetchall()
+            if github_user_id:
+                rows = conn.execute(
+                    "SELECT * FROM github_scans WHERE github_user_id = ? ORDER BY created_at DESC", (github_user_id,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM github_scans ORDER BY created_at DESC LIMIT 50"
+                ).fetchall()
         return [self._scan_dict(row) for row in rows]
 
     def has_running_scan(self, github_user_id: str) -> bool:
@@ -173,7 +183,7 @@ class GitHubRepository:
     def update_scan(
         self,
         scan_id: str,
-        github_user_id: str,
+        github_user_id: Optional[str],
         status: str,
         findings: Optional[List[Dict[str, Any]]] = None,
         languages: Optional[Dict[str, int]] = None,
@@ -188,10 +198,15 @@ class GitHubRepository:
         if languages is not None:
             updates.append("languages_json = ?")
             values.append(json.dumps(languages))
-        values.extend([scan_id, github_user_id])
+        if github_user_id:
+            values.extend([scan_id, github_user_id])
+            where = "id = ? AND github_user_id = ?"
+        else:
+            values.append(scan_id)
+            where = "id = ?"
         with self.database.session_scope() as conn:
             cursor = conn.execute(
-                f"UPDATE github_scans SET {', '.join(updates)} WHERE id = ? AND github_user_id = ?", tuple(values)
+                f"UPDATE github_scans SET {', '.join(updates)} WHERE {where}", tuple(values)
             )
         return cursor.rowcount == 1
 

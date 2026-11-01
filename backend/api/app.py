@@ -23,7 +23,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -2336,8 +2336,18 @@ def _github_user_id(request: Request) -> str:
 
 def _require_frontend_origin(request: Request) -> None:
     origin = (request.headers.get("origin") or "").rstrip("/")
-    expected = settings.github_frontend_url.rstrip("/")
-    if not origin or origin != expected:
+    allowed = {
+        settings.github_frontend_url.rstrip("/"),
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    }
+    if isinstance(settings.cors_origins, list):
+        allowed.update(o.rstrip("/") for o in settings.cors_origins)
+    elif isinstance(settings.cors_origins, str):
+        allowed.update(o.strip().rstrip("/") for o in settings.cors_origins.split(",") if o.strip())
+    if origin and origin not in allowed:
         raise HTTPException(status_code=403, detail={"code": "CSRF_REJECTED", "message": "Request origin was not accepted."})
 
 
@@ -2349,8 +2359,15 @@ def _raise_github_error(exc: GitHubIntegrationError) -> None:
     raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
-def _github_redirect(status_value: str) -> RedirectResponse:
-    return RedirectResponse(f"{settings.github_frontend_url.rstrip('/')}/?github_status={quote(status_value)}", status_code=303)
+def _github_redirect(status_value: str, request: Optional[Request] = None) -> RedirectResponse:
+    target_base = settings.github_frontend_url.rstrip("/")
+    if request:
+        ref = (request.headers.get("referer") or request.headers.get("origin") or "").rstrip("/")
+        if ref.startswith("http://localhost:3000") or ref.startswith("http://127.0.0.1:3000"):
+            target_base = "http://localhost:3000"
+        elif ref.startswith("http://localhost:3001") or ref.startswith("http://127.0.0.1:3001"):
+            target_base = "http://localhost:3001"
+    return RedirectResponse(f"{target_base}/?github_status={quote(status_value)}", status_code=303)
 
 
 @app.get("/api/github/connect")
@@ -2644,15 +2661,198 @@ async def github_start_scan(payload: GitHubScanRequest, request: Request) -> Dic
     return {"scan_id": scan_id, "status": "RUNNING", "repository": repo_info["full_name"], "branch": payload.branch, "commit_sha": branch["commit_sha"]}
 
 
+class PublicGitHubScanRequest(BaseModel):
+    repo_url: str = Field(description="Public GitHub repository URL (e.g. https://github.com/juice-shop/juice-shop)")
+    branch: Optional[str] = Field(default=None, description="Branch to scan (optional)")
+
+
+def ensure_guest_connection(repository: GitHubRepository, user_id: str, login: str = "guest") -> str:
+    with repository.database.session_scope() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO github_connections
+               (github_user_id, login, avatar_url, encrypted_credentials, expires_at, updated_at)
+               VALUES (?, ?, '', '', NULL, ?)""",
+            (user_id, login, datetime.now(timezone.utc).isoformat())
+        )
+    return user_id
+
+
+def parse_github_repo_url(url: str) -> Tuple[str, str]:
+    clean = url.strip().rstrip("/")
+    if "github.com/" in clean:
+        parts = clean.split("github.com/")[1].split("/")
+        if len(parts) >= 2:
+            return parts[0], parts[1].replace(".git", "")
+    elif "/" in clean and not clean.startswith("http"):
+        parts = clean.split("/")
+        if len(parts) == 2:
+            return parts[0], parts[1].replace(".git", "")
+    raise HTTPException(status_code=400, detail={"code": "INVALID_GITHUB_URL", "message": "Provide a valid GitHub repository URL, e.g., https://github.com/juice-shop/juice-shop"})
+
+
+@app.post("/api/github/public-scan", status_code=status.HTTP_202_ACCEPTED)
+async def github_start_public_scan(payload: PublicGitHubScanRequest, request: Request) -> Dict[str, Any]:
+    _require_frontend_origin(request)
+    owner, repo = parse_github_repo_url(payload.repo_url)
+    service = _github_service()
+    github_repository = _github_repository()
+
+    branch = (payload.branch or "").strip()
+    commit_sha = ""
+    try:
+        if not branch:
+            repo_meta_resp = await service._request("GET", f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}")
+            repo_meta = service._json(repo_meta_resp)
+            branch = str(repo_meta.get("default_branch") or "main")
+        branch_resp = await service._request("GET", f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/commits/{quote(branch, safe='')}")
+        branch_data = service._json(branch_resp)
+        commit_sha = str(branch_data.get("sha") or "")
+    except Exception as exc:
+        logger.warning(f"Could not resolve public branch head via GitHub API: {exc}")
+        commit_sha = commit_sha or "HEAD"
+        branch = branch or "main"
+
+    scan_id = f"gscan_pub_{uuid.uuid4().hex}"
+    user_id = f"pub_{uuid.uuid4().hex[:12]}"
+    ensure_guest_connection(github_repository, user_id, f"guest_{owner}")
+    scan = {
+        "id": scan_id, "github_user_id": user_id, "installation_id": 0,
+        "repository_id": 0, "owner": owner, "repository": repo,
+        "branch": branch, "commit_sha": commit_sha or "HEAD", "status": "RUNNING",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    github_repository.create_scan(scan)
+    github_repository.save_scan_event(
+        scan_id, "activity", "queued",
+        f"Queued public repository '{owner}/{repo}' (branch '{branch}') for security source scan.",
+        {"commit_sha": commit_sha}
+    )
+    task = asyncio.create_task(_run_github_scan(scan))
+    setattr(task, "_authscope_scan_id", scan_id)
+    _github_background_tasks.add(task)
+    task.add_done_callback(_github_background_tasks.discard)
+    return {"scan_id": scan_id, "status": "RUNNING", "repository": f"{owner}/{repo}", "branch": branch, "commit_sha": commit_sha}
+
+
+async def _run_zip_upload_scan(scan_id: str, user_id: str, project_name: str, zip_bytes: bytes) -> None:
+    import zipfile, io, tempfile, shutil
+    from backend.scanner.source_analyzer import SourceAnalyzer
+    from backend.utils.helpers import redact_sensitive_text
+
+    repository = _github_repository()
+    def event(event_type: str, stage: str, message: str, metadata: Dict[str, Any]) -> None:
+        repository.save_scan_event(scan_id, event_type, stage, redact_sensitive_text(message), metadata)
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="authscope-zip-"))
+    try:
+        event("activity", "queued", f"Unpacking uploaded project '{project_name}' archive...", {})
+        extracted_files = 0
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
+            for member in z.infolist():
+                if member.is_dir() or member.filename.startswith(("/", "\\")) or ".." in member.filename:
+                    continue
+                dest = temp_dir.joinpath(member.filename)
+                if not dest.resolve().is_relative_to(temp_dir.resolve()):
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(member) as src, open(dest, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                extracted_files += 1
+
+        event("activity", "file_inspection", f"Inspected {extracted_files} project files. Running AST & security rules...", {"files": extracted_files})
+        analyzer = SourceAnalyzer()
+        report = await asyncio.to_thread(analyzer.analyze_repository, temp_dir, True, scan_id)
+
+        sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+        sorted_findings = sorted(
+            report.findings,
+            key=lambda f: sev_rank.get(str(getattr(f.severity, "value", f.severity)).upper(), 0),
+            reverse=True,
+        )
+
+        event("activity", "ai_review", f"Discovered {len(sorted_findings)} issues across {len(report.discovery.discovered_files)} files. Generating Gemini reviews...", {"findings": len(sorted_findings)})
+        service = _github_service()
+
+        async def build_item(idx: int, f: Any) -> Dict[str, Any]:
+            item = f.model_dump(mode="json")
+            item["source_type"] = "SOURCE_CODE_FINDING"
+            item["classification"] = f.classification.value
+            item["runtime_status"] = "NOT_TESTED"
+            item["repository"] = f"local/{project_name}"
+            item["branch"] = "uploaded"
+            item["commit_sha"] = "LOCAL"
+            item["github_url"] = f"local://{f.file_path}#L{f.start_line}-L{f.end_line}"
+            if idx < 6:
+                try:
+                    item["ai_review"] = await service._review_source_finding(f)
+                except Exception:
+                    item["ai_review"] = {"status": "available"}
+            else:
+                item["ai_review"] = {"status": "available"}
+            return item
+
+        serialized_findings = list(await asyncio.gather(*(build_item(i, f) for i, f in enumerate(sorted_findings))))
+        repository.update_scan(
+            scan_id, user_id, "COMPLETED",
+            findings=serialized_findings,
+            languages=report.discovery.languages_summary,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        event("done", "completed", "Source security scan completed successfully.", {"findings": len(serialized_findings)})
+    except Exception as exc:
+        logger.error(f"Zip upload scan failed: {exc}", exc_info=True)
+        repository.update_scan(scan_id, user_id, "FAILED", error_code="SCAN_FAILED", completed_at=datetime.now(timezone.utc).isoformat())
+        event("error", "failed", f"Source scan failed: {exc}", {"code": "SCAN_FAILED"})
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.post("/api/github/upload-scan", status_code=status.HTTP_202_ACCEPTED)
+async def github_upload_scan(file: UploadFile = File(...), request: Request = None) -> Dict[str, Any]:
+    if request:
+        _require_frontend_origin(request)
+    fname = (file.filename or "").lower()
+    if not fname.endswith(".zip"):
+        raise HTTPException(status_code=400, detail={"code": "INVALID_ARCHIVE", "message": "Only .zip project archives are supported."})
+    content = await file.read()
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail={"code": "FILE_TOO_LARGE", "message": "Project archive exceeds 50MB limit."})
+    scan_id = f"gscan_up_{uuid.uuid4().hex}"
+    user_id = f"up_{uuid.uuid4().hex[:12]}"
+    github_repository = _github_repository()
+    ensure_guest_connection(github_repository, user_id, "guest_upload")
+    project_name = Path(file.filename).stem or "uploaded_project"
+    scan = {
+        "id": scan_id, "github_user_id": user_id, "installation_id": 0,
+        "repository_id": 0, "owner": "local", "repository": project_name,
+        "branch": "uploaded", "commit_sha": "LOCAL", "status": "RUNNING",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    github_repository = _github_repository()
+    github_repository.create_scan(scan)
+    task = asyncio.create_task(_run_zip_upload_scan(scan_id, user_id, project_name, content))
+    setattr(task, "_authscope_scan_id", scan_id)
+    _github_background_tasks.add(task)
+    task.add_done_callback(_github_background_tasks.discard)
+    return {"scan_id": scan_id, "status": "RUNNING", "repository": f"local/{project_name}", "branch": "uploaded", "commit_sha": "LOCAL"}
+
+
 @app.get("/api/github/scans")
 async def github_scan_history(request: Request) -> Dict[str, Any]:
-    user_id = _github_user_id(request)
-    return {"scans": _github_repository().list_scans(user_id)}
+    try:
+        user_id = _github_user_id(request)
+        return {"scans": _github_repository().list_scans(user_id)}
+    except HTTPException:
+        return {"scans": _github_repository().list_scans(None)}
 
 
 @app.get("/api/github/scans/{scan_id}")
 async def github_scan_detail(scan_id: str, request: Request) -> Dict[str, Any]:
-    user_id = _github_user_id(request)
+    user_id = None
+    try:
+        user_id = _github_user_id(request)
+    except HTTPException:
+        pass
     scan = _github_repository().get_scan(scan_id, user_id)
     if not scan:
         raise HTTPException(status_code=404, detail={"code": "SCAN_NOT_FOUND", "message": "Source scan not found."})
@@ -2661,7 +2861,11 @@ async def github_scan_detail(scan_id: str, request: Request) -> Dict[str, Any]:
 
 @app.get("/api/github/scans/{scan_id}/stream")
 async def github_scan_stream(scan_id: str, request: Request) -> StreamingResponse:
-    user_id = _github_user_id(request)
+    user_id = None
+    try:
+        user_id = _github_user_id(request)
+    except HTTPException:
+        pass
     if not _github_repository().get_scan(scan_id, user_id):
         raise HTTPException(status_code=404, detail={"code": "SCAN_NOT_FOUND", "message": "Source scan not found."})
     try:

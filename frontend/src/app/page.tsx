@@ -3503,6 +3503,7 @@ export default function Home() {
 
             <GitHubCodeScanPanel
               apiBaseUrl={API_BASE_URL}
+              initialRepoUrl={githubRepo}
               onScanStarted={startGitHubDashboardScan}
               onScanSelected={loadCompletedGitHubScanIntoDashboard}
             />
