@@ -72,10 +72,13 @@ class FindingRepository:
 
         with self.db.get_connection() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT status FROM scan_sessions WHERE id = ?", (session.id,))
+            cur.execute("SELECT status, completed_at FROM scan_sessions WHERE id = ?", (session.id,))
             existing = cur.fetchone()
             if not allow_reset and existing and existing["status"] in ("CANCELLED", "COMPLETED", "FAILED") and session.status in ("RUNNING", "PENDING", "CREATED", "QUEUED"):
                 session.status = existing["status"]
+                if session.completed_at is None and existing["completed_at"]:
+                    session.completed_at = _iso_to_dt(existing["completed_at"])
+                    completed_str = existing["completed_at"]
 
             conn.execute(
                 """
