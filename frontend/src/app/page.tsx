@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { FourRoleConfigPanel } from "@/components/FourRoleConfigPanel";
 import { AttackChainPanel } from "@/components/AttackChainPanel";
+import { RoleMatrixTable } from "@/components/RoleMatrixTable";
 import {
   AIProviderInfo,
   AssessmentEventItem,
@@ -3488,6 +3489,11 @@ export default function Home() {
                       </div>
                     </div>
                   )}
+                </div>
+
+                {/* Autonomous Multi-Endpoint Attack-Chain Section */}
+                <div className="mt-8 mb-6">
+                  <RoleMatrixTable assessmentId={assessmentId || activePastScanId || "preset-juice-shop"} />
                 </div>
 
                 {/* Autonomous Multi-Endpoint Attack-Chain Section */}
