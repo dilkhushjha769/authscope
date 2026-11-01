@@ -3605,7 +3605,7 @@ def configure_role(req: ConfigureRoleRequest) -> FourRolesStatusResponse:
 
 
 def _format_endpoints_for_planner(endpoints: List[Any]) -> List[Dict[str, Any]]:
-    formatted = []
+    formatted: List[Dict[str, Any]] = []
     for ep in endpoints:
         if hasattr(ep, "model_dump"):
             d = ep.model_dump()
@@ -3614,16 +3614,8 @@ def _format_endpoints_for_planner(endpoints: List[Any]) -> List[Dict[str, Any]]:
         else:
             d = {"path": getattr(ep, "path", ""), "method": getattr(ep, "method", "GET")}
         
-        # If output_parameters is not explicitly set on stored endpoint records,
-        # detect if it is a list/collection endpoint that exposes identifiers
-        if not d.get("output_parameters"):
-            category = str(d.get("category", "")).upper()
-            path = str(d.get("path", ""))
-            if category in ("RESOURCE_LIST", "USER_COLLECTION") or (
-                d.get("method") == "GET" and "{" not in path and len(path.strip("/").split("/")) >= 2
-            ):
-                d["output_parameters"] = ["id"]
-                d["resource_identifier_name"] = "id"
+        # Preserve only observed discovery metadata. Do not invent response IDs
+        # from route shape or endpoint names; uncertain dependencies stay unresolved.
         formatted.append(d)
     return formatted
 
