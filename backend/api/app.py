@@ -78,7 +78,23 @@ from backend.retesting.retest_engine import RetestEngine
 from backend.api.adapters import AssessmentPipelineRequest, ToolRegistryAdapter, MemoryManager
 from backend.core.target_registry import TargetRegistry, TargetSubmissionPayload
 from backend.scanner.request_executor import RequestExecutor
-from backend.scanner.response_analyzer import AccessVerdict
+from backend.core.session_manager import Role, SessionManager, AuthCredentials
+from backend.agent.attack_chain import (
+    AttackChainPlanner,
+    AttackChainCandidate,
+    AttackChainStep,
+    EndpointRelationshipGraph,
+    AttackChainPlan,
+)
+from backend.scanner.attack_chain_executor import (
+    AttackChainExecutor,
+    AttackChainValidator,
+    ChainExecutionResult,
+    ChainExecutionStatus,
+    StepExecutionStatus,
+)
+from backend.analysis.evidence_validator import EvidenceValidator
+from backend.scanner.response_analyzer import AccessVerdict, ResponseAnalyzer
 from backend.storage.database import DatabaseManager
 from backend.storage.finding_repository import FindingRepository
 from backend.storage.github_repository import GitHubRepository
@@ -883,7 +899,7 @@ class AssessmentTaskManager:
 
         await asyncio.sleep(0.05)
         await asyncio.sleep(0.05)
-        engine = AssessmentEngine(repository=bound_repo, scope_guard=scope_guard)  # type: ignore[arg-type]
+        engine = AssessmentEngine(repository=bound_repo, scope_guard=scope_guard, session_manager=_get_active_session_manager())  # type: ignore[arg-type]
         gen = engine.stream_assessment(target_url=target_url, scan_id=scan_id, cancel_token=token)
 
         async def _execute_steps() -> None:
@@ -1158,6 +1174,61 @@ app = FastAPI(
 app.state.scope_guard = None
 app.state.target_profiles = dict(DEFAULT_TARGET_PROFILES)
 app.state.repository = None
+app.state.session_manager = None
+
+_active_session_manager: Optional[SessionManager] = None
+
+
+def _get_active_session_manager() -> SessionManager:
+    """Returns the singleton active SessionManager with multi-role state."""
+    global _active_session_manager
+    custom_sm = getattr(app.state, 'session_manager', None)
+    if isinstance(custom_sm, SessionManager):
+        return custom_sm
+    if _active_session_manager is None:
+        _active_session_manager = SessionManager(load_from_env=True)
+    return _active_session_manager
+
+
+class RoleSessionStatus(BaseModel):
+    role: str
+    configured: bool
+    authenticated: bool
+    user_id: Optional[str] = None
+    token_preview: Optional[str] = None
+    owned_resources_count: int = 0
+    owned_resources: Dict[str, List[str]] = Field(default_factory=dict)
+    status: str
+    description: str
+
+
+class FourRolesStatusResponse(BaseModel):
+    roles: Dict[str, RoleSessionStatus]
+    multi_role_ready: bool
+    four_role_ready: bool
+    anonymous_baseline_ready: bool
+    summary: str
+
+
+class ConfigureRoleRequest(BaseModel):
+    role: str
+    token: Optional[str] = None
+    user_id: Optional[str] = None
+    owned_resources: Optional[Dict[str, str]] = None
+    custom_headers: Optional[Dict[str, str]] = None
+
+
+class PlanAttackChainsRequest(BaseModel):
+    max_steps: int = Field(default=5, ge=2, le=5)
+    max_candidates: int = Field(default=25, ge=1, le=50)
+
+
+class ExecuteAttackChainRequest(BaseModel):
+    candidate_id: Optional[str] = None
+    chain: Optional[Dict[str, Any]] = None
+    role_assignments: Optional[Dict[str, str]] = None
+    save_finding: bool = True
+
 
 
 def _get_repository() -> FindingRepository:
@@ -3429,6 +3500,317 @@ def list_assessments(limit: int = Query(default=10, ge=1, le=50)) -> List[Dict[s
     repo = _get_repository()
     sessions = repo.list_scan_sessions(limit=limit)
     return [s.model_dump(mode="json") for s in sessions]
+
+
+# ==============================================================================
+# Four-Role Authorization Testing & Multi-Endpoint Attack-Chain Endpoints
+# ==============================================================================
+
+@app.get("/api/roles", response_model=FourRolesStatusResponse)
+def get_roles_status() -> FourRolesStatusResponse:
+    """Returns readiness and authentication status for all 4 testing roles (Anonymous, User A, User B, Admin)."""
+    sm = _get_active_session_manager()
+    cred_report = sm.validate_configured_credentials()
+
+    role_descs = {
+        Role.ANONYMOUS.value: "Unauthenticated baseline requests without session credentials.",
+        Role.USER_A.value: "Authenticated resource owner establishing baseline legitimate access.",
+        Role.USER_B.value: "Separate authenticated user testing horizontal cross-tenant access (BOLA/IDOR).",
+        Role.ADMIN.value: "Authenticated administrator testing vertical privilege boundaries (BFLA).",
+    }
+
+    roles_status: Dict[str, RoleSessionStatus] = {}
+    for role_enum in (Role.ANONYMOUS, Role.USER_A, Role.USER_B, Role.ADMIN):
+        r_val = role_enum.value
+        sess = sm.get_session(role_enum)
+        is_auth = sm.is_authenticated(role_enum)
+
+        token = sess.token
+        masked_token = None
+        if token:
+            masked_token = f"{token[:6]}...{token[-4:]}" if len(token) > 12 else "••••••••"
+
+        owned_res = {k: sorted(list(v)) for k, v in sess.owned_resources.items()}
+        owned_count = sum(len(v) for v in sess.owned_resources.values())
+
+        if role_enum == Role.ANONYMOUS:
+            st = "ANONYMOUS_BASELINE"
+        elif is_auth:
+            st = "AUTHENTICATED"
+        elif token:
+            st = "CONFIGURED"
+        else:
+            st = "NOT_CONFIGURED"
+
+        roles_status[r_val] = RoleSessionStatus(
+            role=r_val,
+            configured=bool(token) or role_enum == Role.ANONYMOUS,
+            authenticated=is_auth,
+            user_id=sess.user_id,
+            token_preview=masked_token,
+            owned_resources_count=owned_count,
+            owned_resources=owned_res,
+            status=st,
+            description=role_descs.get(r_val, ""),
+        )
+
+    summary_parts = []
+    if roles_status["user_a"].authenticated and roles_status["user_b"].authenticated:
+        summary_parts.append("User A & User B ready for BOLA/IDOR differential testing.")
+    elif roles_status["user_a"].authenticated:
+        summary_parts.append("User A authenticated; User B unauthenticated.")
+    else:
+        summary_parts.append("User A & User B credentials not configured.")
+
+    if roles_status["admin"].authenticated:
+        summary_parts.append("Admin ready for BFLA testing.")
+    else:
+        summary_parts.append("Admin role not configured.")
+
+    return FourRolesStatusResponse(
+        roles=roles_status,
+        multi_role_ready=cred_report["multi_role_ready"],
+        four_role_ready=cred_report["four_role_ready"],
+        anonymous_baseline_ready=True,
+        summary=" ".join(summary_parts),
+    )
+
+
+@app.post("/api/roles/configure", response_model=FourRolesStatusResponse)
+def configure_role(req: ConfigureRoleRequest) -> FourRolesStatusResponse:
+    """Configures session credentials, tokens, or resource ownership for a testing role."""
+    sm = _get_active_session_manager()
+    role_str = req.role.strip().lower()
+
+    try:
+        role_enum = Role(role_str)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role '{req.role}'. Permitted roles: {[r.value for r in Role]}.",
+        )
+
+    if req.token:
+        sm.set_token(role_enum, req.token, user_id=req.user_id)
+
+    if req.owned_resources:
+        for rtype, rid in req.owned_resources.items():
+            sm.register_resource_ownership(role_enum, rtype, rid)
+
+    if req.custom_headers:
+        sess = sm.get_session(role_enum)
+        sess.custom_headers.update(req.custom_headers)
+
+    logger.info("Configured testing role session", extra={"role": role_str, "user_id": req.user_id})
+    return get_roles_status()
+
+
+def _format_endpoints_for_planner(endpoints: List[Any]) -> List[Dict[str, Any]]:
+    formatted = []
+    for ep in endpoints:
+        if hasattr(ep, "model_dump"):
+            d = ep.model_dump()
+        elif isinstance(ep, dict):
+            d = dict(ep)
+        else:
+            d = {"path": getattr(ep, "path", ""), "method": getattr(ep, "method", "GET")}
+        
+        # If output_parameters is not explicitly set on stored endpoint records,
+        # detect if it is a list/collection endpoint that exposes identifiers
+        if not d.get("output_parameters"):
+            category = str(d.get("category", "")).upper()
+            path = str(d.get("path", ""))
+            if category in ("RESOURCE_LIST", "USER_COLLECTION") or (
+                d.get("method") == "GET" and "{" not in path and len(path.strip("/").split("/")) >= 2
+            ):
+                d["output_parameters"] = ["id"]
+                d["resource_identifier_name"] = "id"
+        formatted.append(d)
+    return formatted
+
+
+@app.get("/api/assessments/{assessment_id}/endpoint-graph")
+def get_assessment_endpoint_graph(assessment_id: str) -> Dict[str, Any]:
+    """Builds and returns the endpoint relationship graph from discovered endpoints."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Assessment {assessment_id} not found.")
+
+    discovered = repo.get_discovered_endpoints(assessment_id)
+    planner = AttackChainPlanner()
+    graph = planner.build_graph(_format_endpoints_for_planner(discovered))
+    return {
+        "assessment_id": assessment_id,
+        "nodes_count": len(graph.nodes),
+        "relationships_count": len(graph.relationships),
+        "nodes": [n.model_dump(mode="json") for n in graph.nodes],
+        "relationships": [r.model_dump(mode="json") for r in graph.relationships],
+        "unresolved_dependencies": [u.model_dump(mode="json") for u in graph.unresolved_dependencies],
+        "rejected_endpoints": [rej.model_dump(mode="json") for rej in graph.rejected_endpoints],
+        "summary": f"Graph constructed with {len(graph.nodes)} endpoint nodes and {len(graph.relationships)} relationships.",
+    }
+
+
+@app.post("/api/assessments/{assessment_id}/attack-chains/plan")
+def plan_assessment_attack_chains(
+    assessment_id: str,
+    req: PlanAttackChainsRequest = PlanAttackChainsRequest(),
+) -> Dict[str, Any]:
+    """Generates 2-to-5-step candidate attack-chains from discovered endpoints."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Assessment {assessment_id} not found.")
+
+    discovered = repo.get_discovered_endpoints(assessment_id)
+    if not discovered:
+        return {
+            "assessment_id": assessment_id,
+            "candidates_count": 0,
+            "candidates": [],
+            "summary": "No endpoints discovered yet. Run endpoint discovery first.",
+        }
+
+    planner = AttackChainPlanner()
+    plan = planner.plan(_format_endpoints_for_planner(discovered), max_steps=req.max_steps, max_candidates=req.max_candidates)
+    candidates_dict = [c.model_dump(mode="json") for c in plan.candidates]
+
+    if session.config is None:
+        session.config = {}
+    session.config["attack_chain_candidates"] = candidates_dict
+    repo.save_scan_session(session)
+
+    return {
+        "assessment_id": assessment_id,
+        "candidates_count": len(candidates_dict),
+        "candidates": candidates_dict,
+        "summary": plan.summary,
+    }
+
+
+@app.get("/api/assessments/{assessment_id}/attack-chains")
+def get_assessment_attack_chains(assessment_id: str) -> Dict[str, Any]:
+    """Retrieves or plans candidate attack chains for an assessment."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Assessment {assessment_id} not found.")
+
+    saved = (session.config or {}).get("attack_chain_candidates")
+    if saved:
+        return {
+            "assessment_id": assessment_id,
+            "candidates_count": len(saved),
+            "candidates": saved,
+            "summary": f"Retrieved {len(saved)} planned candidate chains.",
+        }
+
+    discovered = repo.get_discovered_endpoints(assessment_id)
+    planner = AttackChainPlanner()
+    plan = planner.plan(discovered, max_steps=5, max_candidates=25)
+    candidates_dict = [c.model_dump(mode="json") for c in plan.candidates]
+
+    if session.config is None:
+        session.config = {}
+    session.config["attack_chain_candidates"] = candidates_dict
+    repo.save_scan_session(session)
+
+    return {
+        "assessment_id": assessment_id,
+        "candidates_count": len(candidates_dict),
+        "candidates": candidates_dict,
+        "summary": plan.summary,
+    }
+
+
+@app.post("/api/assessments/{assessment_id}/attack-chains/execute")
+def execute_assessment_attack_chain(
+    assessment_id: str,
+    req: ExecuteAttackChainRequest,
+) -> Dict[str, Any]:
+    """Validates and executes a candidate attack-chain across roles, recording evidence and findings."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Assessment {assessment_id} not found.")
+
+    candidate = req.chain
+    if not candidate and req.candidate_id:
+        saved = (session.config or {}).get("attack_chain_candidates") or []
+        candidate = next((c for c in saved if c.get("candidate_id") == req.candidate_id), None)
+        if not candidate:
+            discovered = repo.get_discovered_endpoints(assessment_id)
+            plan = AttackChainPlanner().plan(discovered)
+            candidate = next((c.model_dump(mode="json") for c in plan.candidates if c.candidate_id == req.candidate_id), None)
+
+    if not candidate:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Attack chain candidate dict or valid candidate_id is required.",
+        )
+
+    scope_guard = _get_active_scope_guard()
+    sm = _get_active_session_manager()
+    req_exec = RequestExecutor(scope_guard=scope_guard, session_manager=sm)
+    analyzer = ResponseAnalyzer()
+    validator = EvidenceValidator()
+
+    chain_executor = AttackChainExecutor(
+        scope_guard=scope_guard,
+        session_manager=sm,
+        executor=req_exec,
+        analyzer=analyzer,
+        validator=validator,
+        repository=repo,
+        base_url=session.target_url,
+    )
+
+    result = chain_executor.execute_chain(
+        chain=candidate,
+        target_url=session.target_url,
+        scan_id=assessment_id,
+        role_assignments=req.role_assignments,
+        save_finding=req.save_finding,
+    )
+    return result.model_dump(mode="json")
+
+
+@app.get("/api/assessments/{assessment_id}/role-matrix")
+def get_assessment_role_matrix(assessment_id: str) -> Dict[str, Any]:
+    """Returns endpoint-by-endpoint multi-role testing outcomes and verdicts."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Assessment {assessment_id} not found.")
+
+    discovered = repo.get_discovered_endpoints(assessment_id)
+    findings = repo.list_findings(assessment_id)
+    findings_by_ep = {f.target_endpoint: f for f in findings}
+
+    rows = []
+    for ep in discovered:
+        fnd = findings_by_ep.get(ep.path)
+        rows.append({
+            "endpoint": ep.path,
+            "method": ep.method,
+            "category": ep.category,
+            "requires_auth": ep.requires_auth,
+            "test_status": ep.test_status,
+            "verdict": ep.verdict,
+            "summary": ep.summary,
+            "has_confirmed_vulnerability": fnd is not None and fnd.status == "confirmed",
+            "finding_id": fnd.id if fnd else None,
+            "severity": fnd.severity.value if (fnd and hasattr(fnd.severity, "value")) else None,
+        })
+
+    sm = _get_active_session_manager()
+    return {
+        "assessment_id": assessment_id,
+        "target_url": session.target_url,
+        "role_readiness": sm.validate_configured_credentials(),
+        "matrix": rows,
+    }
 
 
 @app.get("/", include_in_schema=False)
