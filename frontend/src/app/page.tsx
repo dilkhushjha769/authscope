@@ -2902,7 +2902,16 @@ export default function Home() {
               <div className="mt-5 flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={() => void startAssessment(summaryData?.target_url || targetUrl)}
+                  onClick={() => {
+                    if (
+                      targetUrl.includes("github.com") ||
+                      assessmentId?.startsWith("gscan_")
+                    ) {
+                      setShowGitHubModal(true);
+                    } else {
+                      void startAssessment(summaryData?.target_url || targetUrl);
+                    }
+                  }}
                   className="scan-another-btn"
                 >
                   <RefreshCw size={13} />
@@ -3557,8 +3566,9 @@ export default function Home() {
 
             <div className="chatgpt-bottom-dock">
               <div className="chatgpt-bottom-inner">
-                <div className="chatgpt-dock-toolbar">
-                  <div className="chatgpt-quick-chips">
+                {displayFindings.length > 0 && (
+                  <div className="chatgpt-dock-toolbar">
+                    <div className="chatgpt-quick-chips">
                     {[
                       "How do I fix this bug step by step?",
                       "Show secure code fix for the critical bug",
@@ -3587,6 +3597,7 @@ export default function Home() {
                     <span>Download PDF</span>
                   </button>
                 </div>
+                )}
 
                 <form
                   onSubmit={(e) => {
@@ -3620,7 +3631,11 @@ export default function Home() {
                     type="text"
                     value={globalQuery}
                     onChange={(e) => setGlobalQuery(e.target.value)}
-                    placeholder="Ask anything about these bugs, how to fix them, or paste a website address..."
+                    placeholder={
+                      displayFindings.length > 0
+                        ? "Ask anything about these bugs, how to fix them, or paste a website address..."
+                        : "Ask Gemini anything about security, or enter a website address to test..."
+                    }
                     aria-label="Ask Gemini about bugs and how to fix them"
                   />
 

@@ -31,6 +31,9 @@ from backend.scanner.source_analyzer import (
 )
 from backend.storage.github_repository import GitHubRepository
 from backend.utils.helpers import redact_sensitive_text, sanitize_dict_or_list
+from backend.utils.logger import get_logger
+
+logger = get_logger("authscope.github")
 
 
 GITHUB_API = "https://api.github.com"
@@ -149,6 +152,7 @@ class GitHubAppService:
         json_body: Optional[Dict[str, Any]] = None,
         form: Optional[Dict[str, str]] = None,
         basic_auth: Optional[httpx.BasicAuth] = None,
+        client: Optional[httpx.AsyncClient] = None,
     ) -> httpx.Response:
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": GITHUB_API_VERSION}
         if token:
@@ -168,17 +172,34 @@ class GitHubAppService:
         scope_result = self.scope_guard.validate_request(url, method)
         if not scope_result.is_allowed:
             raise GitHubIntegrationError("GITHUB_REQUEST_REJECTED", "GitHub request was rejected by the provider scope guard.", 403)
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0), follow_redirects=False, transport=self.transport
-        ) as client:
-            try:
-                response = await client.request(
-                    method, url, headers=headers, json=json_body, data=form, auth=basic_auth
-                )
-            except httpx.TimeoutException as exc:
-                raise GitHubIntegrationError("GITHUB_TIMEOUT", "GitHub did not respond in time.", 504) from exc
-            except httpx.HTTPError as exc:
-                raise GitHubIntegrationError("GITHUB_UNAVAILABLE", "Could not connect to GitHub.", 502) from exc
+
+        async def _execute_single(c: httpx.AsyncClient) -> httpx.Response:
+            for attempt in range(3):
+                try:
+                    resp = await c.request(
+                        method, url, headers=headers, json=json_body, data=form, auth=basic_auth
+                    )
+                    if resp.status_code in (500, 502, 503, 504) and attempt < 2:
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    return resp
+                except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.WriteTimeout) as exc:
+                    if attempt < 2:
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    if isinstance(exc, httpx.TimeoutException):
+                        raise GitHubIntegrationError("GITHUB_TIMEOUT", "GitHub did not respond in time.", 504) from exc
+                    raise GitHubIntegrationError("GITHUB_UNAVAILABLE", "Could not connect to GitHub.", 502) from exc
+                except httpx.HTTPError as exc:
+                    raise GitHubIntegrationError("GITHUB_UNAVAILABLE", "Could not connect to GitHub.", 502) from exc
+
+        if client is not None:
+            response = await _execute_single(client)
+        else:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(25.0), follow_redirects=False, transport=self.transport
+            ) as temp_client:
+                response = await _execute_single(temp_client)
         if response.status_code == 429 or (
             response.status_code == 403 and response.headers.get("X-RateLimit-Remaining") == "0"
         ):
@@ -404,48 +425,52 @@ class GitHubAppService:
         event("activity", "language_detection", f"Detected {len(eligible)} source files in branch '{branch}'...", {"candidate_files": len(eligible)})
         temporary_dir = Path(tempfile.mkdtemp(prefix="authscope-github-"))
         try:
-            semaphore = asyncio.Semaphore(16)
+            semaphore = asyncio.Semaphore(6)
             fetched_count = 0
 
-            async def fetch_blob(item: Dict[str, Any]) -> Optional[Path]:
-                nonlocal fetched_count
-                path_text = str(item["path"])
-                async with semaphore:
-                    blob_url = f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/blobs/{quote(str(item['sha']), safe='')}"
-                    result = await self._request("GET", blob_url, token=token)
-                    data = self._json(result)
-                try:
-                    encoded = re.sub(r"\s+", "", str(data.get("content", "")))
-                    content = base64.b64decode(encoded, validate=True)
-                except ValueError as exc:
-                    raise GitHubIntegrationError("GITHUB_API_ERROR", "GitHub returned an invalid source blob.", 502) from exc
-                if len(content) != int(item["size"]) or len(content) > DEFAULT_MAX_FILE_SIZE_BYTES:
-                    raise GitHubIntegrationError("GITHUB_API_ERROR", "A source blob did not match its commit metadata.", 502)
-                destination = temporary_dir.joinpath(*PurePosixPath(path_text).parts)
-                resolved = destination.resolve()
-                try:
-                    resolved.relative_to(temporary_dir.resolve())
-                except ValueError as exc:
-                    raise GitHubIntegrationError("UNSAFE_REPOSITORY_PATHS", "A repository path escaped the safe scan directory.", 422) from exc
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(content)
-                fetched_count += 1
-                if fetched_count == 1 or fetched_count % 15 == 0 or fetched_count == len(eligible):
-                    event(
-                        "activity",
-                        "file_inspection",
-                        f"Inspecting branch '{branch}' files ({fetched_count}/{len(eligible)}): {path_text}",
-                        {"file_path": path_text, "fetched": fetched_count, "total": len(eligible)},
-                    )
-                return destination
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0),
+                follow_redirects=False,
+                transport=self.transport,
+                limits=httpx.Limits(max_keepalive_connections=8, max_connections=12),
+            ) as shared_client:
+                async def fetch_blob(item: Dict[str, Any]) -> Optional[Path]:
+                    nonlocal fetched_count
+                    path_text = str(item["path"])
+                    try:
+                        async with semaphore:
+                            blob_url = f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/git/blobs/{quote(str(item['sha']), safe='')}"
+                            result = await self._request("GET", blob_url, token=token, client=shared_client)
+                            data = self._json(result)
+                        encoded = re.sub(r"\s+", "", str(data.get("content", "")))
+                        content = base64.b64decode(encoded, validate=True)
+                        if len(content) != int(item["size"]) or len(content) > DEFAULT_MAX_FILE_SIZE_BYTES:
+                            return None
+                        destination = temporary_dir.joinpath(*PurePosixPath(path_text).parts)
+                        resolved = destination.resolve()
+                        resolved.relative_to(temporary_dir.resolve())
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        destination.write_bytes(content)
+                        fetched_count += 1
+                        if fetched_count == 1 or fetched_count % 15 == 0 or fetched_count == len(eligible):
+                            event(
+                                "activity",
+                                "file_inspection",
+                                f"Inspecting branch '{branch}' files ({fetched_count}/{len(eligible)}): {path_text}",
+                                {"file_path": path_text, "fetched": fetched_count, "total": len(eligible)},
+                            )
+                        return destination
+                    except Exception as err:
+                        logger.warning(f"Could not retrieve file {path_text}: {err}")
+                        return None
 
-            fetched = await asyncio.gather(*(fetch_blob(item) for item in eligible), return_exceptions=True)
-            failure = next((item for item in fetched if isinstance(item, BaseException)), None)
-            if failure is not None:
-                if isinstance(failure, GitHubIntegrationError):
-                    raise failure
-                raise GitHubIntegrationError("GITHUB_API_ERROR", "One or more source files could not be read safely.", 502) from failure
-            event("activity", "source_analysis", f"Running AST & security analyzer across {len(eligible)} files in '{branch}'...", {"files": len(eligible)})
+                fetched = await asyncio.gather(*(fetch_blob(item) for item in eligible), return_exceptions=True)
+
+            valid_destinations = [d for d in fetched if isinstance(d, Path)]
+            if not valid_destinations:
+                raise GitHubIntegrationError("GITHUB_API_ERROR", "Could not retrieve repository source files from GitHub.", 502)
+
+            event("activity", "source_analysis", f"Running AST & security analyzer across {len(valid_destinations)} files in '{branch}'...", {"files": len(valid_destinations)})
             report = await asyncio.to_thread(analyzer.analyze_repository, temporary_dir, True, scan_id)
 
             sev_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
