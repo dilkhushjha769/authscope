@@ -276,12 +276,15 @@ def test_5_correct_resource_identifier_passing():
                 "path": "/api/orders",
                 "method": "GET",
                 "role": "user_a",
+                "output_parameters": ["order_id"],
             },
             {
                 "step_id": "step-2",
                 "path": "/api/orders/{id}",
                 "method": "GET",
                 "role": "user_b",
+                "input_parameters": ["id"],
+                "resource_type": "order",
                 "depends_on_step_ids": ["step-1"],
                 "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "order_id"}],
             },
@@ -317,12 +320,13 @@ def test_6_anonymous_chain_execution():
         "candidate_id": "chain_anon",
         "scenario": "MISSING_AUTH",
         "steps": [
-            {"step_id": "step-1", "path": "/api/public/catalog", "method": "GET", "role": "anonymous"},
+            {"step_id": "step-1", "path": "/api/public/catalog", "method": "GET", "role": "anonymous", "output_parameters": ["catalog_id"]},
             {
                 "step_id": "step-2",
                 "path": "/api/public/catalog/{id}/items",
                 "method": "GET",
                 "role": "anonymous",
+                "input_parameters": ["id"],
                 "depends_on_step_ids": ["step-1"],
                 "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "catalog_id"}],
             },
@@ -333,7 +337,8 @@ def test_6_anonymous_chain_execution():
     assert res.steps_executed == 2
     assert res.step_results[0].role_used == "anonymous"
     assert res.step_results[1].role_used == "anonymous"
-    assert res.step_results[1].verdict == AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
+    assert res.step_results[1].verdict == AccessVerdict.SUSPICIOUS_ACCESS
+    assert res.status == ChainExecutionStatus.INCONCLUSIVE
 
 
 # ==============================================================================
@@ -355,7 +360,7 @@ def test_7_user_a_legitimate_access_baseline():
         "candidate_id": "chain_user_a",
         "scenario": "BOLA_IDOR",
         "steps": [
-            {"step_id": "step-1", "path": "/rest/basket/1", "method": "GET", "role": "user_a"},
+            {"step_id": "step-1", "path": "/rest/basket/1", "method": "GET", "role": "user_a", "resource_type": "basket", "output_parameters": ["id"]},
             {"step_id": "step-2", "path": "/rest/basket/1", "method": "GET", "role": "user_a", "depends_on_step_ids": ["step-1"]},
         ],
     }
@@ -390,12 +395,14 @@ def test_8_user_b_cross_user_access_bola_idor():
         "candidate_id": "chain_bola_scenario_a",
         "scenario": "BOLA_IDOR",
         "steps": [
-            {"step_id": "step-1", "path": "/rest/basket/1", "method": "GET", "role": "user_a"},
+            {"step_id": "step-1", "path": "/rest/basket/1", "method": "GET", "role": "user_a", "resource_type": "basket", "output_parameters": ["id"]},
             {
                 "step_id": "step-2",
                 "path": "/rest/basket/{id}",
                 "method": "GET",
                 "role": "user_b",
+                "resource_type": "basket",
+                "input_parameters": ["id"],
                 "depends_on_step_ids": ["step-1"],
                 "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "id"}],
             },
@@ -468,6 +475,7 @@ def test_10_unauthorized_admin_endpoint_access_bfla():
                 "path": "/rest/admin/application-configuration",
                 "method": "GET",
                 "role": "user_b",
+                "expected_allowed_roles": ["admin"],
                 "depends_on_step_ids": ["step-1"],
             },
         ],
@@ -506,12 +514,14 @@ def test_11_multi_step_parent_to_child_resource():
         "candidate_id": "chain_scenario_c_parent_child",
         "scenario": "RELATED_RESOURCE_ACCESS",
         "steps": [
-            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a"},
+            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a", "output_parameters": ["order_id"]},
             {
                 "step_id": "step-2",
                 "path": "/api/orders/{id}/documents",
                 "method": "GET",
                 "role": "user_a",
+                "output_parameters": ["document_id"],
+                "input_parameters": ["id"],
                 "depends_on_step_ids": ["step-1"],
                 "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "order_id"}],
             },
@@ -520,6 +530,8 @@ def test_11_multi_step_parent_to_child_resource():
                 "path": "/api/orders/{id}/documents/{doc_id}",
                 "method": "GET",
                 "role": "user_b",
+                "resource_type": "order",
+                "input_parameters": ["id", "doc_id"],
                 "depends_on_step_ids": ["step-2"],
                 "input_bindings": [
                     {"parameter": "id", "source_step_id": "step-1", "source_field": "order_id"},
@@ -558,7 +570,7 @@ def test_12_chain_execution_stopping_on_failed_prerequisites():
         "scenario": "BOLA_IDOR",
         "steps": [
             {"step_id": "step-1", "path": "/api/orders", "method": "GET"},
-            {"step_id": "step-2", "path": "/api/orders/{id}", "method": "GET", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-2", "path": "/api/orders/{id}", "method": "GET", "depends_on_step_ids": ["step-1"], "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "id"}]},
         ],
     }
 
@@ -588,15 +600,16 @@ def test_13_evidence_sanitization(isolated_repo: FindingRepository):
             )
         return httpx.Response(200)
 
-    executor, _, _ = build_chain_test_environment(handler)
+    executor, sessions, _ = build_chain_test_environment(handler)
     executor.repository = isolated_repo
+    sessions.register_resource_ownership(Role.USER_A, "user", "1")
 
     chain = {
         "candidate_id": "chain_sanitize",
         "scenario": "BOLA_IDOR",
         "steps": [
-            {"step_id": "step-1", "path": "/api/users", "method": "GET", "role": "user_a"},
-            {"step_id": "step-2", "path": "/api/users/1", "method": "GET", "role": "user_b", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-1", "path": "/api/users", "method": "GET", "role": "user_a", "output_parameters": ["id"]},
+            {"step_id": "step-2", "path": "/api/users/1", "method": "GET", "role": "user_b", "resource_type": "user", "depends_on_step_ids": ["step-1"]},
         ],
     }
 
@@ -621,15 +634,16 @@ def test_14_evidence_storage_in_sqlite(isolated_repo: FindingRepository):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"id": 1, "owner": "user_a", "balance": 1000})
 
-    executor, _, _ = build_chain_test_environment(handler)
+    executor, sessions, _ = build_chain_test_environment(handler)
     executor.repository = isolated_repo
+    sessions.register_resource_ownership(Role.USER_A, "account", "1")
 
     chain = {
         "candidate_id": "chain_storage_test",
         "scenario": "BOLA_IDOR",
         "steps": [
-            {"step_id": "step-1", "path": "/api/accounts", "method": "GET", "role": "user_a"},
-            {"step_id": "step-2", "path": "/api/accounts/1", "method": "GET", "role": "user_b", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-1", "path": "/api/accounts", "method": "GET", "role": "user_a", "output_parameters": ["id"]},
+            {"step_id": "step-2", "path": "/api/accounts/1", "method": "GET", "role": "user_b", "resource_type": "account", "depends_on_step_ids": ["step-1"]},
         ],
     }
 
@@ -666,7 +680,7 @@ def test_15_false_positive_prevention_spa_and_soft_errors():
         "scenario": "BOLA_IDOR",
         "steps": [
             {"step_id": "step-1", "path": "/rest/basket", "method": "GET", "role": "user_a"},
-            {"step_id": "step-2", "path": "/rest/basket/1", "method": "GET", "role": "user_b", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-2", "path": "/rest/basket/1", "method": "GET", "role": "user_b", "resource_type": "basket", "depends_on_step_ids": ["step-1"]},
         ],
     }
 
@@ -693,7 +707,7 @@ def test_16_severity_integration():
         "scenario": "PRIVILEGE_ESCALATION",
         "steps": [
             {"step_id": "step-1", "path": "/api/users", "method": "GET", "role": "user_a"},
-            {"step_id": "step-2", "path": "/rest/admin/config", "method": "GET", "role": "user_b", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-2", "path": "/rest/admin/config", "method": "GET", "role": "user_b", "expected_allowed_roles": ["admin"], "depends_on_step_ids": ["step-1"]},
         ],
     }
 
@@ -718,8 +732,8 @@ def test_17_remediation_integration():
         "candidate_id": "chain_rem",
         "scenario": "BOLA_IDOR",
         "steps": [
-            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a"},
-            {"step_id": "step-2", "path": "/api/orders/1", "method": "GET", "role": "user_b", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a", "output_parameters": ["id"]},
+            {"step_id": "step-2", "path": "/api/orders/{id}", "method": "GET", "role": "user_b", "resource_type": "order", "input_parameters": ["id"], "depends_on_step_ids": ["step-1"], "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "id"}]},
         ],
     }
 
@@ -771,8 +785,8 @@ def test_18_automated_chain_retesting(isolated_repo: FindingRepository):
         "candidate_id": "chain_retest_demo",
         "scenario": "BOLA_IDOR",
         "steps": [
-            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a"},
-            {"step_id": "step-2", "path": "/api/orders/1", "method": "GET", "role": "user_b", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a", "output_parameters": ["id"]},
+            {"step_id": "step-2", "path": "/api/orders/{id}", "method": "GET", "role": "user_b", "resource_type": "order", "input_parameters": ["id"], "depends_on_step_ids": ["step-1"], "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "id"}]},
         ],
     }
 
@@ -830,8 +844,8 @@ async def test_19_tool_registry_and_adapter_integration(isolated_repo: FindingRe
         "candidate_id": "chain_adapter_test",
         "scenario": "BOLA_IDOR",
         "steps": [
-            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a"},
-            {"step_id": "step-2", "path": "/api/orders/1", "method": "GET", "role": "user_b", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a", "output_parameters": ["id"]},
+            {"step_id": "step-2", "path": "/api/orders/{id}", "method": "GET", "role": "user_b", "resource_type": "order", "input_parameters": ["id"], "depends_on_step_ids": ["step-1"], "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "id"}]},
         ],
     }
 
@@ -866,8 +880,8 @@ def test_20_dashboard_result_integration(isolated_repo: FindingRepository):
         "chain_name": "User A to User B BOLA Chain",
         "scenario": "BOLA_IDOR",
         "steps": [
-            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a"},
-            {"step_id": "step-2", "path": "/api/orders/1", "method": "GET", "role": "user_b", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a", "output_parameters": ["id"]},
+            {"step_id": "step-2", "path": "/api/orders/{id}", "method": "GET", "role": "user_b", "resource_type": "order", "input_parameters": ["id"], "depends_on_step_ids": ["step-1"], "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "id"}]},
         ],
     }
 

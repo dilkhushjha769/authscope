@@ -308,7 +308,7 @@ class AttackChainValidator:
 
             # Check safe test payload if modification method
             if step_data.get("json_body") is not None or step_data.get("payload") is not None:
-                rejection_reasons.append(f"Step '{step_id}': Request bodies are not supported in read-only chains.")
+                rejection_reasons.append(f"Step '{step_id}': Destructive or state-changing request bodies are prohibited in read-only chains.")
 
         # 4. Role authentication check
         if role_override:
@@ -589,6 +589,48 @@ class AttackChainExecutor:
                         error_message=missing_binding_reason,
                     ))
                 break
+
+            # Literal IDs are accepted only when the operator has registered the
+            # value as an explicitly approved fixture owned by a configured role.
+            if not input_bindings:
+                literal_ids = [
+                    segment for segment in urlsplit(resolved_path).path.split("/")
+                    if re.fullmatch(r"[0-9]{1,20}|[0-9a-fA-F-]{8,128}", segment)
+                ]
+                resource_type = str(step_data.get("resource_type") or "").lower()
+                for literal_id in literal_ids:
+                    if not resource_type or not any(
+                        self.session_manager.get_session(role).owns_resource(resource_type, literal_id)
+                        for role in Role
+                    ):
+                        missing_binding_reason = (
+                            f"Literal resource identifier '{literal_id}' is not backed by an explicitly "
+                            "registered test fixture or a preceding response binding."
+                        )
+                        break
+                if missing_binding_reason:
+                    step_results.append(StepExecutionResult(
+                        step_id=step_id, endpoint_path=path_template, resolved_url="", method=method,
+                        role_used=step_role.value, status_code=0, is_success=False,
+                        status=StepExecutionStatus.BLOCKED, verdict=AccessVerdict.NOT_TESTED,
+                        response_excerpt="", expected_behavior="Resource IDs must have explicit fixture or response provenance.",
+                        actual_behavior="Step blocked because a literal resource ID has no approved provenance.",
+                        error_message=missing_binding_reason,
+                    ))
+                    execution_failed = True
+                    for later_index in range(idx + 1, len(steps)):
+                        later = steps[later_index]
+                        step_results.append(StepExecutionResult(
+                            step_id=str(later.get("step_id") or f"step-{later_index + 1}"),
+                            endpoint_path=str(later.get("path") or later.get("endpoint_path") or ""),
+                            resolved_url="", method=str(later.get("method") or "GET").upper(),
+                            role_used=planned_roles[later_index].value, status_code=0, is_success=False,
+                            status=StepExecutionStatus.BLOCKED, verdict=AccessVerdict.NOT_TESTED,
+                            response_excerpt="", expected_behavior="Dependent steps require valid resource provenance.",
+                            actual_behavior="Step not sent because a preceding step was blocked.",
+                            error_message=missing_binding_reason,
+                        ))
+                    break
 
             resolved_url = f"{base}/{resolved_path.lstrip('/')}"
 
@@ -910,6 +952,10 @@ class AttackChainExecutor:
             status = StepExecutionStatus.FAILED
             act_behavior = f"Request returned HTTP {code}."
         elif step_index > 0:
+            allowed_roles = {
+                str(value.value if isinstance(value, Role) else value).lower()
+                for value in step_data.get("expected_allowed_roles", [])
+            }
             if role in (Role.USER_B, Role.ANONYMOUS):
                 resource_type = str(step_data.get("resource_type") or "").lower()
                 resource_id = next((part for part in urlsplit(resolved_url).path.split("/") if part.isdigit()), None)
@@ -918,7 +964,8 @@ class AttackChainExecutor:
                     resource_type and resource_id and owner.owns_resource(resource_type, resource_id)
                     and self.session_manager.get_session(role).user_id != owner.user_id
                 )
-                if not verified_cross_user:
+                verified_permission_breach = bool(allowed_roles and role.value not in allowed_roles)
+                if not verified_cross_user and not verified_permission_breach:
                     verdict = AccessVerdict.SUSPICIOUS_ACCESS
                     status = StepExecutionStatus.INCONCLUSIVE
                     act_behavior = (
@@ -928,13 +975,23 @@ class AttackChainExecutor:
                 else:
                     verdict = AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS
                 if "PRIVILEGE" in scenario or "admin" in resolved_url.lower():
-                    if verified_cross_user:
+                    if verified_permission_breach:
+                        act_behavior = (
+                            f"Role '{role.value}' accessed an endpoint whose discovered policy allows only "
+                            f"{sorted(allowed_roles)} (HTTP {code})."
+                        )
+                    elif verified_cross_user:
                         act_behavior = (
                         f"Lower-privileged role '{role.value}' accessed administrative endpoint "
                         f"(HTTP {code}) and received administrative data."
                         )
                 else:
-                    if verified_cross_user:
+                    if verified_permission_breach:
+                        act_behavior = (
+                            f"Role '{role.value}' received HTTP {code} for a resource endpoint whose declared "
+                            f"allowed roles exclude that role ({sorted(allowed_roles)})."
+                        )
+                    elif verified_cross_user:
                         act_behavior = (
                         f"Role '{role.value}' successfully accessed resource "
                         f"(HTTP {code}) and received structured data."

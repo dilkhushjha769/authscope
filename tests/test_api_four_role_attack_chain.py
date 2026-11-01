@@ -68,6 +68,7 @@ def test_endpoint_graph_and_attack_chain_planning(api_client):
         category="RESOURCE_LIST",
         parameters=[],
         requires_auth=True,
+        planner_metadata={"resource_type": "order", "output_parameters": ["id"], "resource_identifier_name": "id"},
     )
     ep2 = DiscoveredEndpointRecord(
         id="ep2",
@@ -77,6 +78,7 @@ def test_endpoint_graph_and_attack_chain_planning(api_client):
         category="RESOURCE_ITEM",
         parameters=["id"],
         requires_auth=True,
+        planner_metadata={"resource_type": "order", "input_parameters": ["id"], "requires_owner_match": True},
     )
     repo.save_discovered_endpoint(ep1)
     repo.save_discovered_endpoint(ep2)
@@ -128,6 +130,7 @@ def test_execute_attack_chain_api(api_client, monkeypatch):
     sm = _get_active_session_manager()
     sm.set_token(Role.USER_A, "jwt_user_a_token", user_id="101")
     sm.set_token(Role.USER_B, "jwt_user_b_token", user_id="102")
+    sm.register_resource_ownership(Role.USER_A, "order", "101")
 
     def mock_handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -152,8 +155,8 @@ def test_execute_attack_chain_api(api_client, monkeypatch):
         "candidate_id": "chain_api_test_1",
         "scenario": "BOLA_IDOR",
         "steps": [
-            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a"},
-            {"step_id": "step-2", "path": "/api/orders/101", "method": "GET", "role": "user_b", "depends_on_step_ids": ["step-1"]},
+            {"step_id": "step-1", "path": "/api/orders", "method": "GET", "role": "user_a", "output_parameters": ["id"]},
+            {"step_id": "step-2", "path": "/api/orders/{id}", "method": "GET", "role": "user_b", "resource_type": "order", "input_parameters": ["id"], "depends_on_step_ids": ["step-1"], "input_bindings": [{"parameter": "id", "source_step_id": "step-1", "source_field": "id"}]},
         ],
     }
 

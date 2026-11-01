@@ -464,6 +464,11 @@ class AssessmentEngine:
                     discovery_status="DISCOVERED",
                     test_status="UNTESTED",
                     summary=route.description,
+                    planner_metadata={
+                        key: value
+                        for key, value in route.model_dump(mode="json").items()
+                        if key not in {"path", "method", "category", "parameters", "requires_auth", "description"}
+                    },
                 )
                 self.repository.save_discovered_endpoint(ep_rec)
                 endpoint_records[route.path] = ep_rec

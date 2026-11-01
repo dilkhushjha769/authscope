@@ -3610,6 +3610,13 @@ def configure_role(req: ConfigureRoleRequest) -> FourRolesStatusResponse:
 
 def _format_endpoints_for_planner(endpoints: List[Any]) -> List[Dict[str, Any]]:
     formatted: List[Dict[str, Any]] = []
+    planner_fields = {
+        "resource_type", "input_parameters", "output_parameters",
+        "has_observed_resource_identifier", "resource_identifier_name",
+        "parent_resource_type", "related_resource_types", "resource_sensitivity",
+        "requires_owner_match", "expected_allowed_roles", "permissions",
+        "requires_human_approval", "dependencies", "extracted_resource_id",
+    }
     for ep in endpoints:
         if hasattr(ep, "model_dump"):
             d = ep.model_dump()
@@ -3620,6 +3627,11 @@ def _format_endpoints_for_planner(endpoints: List[Any]) -> List[Dict[str, Any]]:
         
         # Preserve only observed discovery metadata. Do not invent response IDs
         # from route shape or endpoint names; uncertain dependencies stay unresolved.
+        metadata = d.pop("planner_metadata", {})
+        if isinstance(metadata, dict):
+            for key in planner_fields:
+                if key in metadata:
+                    d[key] = metadata[key]
         formatted.append(d)
     return formatted
 

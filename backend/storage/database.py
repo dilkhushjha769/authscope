@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS discovered_endpoints (
     test_status TEXT DEFAULT 'UNTESTED',
     verdict TEXT,
     associated_finding_ids_json TEXT DEFAULT '[]',
-    summary TEXT DEFAULT ''
+    summary TEXT DEFAULT '',
+    planner_metadata_json TEXT DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS assessment_events (
@@ -281,6 +282,7 @@ class DatabaseManager:
             ("scan_sessions", "config_json", "TEXT DEFAULT '{}'"),
             ("scan_sessions", "updated_at", "TIMESTAMP"),
             ("scan_sessions", "failure_reason", "TEXT DEFAULT ''"),
+            ("discovered_endpoints", "planner_metadata_json", "TEXT DEFAULT '{}'"),
             ("findings", "target_identifier", "TEXT DEFAULT ''"),
             ("findings", "validation_status", "TEXT DEFAULT 'CONFIRMED'"),
             ("findings", "classification", "TEXT DEFAULT ''"),

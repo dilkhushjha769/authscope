@@ -41,6 +41,9 @@ class DiscoveredEndpoint(BaseModel):
     path: str = Field(..., description="Route path or template (e.g. /rest/basket/{id})")
     method: str = Field(default="GET", description="HTTP Method (initially GET)")
     parameters: List[str] = Field(default_factory=list, description="Extracted path/query parameter names")
+    input_parameters: List[str] = Field(default_factory=list, description="Declared path/query inputs")
+    output_parameters: List[str] = Field(default_factory=list, description="Identifier fields declared by the endpoint response schema")
+    resource_identifier_name: Optional[str] = None
     extracted_resource_id: Optional[str] = Field(
         default=None,
         description="Concrete resource identifier extracted from URL if present"
@@ -430,6 +433,17 @@ class EndpointDiscovery:
                                 method=method,
                                 description=str(operation.get("summary") or operation.get("operationId") or ""),
                             )
+                            operation_parameters = list(operations.get("parameters", [])) + list(operation.get("parameters", []))
+                            declared_inputs = [
+                                str(p.get("name")) for p in operation_parameters
+                                if isinstance(p, dict) and p.get("name") and p.get("in") in {"path", "query"}
+                            ]
+                            outputs = self._response_identifier_fields(operation)
+                            route = route.model_copy(update={
+                                "input_parameters": list(dict.fromkeys(route.parameters + declared_inputs)),
+                                "output_parameters": outputs,
+                                "resource_identifier_name": outputs[0] if len(outputs) == 1 else None,
+                            })
                         except (AuthScopeException, ValueError, TypeError) as exc:
                             logger.info(
                                 "Skipping invalid OpenAPI route",
@@ -452,6 +466,36 @@ class EndpointDiscovery:
 
         logger.info("Using configured Juice Shop GET routes as discovery fallback")
         return self.discover_known_routes()
+
+    @staticmethod
+    def _response_identifier_fields(operation: Dict[str, Any]) -> List[str]:
+        """Extract identifier properties explicitly declared in a JSON response schema."""
+        responses = operation.get("responses")
+        if not isinstance(responses, dict):
+            return []
+        response = responses.get("200") or responses.get("201") or {}
+        content = response.get("content", {}) if isinstance(response, dict) else {}
+        media = content.get("application/json", {}) if isinstance(content, dict) else {}
+        schema = media.get("schema", {}) if isinstance(media, dict) else {}
+        candidates: List[str] = []
+
+        def inspect_schema(value: Any) -> None:
+            if not isinstance(value, dict):
+                return
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                for name, child in properties.items():
+                    normalized = str(name).lower().replace("-", "_")
+                    if normalized in {"id", "resource_id"} or normalized.endswith("_id"):
+                        candidates.append(str(name))
+                    if isinstance(child, dict):
+                        inspect_schema(child)
+            items = value.get("items")
+            if isinstance(items, dict):
+                inspect_schema(items)
+
+        inspect_schema(schema)
+        return list(dict.fromkeys(candidates))
 
     def build_concrete_url(
         self,
