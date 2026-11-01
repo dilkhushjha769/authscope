@@ -26,7 +26,11 @@ import {
   FolderLock,
   Layers,
   Tag,
+  Users,
+  GitFork,
 } from "lucide-react";
+import { FourRoleConfigPanel } from "@/components/FourRoleConfigPanel";
+import { AttackChainPanel } from "@/components/AttackChainPanel";
 import {
   AIProviderInfo,
   AssessmentEventItem,
@@ -627,6 +631,8 @@ export default function Home() {
   const [targetUrl, setTargetUrl] = useState<string>("");
   const [githubRepo, setGithubRepo] = useState<string>("");
   const [showGitHubModal, setShowGitHubModal] = useState<boolean>(false);
+  const [showRolesModal, setShowRolesModal] = useState<boolean>(false);
+  const [showAttackChainModal, setShowAttackChainModal] = useState<boolean>(false);
 
   // Assessment lifecycle states
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
@@ -3164,6 +3170,26 @@ export default function Home() {
                     <span>Link GitHub project</span>
                   </button>
 
+                  <button
+                    type="button"
+                    onClick={() => setShowRolesModal(true)}
+                    className="link-github-btn"
+                    title="Configure 4 testing roles (Anonymous, User A, User B, Admin)"
+                  >
+                    <Users size={13} />
+                    <span>Four-Role Testing</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowAttackChainModal(true)}
+                    className="link-github-btn"
+                    title="Autonomous Multi-Endpoint Attack-Chain Engine"
+                  >
+                    <GitFork size={13} />
+                    <span>Attack-Chain Engine</span>
+                  </button>
+
                   {targetUrl.trim() && (
                     <button
                       type="button"
@@ -3316,7 +3342,7 @@ export default function Home() {
         {/* ================================================================= */}
         {status !== "ready" && !isRunningState && (
           <div className="scan-workspace" data-testid="final-assessment-summary">
-            <div className="target-url-pill-row" style={{ gap: "8px" }}>
+            <div className="target-url-pill-row" style={{ gap: "8px", flexWrap: "wrap" }}>
               {status !== "failed" && (
                 <button
                   type="button"
@@ -3328,6 +3354,24 @@ export default function Home() {
                   <span>Download PDF report</span>
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => setShowRolesModal(true)}
+                className="download-report-btn"
+                style={{ padding: "6px 12px", fontSize: "12px", background: "#262624" }}
+              >
+                <Users size={13} />
+                <span>Four-Role Status</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAttackChainModal(true)}
+                className="download-report-btn"
+                style={{ padding: "6px 12px", fontSize: "12px", background: "#262624" }}
+              >
+                <GitFork size={13} />
+                <span>Attack-Chain Engine</span>
+              </button>
               <div className="target-url-pill">
                 {summaryData?.target_url || targetUrl || "http://localhost:3000"}
               </div>
@@ -3688,6 +3732,42 @@ export default function Home() {
                   )}
                 </div>
 
+                {/* Autonomous Multi-Endpoint Attack-Chain Section */}
+                <div className="mt-8 mb-6">
+                  <AttackChainPanel
+                    assessmentId={assessmentId || activePastScanId || "preset-juice-shop"}
+                    targetUrl={summaryData?.target_url || targetUrl || "http://localhost:3000"}
+                    onFindingConfirmed={() => {
+                      if (assessmentId) {
+                        void selectPastScan({
+                          id: assessmentId,
+                          label: targetUrl || "Current Scan",
+                          target_url: targetUrl || "http://localhost:3000",
+                          status: "COMPLETED",
+                        });
+                      }
+                    }}
+                  />
+                </div>
+
+                {/* Autonomous Multi-Endpoint Attack-Chain Section */}
+                <div className="mt-8 mb-6">
+                  <AttackChainPanel
+                    assessmentId={assessmentId || activePastScanId || "preset-juice-shop"}
+                    targetUrl={summaryData?.target_url || targetUrl || "http://localhost:3000"}
+                    onFindingConfirmed={() => {
+                      if (assessmentId) {
+                        void selectPastScan({
+                          id: assessmentId,
+                          label: targetUrl || "Current Scan",
+                          target_url: targetUrl || "http://localhost:3000",
+                          status: "COMPLETED",
+                        });
+                      }
+                    }}
+                  />
+                </div>
+
                 {/* Bottom Report Action Buttons (Image 5) */}
                 <div className="report-bottom-actions">
                   <button
@@ -3958,6 +4038,52 @@ export default function Home() {
               apiBaseUrl={API_BASE_URL}
               onScanStarted={startGitHubDashboardScan}
               onScanSelected={loadCompletedGitHubScanIntoDashboard}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================== */}
+      {/* FOUR-ROLE TESTING CONFIGURATION MODAL                               */}
+      {/* =================================================================== */}
+      {showRolesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
+          <div className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-900 border border-zinc-800 shadow-2xl p-6 text-left">
+            <FourRoleConfigPanel
+              onClose={() => setShowRolesModal(false)}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* =================================================================== */}
+      {/* AUTONOMOUS ATTACK-CHAIN ENGINE MODAL                                */}
+      {/* =================================================================== */}
+      {showAttackChainModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
+          <div className="relative w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-900 border border-zinc-800 shadow-2xl p-6 text-left">
+            <div className="flex justify-end mb-2">
+              <button
+                type="button"
+                onClick={() => setShowAttackChainModal(false)}
+                className="p-1 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-800"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <AttackChainPanel
+              assessmentId={assessmentId || activePastScanId || "preset-juice-shop"}
+              targetUrl={summaryData?.target_url || targetUrl || "http://localhost:3000"}
+              onFindingConfirmed={() => {
+                if (assessmentId) {
+                  void selectPastScan({
+                    id: assessmentId,
+                    label: targetUrl || "Current Scan",
+                    target_url: targetUrl || "http://localhost:3000",
+                    status: "COMPLETED",
+                  });
+                }
+              }}
             />
           </div>
         </div>

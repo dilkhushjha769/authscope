@@ -359,3 +359,138 @@ export interface TargetCheckResponse {
   reason: string;
   profile?: TargetProfile | null;
 }
+
+
+export interface RoleSessionStatus {
+  role: string;
+  configured: boolean;
+  authenticated: boolean;
+  user_id?: string | null;
+  token_preview?: string | null;
+  owned_resources_count: number;
+  owned_resources: Record<string, string[]>;
+  status: string;
+  description: string;
+}
+
+export interface FourRolesStatusResponse {
+  roles: Record<string, RoleSessionStatus>;
+  multi_role_ready: boolean;
+  four_role_ready: boolean;
+  anonymous_baseline_ready: boolean;
+  summary: string;
+}
+
+export interface ConfigureRolePayload {
+  role: string;
+  token?: string;
+  user_id?: string;
+  owned_resources?: Record<string, string>;
+  custom_headers?: Record<string, string>;
+}
+
+export interface EndpointNodeInfo {
+  endpoint_id: string;
+  path: string;
+  method: string;
+  category: string;
+  resource_type?: string | null;
+  parameters: string[];
+  input_parameters: string[];
+  output_parameters: string[];
+  requires_auth: boolean;
+}
+
+export interface EndpointRelationshipInfo {
+  source_endpoint_id: string;
+  target_endpoint_id: string;
+  relationship: string;
+  rationale: string;
+  confidence: string;
+  bindings?: [string, string][];
+  uncertain?: boolean;
+}
+
+export interface EndpointGraphData {
+  assessment_id: string;
+  nodes_count: number;
+  relationships_count: number;
+  nodes: EndpointNodeInfo[];
+  relationships: EndpointRelationshipInfo[];
+  unresolved_dependencies: Array<{ endpoint_id: string; dependency: string; reason: string }>;
+  summary: string;
+}
+
+export interface AttackChainStepData {
+  step_id: string;
+  path: string;
+  method: string;
+  role?: string;
+  testing_role?: string;
+  depends_on_step_ids?: string[];
+  input_bindings?: Array<{ parameter: string; source_step_id: string; source_field?: string }>;
+  expected_status?: number;
+}
+
+export interface AttackChainCandidateData {
+  candidate_id: string;
+  scenario: string;
+  chain_name?: string;
+  steps: AttackChainStepData[];
+  risk_score: number;
+  safety_classification: string;
+  hypothesis: string;
+  estimated_complexity?: string;
+}
+
+export interface AttackChainStepResult {
+  step_id: string;
+  endpoint_path: string;
+  resolved_url: string;
+  method: string;
+  role_used: string;
+  status_code: number;
+  is_success: boolean;
+  status: string;
+  verdict: string;
+  response_excerpt: string;
+  extracted_identifiers: Record<string, string>;
+  expected_behavior: string;
+  actual_behavior: string;
+  evidence_sha256?: string | null;
+}
+
+export interface AttackChainExecutionData {
+  chain_id: string;
+  chain_name: string;
+  scenario: string;
+  target_url: string;
+  scan_id: string;
+  status: string;
+  is_confirmed: boolean;
+  steps_executed: number;
+  total_steps: number;
+  step_results: AttackChainStepResult[];
+  extracted_context: Record<string, string>;
+  vulnerability_category: string;
+  severity: string;
+  confidence: string;
+  remediation_steps: string[];
+  remediation_code_patch?: string | null;
+  finding_id?: string | null;
+  summary: string;
+  reproducibility_steps: string[];
+}
+
+export interface RoleMatrixItem {
+  endpoint: string;
+  method: string;
+  category: string;
+  requires_auth: boolean;
+  test_status: string;
+  verdict?: string | null;
+  summary?: string | null;
+  has_confirmed_vulnerability: boolean;
+  finding_id?: string | null;
+  severity?: string | null;
+}

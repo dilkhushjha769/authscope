@@ -292,8 +292,8 @@ class FindingRepository:
                 INSERT OR REPLACE INTO discovered_endpoints (
                     id, scan_id, path, method, category, parameters_json,
                     requires_auth, discovery_status, test_status, verdict,
-                    associated_finding_ids_json, summary
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    associated_finding_ids_json, summary, planner_metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     endpoint.id,
@@ -308,6 +308,7 @@ class FindingRepository:
                     endpoint.verdict,
                     json.dumps(endpoint.associated_finding_ids),
                     endpoint.summary,
+                    json.dumps(endpoint.planner_metadata),
                 ),
             )
             conn.commit()
@@ -347,6 +348,7 @@ class FindingRepository:
                     verdict=r["verdict"],
                     associated_finding_ids=finding_ids,
                     summary=r["summary"] or "",
+                    planner_metadata=json.loads(r["planner_metadata_json"] or "{}") if "planner_metadata_json" in r.keys() else {},
                 )
             )
         return results

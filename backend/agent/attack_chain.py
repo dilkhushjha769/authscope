@@ -309,12 +309,12 @@ class AttackChainPlanner:
         params = list(self._get(raw, "parameters", []) or [])
         params.extend(name for match in _TEMPLATE.finditer(normalized) for name in [(match.group(1) or "").lower()] if name not in params)
         input_params = list(self._get(raw, "input_parameters", params) or [])
-        output_params = list(self._get(raw, "output_parameters", []) or [])
         resource = self._get(raw, "resource_type")
         if not resource:
             segs = [seg for seg in normalized.strip("/").split("/") if seg]
             if len(segs) >= 2 and segs[0].lower() in ("rest", "api"):
                 resource = segs[1].strip("{}").lower().rstrip("s")
+        output_params = list(self._get(raw, "output_parameters", []) or [])
         category = self._get(raw, "category", "UNKNOWN")
         category = category.value if isinstance(category, Enum) else str(category or "UNKNOWN").upper()
         expected_roles = self._roles(raw)
@@ -386,7 +386,7 @@ class AttackChainPlanner:
         if not identifier:
             return None
         normalized_id = identifier.lower().replace("-", "_")
-        aliases = {source.resource_type, source.resource_type + "_id", source.resource_type + "id"}
+        aliases = {source.resource_type, source.resource_type + "_id", source.resource_type + "id", "id"}
         same_resource = source.resource_type == target.resource_type and ("id" in target_inputs or normalized_id in target_inputs)
         parent_child = (target.parent_resource_type or "").lower() == source.resource_type
         related = source.resource_type in target.related_resource_types
@@ -447,7 +447,17 @@ class AttackChainPlanner:
                         prior = path.index(edge.source_endpoint_id)
                         step_id = f"step-{prior + 1}"
                         depends.append(step_id)
-                        bindings.extend(InputBinding(parameter=param, source_step_id=step_id) for param, _ in edge.bindings)
+                        source_node = nodes[edge.source_endpoint_id]
+                        source_field = source_node.resource_identifier_name or next(
+                            (name for name in source_node.output_parameters
+                             if name.lower().replace("-", "_") in _PARAM_ID_WORDS
+                             or name.lower().endswith("_id") or name.lower().endswith("id")),
+                            "resource_id",
+                        )
+                        bindings.extend(
+                            InputBinding(parameter=param, source_step_id=step_id, source_field=source_field)
+                            for param, _ in edge.bindings
+                        )
             steps.append(AttackChainStep(step_id=f"step-{index + 1}", endpoint_id=node.endpoint_id, path=node.path,
                                          endpoint=node.path, method=node.method, http_method=node.method,
                                          category=node.category, resource_type=node.resource_type,

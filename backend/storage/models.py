@@ -54,6 +54,7 @@ class EventType(str, Enum):
     CONNECTION_COMPLETED = "connection_completed"
     ENDPOINT_DISCOVERED = "endpoint_discovered"
     ENDPOINT_DISCOVERY_COMPLETED = "endpoint_discovery_completed"
+    ATTACK_CHAIN_CANDIDATES_PLANNED = "attack_chain_candidates_planned"
     SESSION_VALIDATION_STARTED = "session_validation_started"
     SESSION_VALIDATION_COMPLETED = "session_validation_completed"
     AUTHORIZATION_TEST_STARTED = "authorization_test_started"
@@ -186,6 +187,10 @@ class DiscoveredEndpointRecord(BaseModel):
     verdict: Optional[str] = None  # AccessVerdict string if tested
     associated_finding_ids: List[str] = Field(default_factory=list)
     summary: str = ""
+    planner_metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Observed or documented endpoint metadata used by the deterministic chain planner.",
+    )
 
 
 class ScanSessionRecord(BaseModel):
