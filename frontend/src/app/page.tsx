@@ -18,6 +18,7 @@ import {
   Sun,
   Moon,
   ArrowUp,
+  Upload,
   X,
   CheckCircle2,
   AlertTriangle,
@@ -556,6 +557,7 @@ export default function Home() {
   const [showGitHubModal, setShowGitHubModal] = useState<boolean>(false);
   const [showRolesModal, setShowRolesModal] = useState<boolean>(false);
   const [showAttackChainModal, setShowAttackChainModal] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Assessment lifecycle states
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
@@ -2684,6 +2686,27 @@ export default function Home() {
                 className="start-form"
               >
                 <div className="github-pill-row">
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        setTargetUrl(file.name);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="link-github-btn"
+                    title="Upload file"
+                  >
+                    <Upload size={13} />
+                    <span>Upload file</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => setShowGitHubModal(true)}
