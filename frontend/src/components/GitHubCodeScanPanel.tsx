@@ -280,6 +280,7 @@ export function GitHubCodeScanPanel({
         }
       } catch {
         setStatus({ connected: false, account: null, installations: [] });
+        setError(null);
       }
     })();
     return () => streamRef.current?.close();

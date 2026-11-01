@@ -22,6 +22,9 @@ import {
   AlertTriangle,
   KeyRound,
   RefreshCw,
+  Upload,
+  Users,
+  Share2,
 } from "lucide-react";
 import { FourRoleConfigPanel } from "@/components/FourRoleConfigPanel";
 import { AttackChainPanel } from "@/components/AttackChainPanel";
@@ -2575,10 +2578,105 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, displayFindings.length]);
 
+  const startScreenFileInputRef = useRef<HTMLInputElement>(null);
+
+  const isGitHubUrl = (u: string) =>
+    /github\.com\/[^/]+\/[^/]+/i.test(u) ||
+    (!u.includes(" ") && !u.startsWith("http") && /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(u.trim()));
+
+  const startPublicGitHubScan = async (repoUrl: string) => {
+    setError(null);
+    setStatus("running");
+    setTargetUrl(repoUrl);
+    setElapsedSeconds(1);
+    setVisibleStepCount(1);
+    setActivityEvents([
+      {
+        id: 1,
+        assessment_id: "gh-init",
+        event_type: "agent_thinking",
+        stage: "connecting",
+        message: `Connecting to GitHub repository: ${repoUrl}...`,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/github/public-scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ repo_url: repoUrl }),
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.detail?.message || errJson.detail || "Could not start GitHub scan.");
+      }
+      const data = await res.json();
+      const parts = (data.repository || "").split("/");
+      startGitHubDashboardScan({
+        scanId: data.scan_id,
+        owner: parts[0] || "repo",
+        repository: parts[1] || data.repository,
+        branch: data.branch || "main",
+        commitSha: data.commit_sha,
+      });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "GitHub scan failed.");
+      setStatus("failed");
+    }
+  };
+
+  const handleStartScreenFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError(null);
+    setStatus("running");
+    const displayLabel = `local://${file.name}`;
+    setTargetUrl(displayLabel);
+    setElapsedSeconds(1);
+    setVisibleStepCount(1);
+    setActivityEvents([
+      {
+        id: 1,
+        assessment_id: "upload",
+        event_type: "agent_thinking",
+        stage: "file_upload",
+        message: `Uploading project archive '${file.name}' for AST and security analysis...`,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`${API_BASE_URL}/api/github/upload-scan`, {
+        method: "POST",
+        credentials: "include",
+        body: form,
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.detail?.message || errJson.detail || "Failed to upload project file.");
+      }
+      const data = await res.json();
+      startGitHubDashboardScan({
+        scanId: data.scan_id,
+        owner: "local",
+        repository: data.project_name || file.name.replace(/\.[^/.]+$/, ""),
+        branch: "uploaded",
+      });
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "File upload scan failed.");
+      setStatus("failed");
+    } finally {
+      if (e.target) e.target.value = "";
+    }
+  };
+
   const handleStartScreenSubmit = () => {
     const raw = targetUrl.trim();
     if (!raw) return;
-    // If the user typed a natural-language question instead of a URL, open the active scan report and answer it!
     const isNaturalQuestion =
       raw.includes(" ") ||
       raw.endsWith("?") ||
@@ -2589,6 +2687,10 @@ export default function Home() {
       void selectPastScan(preset).then(() => {
         void submitBottomChatQuery(raw);
       });
+      return;
+    }
+    if (isGitHubUrl(raw)) {
+      void startPublicGitHubScan(raw);
       return;
     }
     void startAssessment();
@@ -2756,8 +2858,8 @@ export default function Home() {
       {/* =================================================================== */}
       <aside className="sidebar" aria-label="Workspace navigation">
         <div className="brand">
-          <span className="brand-mark">A</span>
-          <span>AuthScope</span>
+          <span className="brand-mark">C</span>
+          <span>Cognifence</span>
         </div>
 
         <button
@@ -2818,17 +2920,50 @@ export default function Home() {
                 }}
                 className="start-form"
               >
-                <div className="github-pill-row">
+                <div className="start-action-pills-row">
+                  <input
+                    ref={startScreenFileInputRef}
+                    type="file"
+                    accept=".zip,.tar,.gz,.json,.yaml,.yml,.py,.js,.ts,.tsx,.jsx"
+                    className="hidden"
+                    onChange={handleStartScreenFileUpload}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => startScreenFileInputRef.current?.click()}
+                    className="start-action-pill"
+                    title="Upload local project (.ZIP) or source code"
+                  >
+                    <Upload size={13} className="text-[#5fa37f]" />
+                    <span>Upload file</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => setShowGitHubModal(true)}
-                    className="link-github-btn"
+                    className="start-action-pill"
                   >
-                    <GitBranch size={13} />
+                    <GitBranch size={13} className="text-[#5fa37f]" />
                     <span>Link GitHub project</span>
                   </button>
 
+                  <button
+                    type="button"
+                    onClick={() => setShowRolesModal(true)}
+                    className="start-action-pill"
+                  >
+                    <Users size={13} className="text-[#5fa37f]" />
+                    <span>Four-Role Testing</span>
+                  </button>
 
+                  <button
+                    type="button"
+                    onClick={() => setShowAttackChainModal(true)}
+                    className="start-action-pill"
+                  >
+                    <Share2 size={13} className="text-[#5fa37f]" />
+                    <span>Attack-Chain Engine &gt;</span>
+                  </button>
 
                   {targetUrl.trim() && (
                     <button
@@ -2837,7 +2972,7 @@ export default function Home() {
                         setShowAuthModal(true);
                         setAuthActionMessage(null);
                       }}
-                      className="text-xs text-[#aaa8a1] hover:text-[#f4f2ec] underline underline-offset-2"
+                      className="text-xs text-[var(--muted)] hover:text-[var(--text)] underline underline-offset-2 ml-auto"
                     >
                       {isCheckingAuth
                         ? "Checking scope..."
@@ -2870,7 +3005,7 @@ export default function Home() {
                 </div>
 
                 <p className="address-hint">
-                  Enter a full address or a website name.
+                  Enter a full website address, GitHub repository URL, or upload a project zip.
                 </p>
 
                 {error && (
@@ -3192,6 +3327,45 @@ export default function Home() {
                   </section>
                 )}
 
+                {/* Attack-Chain Engine Summary Card (Figma Image 9) */}
+                <div
+                  className="attack-chain-summary-trigger"
+                  onClick={() => setShowAttackChainModal(true)}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 rounded-lg bg-[var(--surface-hover)] text-[#5fa37f]">
+                      <GitBranch size={16} />
+                    </div>
+                    <div>
+                      <div className="font-semibold text-sm text-[var(--text)]">Attack-Chain Engine</div>
+                      <div className="text-xs text-[var(--muted)]">See how separate problems could be joined together.</div>
+                    </div>
+                  </div>
+                  <ChevronRight size={16} className="text-[var(--muted)]" />
+                </div>
+
+                {/* Two outline buttons side-by-side (Figma Image 9) */}
+                <div className="flex flex-wrap items-center gap-3 my-4">
+                  <button
+                    type="button"
+                    onClick={() => setShowAttackChainModal(true)}
+                    className="outline-action-btn"
+                  >
+                    <GitBranch size={15} className="text-[#5fa37f]" />
+                    <span>Attack-Chain Engine</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowRolesModal(true)}
+                    className="outline-action-btn"
+                  >
+                    <Users size={15} className="text-[#5fa37f]" />
+                    <span>Four-Role Authorization Testing</span>
+                  </button>
+                </div>
+
                 {/* How the AI found these (Image 3) */}
                 <div className="ai-how-found-row">
                   <button
@@ -3270,7 +3444,7 @@ export default function Home() {
         {/* PERSISTENT CHATGPT / CLAUDE-STYLE AI THREAD & BOTTOM COMPOSER     */}
         {/* Never hides the text field; docked at the bottom during/after scan */}
         {/* ================================================================= */}
-        {status === "completed" && displayFindings.length > 0 && (
+        {(status === "completed" || status === "failed" || displayFindings.length > 0) && status !== "ready" && !isRunningState && (
           <>
             {globalChatHistory.length > 0 && (
               <div className="chatgpt-thread-container">

@@ -154,7 +154,7 @@ class GitHubAppService:
         basic_auth: Optional[httpx.BasicAuth] = None,
         client: Optional[httpx.AsyncClient] = None,
     ) -> httpx.Response:
-        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": GITHUB_API_VERSION}
+        headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": GITHUB_API_VERSION, "User-Agent": "AuthScope-Security-Scanner/1.0"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         parsed_url = urlparse(url)

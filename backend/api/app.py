@@ -2573,18 +2573,48 @@ async def _run_github_scan(scan: Dict[str, Any]) -> None:
     service = _github_service()
     scan_id = str(scan["id"])
     user_id = str(scan["github_user_id"])
+    installation_id = int(scan.get("installation_id", 0))
+    owner = str(scan["owner"])
+    repo = str(scan["repository"])
+    branch = str(scan.get("branch") or "main")
 
     def event(event_type: str, stage: str, message: str, metadata: Dict[str, Any]) -> None:
         repository.save_scan_event(scan_id, event_type, stage, redact_sensitive_text(message), metadata)
 
     try:
+        # For public repositories without app installation, download archive zip directly
+        # to guarantee zero GitHub API rate limits and instant complete AST coverage
+        if installation_id == 0:
+            event("activity", "repository_validation", f"Connecting to public repository {owner}/{repo}...", {})
+            event("activity", "repository_read", f"Downloading source archive for branch '{branch}'...", {})
+            archive_urls = [
+                f"https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip",
+                f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}",
+            ]
+            zip_bytes = None
+            async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+                for a_url in archive_urls:
+                    try:
+                        resp = await client.get(a_url, headers={"User-Agent": "AuthScope-Security-Scanner/1.0"})
+                        if resp.status_code == 200 and len(resp.content) > 100:
+                            zip_bytes = resp.content
+                            break
+                    except Exception as err:
+                        logger.warning(f"Archive download failed for {a_url}: {err}")
+            if zip_bytes:
+                await _run_zip_upload_scan(
+                    scan_id, user_id, f"{owner}/{repo}", zip_bytes,
+                    owner=owner, repo=repo, branch=branch, commit_sha=str(scan.get("commit_sha") or "HEAD")
+                )
+                return
+
         event("activity", "repository_validation", "Connecting to GitHub...", {})
         event("activity", "authorization", "Checking repository installation access...", {})
         event("activity", "analysis", "Checking authentication and authorization...", {})
         result = await asyncio.wait_for(
             service.scan_repository(
-                user_id, int(scan["installation_id"]), str(scan["owner"]), str(scan["repository"]),
-                str(scan["branch"]), str(scan["commit_sha"]), scan_id, event,
+                user_id, installation_id, owner, repo,
+                branch, str(scan.get("commit_sha") or "HEAD"), scan_id, event,
             ),
             timeout=settings.assessment_timeout_seconds,
         )
@@ -2677,40 +2707,46 @@ def ensure_guest_connection(repository: GitHubRepository, user_id: str, login: s
     return user_id
 
 
-def parse_github_repo_url(url: str) -> Tuple[str, str]:
+def parse_github_repo_url(url: str) -> Tuple[str, str, Optional[str]]:
     clean = url.strip().rstrip("/")
+    branch = None
     if "github.com/" in clean:
-        parts = clean.split("github.com/")[1].split("/")
+        after = clean.split("github.com/")[1]
+        parts = after.split("/")
         if len(parts) >= 2:
-            return parts[0], parts[1].replace(".git", "")
+            owner = parts[0]
+            repo = parts[1].replace(".git", "")
+            if len(parts) >= 4 and parts[2] in ("tree", "blob", "releases", "commits"):
+                branch = "/".join(parts[3:])
+            return owner, repo, branch
     elif "/" in clean and not clean.startswith("http"):
         parts = clean.split("/")
-        if len(parts) == 2:
-            return parts[0], parts[1].replace(".git", "")
+        if len(parts) >= 2:
+            owner = parts[0]
+            repo = parts[1].replace(".git", "")
+            if len(parts) >= 4 and parts[2] in ("tree", "blob"):
+                branch = "/".join(parts[3:])
+            return owner, repo, branch
     raise HTTPException(status_code=400, detail={"code": "INVALID_GITHUB_URL", "message": "Provide a valid GitHub repository URL, e.g., https://github.com/juice-shop/juice-shop"})
 
 
 @app.post("/api/github/public-scan", status_code=status.HTTP_202_ACCEPTED)
 async def github_start_public_scan(payload: PublicGitHubScanRequest, request: Request) -> Dict[str, Any]:
     _require_frontend_origin(request)
-    owner, repo = parse_github_repo_url(payload.repo_url)
+    owner, repo, url_branch = parse_github_repo_url(payload.repo_url)
     service = _github_service()
     github_repository = _github_repository()
 
-    branch = (payload.branch or "").strip()
+    branch = (payload.branch or url_branch or "").strip()
     commit_sha = ""
-    try:
-        if not branch:
+    if not branch:
+        try:
             repo_meta_resp = await service._request("GET", f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}")
             repo_meta = service._json(repo_meta_resp)
             branch = str(repo_meta.get("default_branch") or "main")
-        branch_resp = await service._request("GET", f"{GITHUB_API}/repos/{quote(owner, safe='')}/{quote(repo, safe='')}/commits/{quote(branch, safe='')}")
-        branch_data = service._json(branch_resp)
-        commit_sha = str(branch_data.get("sha") or "")
-    except Exception as exc:
-        logger.warning(f"Could not resolve public branch head via GitHub API: {exc}")
-        commit_sha = commit_sha or "HEAD"
-        branch = branch or "main"
+        except Exception as exc:
+            logger.warning(f"Could not resolve public default branch via GitHub API: {exc}")
+            branch = "main"
 
     scan_id = f"gscan_pub_{uuid.uuid4().hex}"
     user_id = f"pub_{uuid.uuid4().hex[:12]}"
@@ -2734,7 +2770,11 @@ async def github_start_public_scan(payload: PublicGitHubScanRequest, request: Re
     return {"scan_id": scan_id, "status": "RUNNING", "repository": f"{owner}/{repo}", "branch": branch, "commit_sha": commit_sha}
 
 
-async def _run_zip_upload_scan(scan_id: str, user_id: str, project_name: str, zip_bytes: bytes) -> None:
+async def _run_zip_upload_scan(
+    scan_id: str, user_id: str, project_name: str, zip_bytes: bytes,
+    owner: Optional[str] = None, repo: Optional[str] = None,
+    branch: Optional[str] = None, commit_sha: Optional[str] = None,
+) -> None:
     import zipfile, io, tempfile, shutil
     from backend.scanner.source_analyzer import SourceAnalyzer
     from backend.utils.helpers import redact_sensitive_text
@@ -2778,10 +2818,16 @@ async def _run_zip_upload_scan(scan_id: str, user_id: str, project_name: str, zi
             item["source_type"] = "SOURCE_CODE_FINDING"
             item["classification"] = f.classification.value
             item["runtime_status"] = "NOT_TESTED"
-            item["repository"] = f"local/{project_name}"
-            item["branch"] = "uploaded"
-            item["commit_sha"] = "LOCAL"
-            item["github_url"] = f"local://{f.file_path}#L{f.start_line}-L{f.end_line}"
+            if owner and repo:
+                item["repository"] = f"{owner}/{repo}"
+                item["branch"] = branch or "main"
+                item["commit_sha"] = commit_sha or "HEAD"
+                item["github_url"] = f"https://github.com/{owner}/{repo}/blob/{branch or 'main'}/{f.file_path}#L{f.start_line}-L{f.end_line}"
+            else:
+                item["repository"] = f"local/{project_name}"
+                item["branch"] = "uploaded"
+                item["commit_sha"] = "LOCAL"
+                item["github_url"] = f"local://{f.file_path}#L{f.start_line}-L{f.end_line}"
             if idx < 6:
                 try:
                     item["ai_review"] = await service._review_source_finding(f)
