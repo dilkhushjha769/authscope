@@ -936,6 +936,21 @@ class AssessmentTaskManager:
                             )
                             repo.save_event(review_event)
                             await self._broadcast(scan_id, ("activity", review_event, None))
+                if event.event_type == EventType.ASSESSMENT_FAILED.value:
+                    sess = repo.get_scan_session(scan_id)
+                    if sess and sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
+                        sess.status = "FAILED"
+                        sess.failure_reason = event.metadata.get("failure_reason") or event.metadata.get("reason") or "ASSESSMENT_FAILED"
+                        sess.completed_at = datetime.now(timezone.utc)
+                        sess.summary_text = event.message
+                        repo.save_scan_session(sess)
+                elif event.event_type == EventType.ASSESSMENT_COMPLETED.value:
+                    sess = repo.get_scan_session(scan_id)
+                    if sess and sess.status not in ("COMPLETED", "FAILED", "CANCELLED"):
+                        sess.status = "COMPLETED"
+                        sess.completed_at = datetime.now(timezone.utc)
+                        sess.summary_text = event.message
+                        repo.save_scan_session(sess)
                 msg_chunk = _format_event_message_chunk(event, repo=repo)
                 await self._broadcast(scan_id, ("activity", event, msg_chunk))
                 await asyncio.sleep(0.04)
@@ -1132,6 +1147,8 @@ def _build_done_payload(
         "port": port,
         "status": status_val,
         "summary": summary_txt,
+        "summary_text": summary_txt,
+        "failure_reason": (session.failure_reason if session else None),
         "endpoints_discovered": disc_count,
         "endpoints_tested": tested_count,
         "confirmed_findings": conf_count,

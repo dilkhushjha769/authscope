@@ -47,13 +47,14 @@ class TargetRepository:
 
     def seed_default_targets(self) -> None:
         """Seeds built-in authorized localhost target profiles if missing."""
+        dev_ports = [3000, 80, 443, 8000, 8080, 8888, 5000, 5173, 4200, 8443]
         default_profiles = [
             TargetProfileRecord(
                 id="target_localhost_3000",
                 hostname="localhost",
                 base_url="http://localhost:3000",
                 allowed_schemes=["http"],
-                allowed_ports=[3000],
+                allowed_ports=dev_ports,
                 allowed_paths=[],
                 allowed_methods=["GET", "HEAD"],
                 authorization_basis=AuthorizationBasis.LOCAL_DEVELOPMENT.value,
@@ -69,7 +70,7 @@ class TargetRepository:
                 hostname="127.0.0.1",
                 base_url="http://127.0.0.1:3000",
                 allowed_schemes=["http"],
-                allowed_ports=[3000],
+                allowed_ports=dev_ports,
                 allowed_paths=[],
                 allowed_methods=["GET", "HEAD"],
                 authorization_basis=AuthorizationBasis.LOCAL_DEVELOPMENT.value,

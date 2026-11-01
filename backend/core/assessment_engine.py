@@ -333,13 +333,14 @@ class AssessmentEngine:
             session.status = "FAILED"
             session.completed_at = datetime.now(timezone.utc)
             session.summary_text = f"Target rejected by ScopeGuard: {scope_res.reason}"
+            session.failure_reason = f"Target rejected by ScopeGuard: {scope_res.reason}"
             self._skip_remaining_stages(session, "Skipped due to scope validation failure.")
             yield self._emit_event(
                 session,
                 EventType.ASSESSMENT_FAILED,
                 AssessmentStage.SCOPE_VALIDATION,
                 f"Target rejected by ScopeGuard: {scope_res.reason}",
-                {"reason": scope_res.reason},
+                {"reason": scope_res.reason, "failure_reason": session.failure_reason},
             )
             self.repository.save_scan_session(session)
             return session
@@ -400,13 +401,14 @@ class AssessmentEngine:
                 session.status = "FAILED"
                 session.completed_at = datetime.now(timezone.utc)
                 session.summary_text = f"Target unreachable: {exc}"
+                session.failure_reason = f"Target unreachable: {exc}"
                 self._skip_remaining_stages(session, "Skipped because target application is unreachable.")
                 yield self._emit_event(
                     session,
                     EventType.ASSESSMENT_FAILED,
                     AssessmentStage.TARGET_CONNECTION,
                     f"Application connection failed: {exc}",
-                    {"error": str(exc)},
+                    {"error": str(exc), "failure_reason": session.failure_reason},
                 )
                 self.repository.save_scan_session(session)
                 return session

@@ -1202,6 +1202,15 @@ export default function Home() {
       const data: AssessmentSummaryResponse = await res.json();
 
       setSummaryData(data);
+      const bStatus = String(data.status || "").toLowerCase();
+      if (bStatus === "failed") {
+        setStatus("failed");
+        if (data.failure_reason || data.summary_text) {
+          setError(data.failure_reason || data.summary_text);
+        }
+      } else if (bStatus === "cancelled") {
+        setStatus("cancelled");
+      }
       if (data.stages) {
         setStages(data.stages);
       }
@@ -1315,6 +1324,17 @@ export default function Home() {
             if (ename === "finding_discovered" || ename === "evidence_validated") {
               setStatus("findings_discovered");
               void fetchAssessmentDetails(scanId);
+            } else if (ename === "assessment_failed") {
+              const failReason =
+                payload.failure_reason ||
+                payload.reason ||
+                payload.error ||
+                payload.message ||
+                "Assessment execution failed.";
+              setStatus("failed");
+              setError(failReason);
+              es.close();
+              void fetchAssessmentDetails(scanId);
             }
           } catch (err) {
             console.warn(`Failed to parse ${ename} event:`, err);
@@ -1329,6 +1349,12 @@ export default function Home() {
 
           if (rawStatus === "failed") {
             setStatus("failed");
+            setError(
+              doneData.failure_reason ||
+              doneData.summary_text ||
+              doneData.summary ||
+              "Assessment failed."
+            );
           } else if (rawStatus === "cancelled") {
             setStatus("cancelled");
           } else {
@@ -1372,7 +1398,7 @@ export default function Home() {
             return "reconnecting";
           } else {
             setError(
-              "Live stream connection interrupted. You can retry the scan or refresh."
+              "Live stream connection interrupted. The target may be offline or unreachable."
             );
             return "failed";
           }
@@ -2829,9 +2855,22 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="report-check-mark">
-              <Check size={16} />
-            </div>
+            {status !== "failed" ? (
+              <div className="report-check-mark">
+                <Check size={16} />
+              </div>
+            ) : (
+              <div
+                className="report-check-mark"
+                style={{
+                  backgroundColor: "#2d1616",
+                  borderColor: "#7a2727",
+                  color: "#f87171",
+                }}
+              >
+                <AlertTriangle size={16} />
+              </div>
+            )}
 
             <h1 className="report-headline">
               {status === "failed"
@@ -2860,7 +2899,7 @@ export default function Home() {
             </p>
 
             {status === "failed" && (
-              <div className="mt-5">
+              <div className="mt-5 flex items-center gap-3">
                 <button
                   type="button"
                   onClick={() => void startAssessment(summaryData?.target_url || targetUrl)}
@@ -2868,6 +2907,18 @@ export default function Home() {
                 >
                   <RefreshCw size={13} />
                   <span>Try again</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={resetAssessment}
+                  className="scan-another-btn"
+                  style={{
+                    backgroundColor: "transparent",
+                    border: "1px solid #333330",
+                    color: "#f4f2ec",
+                  }}
+                >
+                  <span>Scan another site</span>
                 </button>
               </div>
             )}
@@ -3421,7 +3472,7 @@ export default function Home() {
         {/* PERSISTENT CHATGPT / CLAUDE-STYLE AI THREAD & BOTTOM COMPOSER     */}
         {/* Never hides the text field; docked at the bottom during/after scan */}
         {/* ================================================================= */}
-        {status !== "ready" && (
+        {status !== "ready" && !isRunningState && (
           <>
             {globalChatHistory.length > 0 && (
               <div className="chatgpt-thread-container">
