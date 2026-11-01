@@ -630,7 +630,7 @@ textarea {
 .filter-pill.active {
   border-color: var(--accent);
   background: var(--accent);
-  color: #102218;
+  color: #ffffff;
   font-weight: 550;
 }
 
@@ -911,7 +911,7 @@ textarea {
   border: 1px solid var(--accent);
   border-radius: 8px;
   background: var(--accent);
-  color: #102218;
+  color: #ffffff;
   font-size: 13px;
   font-weight: 550;
   cursor: pointer;
@@ -1206,7 +1206,7 @@ nextjs-portal {
 
 .bug-qa-send-btn:hover:not(:disabled) {
   background: var(--accent);
-  color: #102218;
+  color: #ffffff;
 }
 
 .bug-qa-send-btn:disabled {
@@ -1318,12 +1318,8 @@ nextjs-portal {
   z-index: 25;
   width: 100%;
   padding: 12px 24px 18px;
-  background: linear-gradient(
-    to top,
-    var(--canvas) 85%,
-    rgba(38, 38, 36, 0.95) 94%,
-    transparent
-  );
+  background: var(--canvas);
+  border-top: 1px solid var(--line-subtle);
 }
 
 .chatgpt-bottom-inner {
@@ -1430,7 +1426,7 @@ nextjs-portal {
 
 .chatgpt-pdf-btn:hover {
   background: var(--accent);
-  color: #102218;
+  color: #ffffff;
 }
 
 .chatgpt-submit-btn,
@@ -1443,7 +1439,7 @@ nextjs-portal {
   border-radius: 8px;
   border: none;
   background: var(--accent);
-  color: #102218;
+  color: #ffffff;
   cursor: pointer;
   flex-shrink: 0;
   transition: background 0.15s ease;
@@ -1534,12 +1530,8 @@ nextjs-portal {
 
 /* Light mode specific refinements matching Figma */
 .workspace-light .chatgpt-bottom-dock {
-  background: linear-gradient(
-    to top,
-    #faf9f5 90%,
-    rgba(250, 249, 245, 0.95) 96%,
-    transparent
-  );
+  background: #faf9f5;
+  border-top: 1px solid #e2e0d8;
 }
 
 .workspace-light .chatgpt-message-card.assistant {
@@ -1625,4 +1617,18 @@ nextjs-portal {
   background: #ffffff;
   border-color: #e2e0d8;
   color: #1f1e1d;
+}
+
+.workspace-light .download-report-btn,
+.download-report-btn {
+  background: #3d825e;
+  border-color: #3d825e;
+  color: #ffffff !important;
+  font-weight: 600;
+}
+
+.workspace-light .chatgpt-submit-btn,
+.chatgpt-submit-btn {
+  background: #3d825e;
+  color: #ffffff !important;
 }

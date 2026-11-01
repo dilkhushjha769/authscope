@@ -7,7 +7,6 @@ import {
   ChevronRight,
   ChevronUp,
   Copy,
-  Download,
   GitBranch,
   Loader2,
   Lock,
@@ -2770,10 +2769,25 @@ export default function Home() {
             <strong>{categoryLabel}:</strong> {plainProblem}
           </p>
 
-          <p className="problem-route">
-            {routePath}
-            {resolveBugSourceLocationLabel(finding) ? ` · ${resolveBugSourceLocationLabel(finding)}` : ""}
-          </p>
+          <div className="my-2.5 flex flex-wrap items-center gap-2 text-xs">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[var(--line)] bg-[var(--panel)] font-mono text-[var(--text)]">
+              <span className="font-semibold text-[#5fa37f] uppercase">
+                {httpMethod === "SOURCE" ? "FILE" : httpMethod}
+              </span>
+              <span>{routePath}</span>
+            </span>
+            {resolveBugSourceLocationLabel(finding) && resolveBugSourceLocationLabel(finding) !== routePath && (
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[var(--line)] bg-[var(--panel)] font-mono text-[var(--muted)]">
+                <span className="font-semibold text-[var(--text)]">Location:</span>
+                <span>{resolveBugSourceLocationLabel(finding)}</span>
+              </span>
+            )}
+            {finding.full_url && (
+              <span className="text-[11px] font-mono text-[var(--muted)] truncate max-w-[420px]" title={finding.full_url}>
+                {finding.full_url}
+              </span>
+            )}
+          </div>
 
           {/* Proof (Two-Column Request Sent / Response Received) */}
           <h3 className="proof-heading">Proof</h3>
@@ -2796,6 +2810,15 @@ export default function Home() {
 
           {/* Green Left-Border Impact & Fix Callout (Figma Image 2) */}
           <div className="impact-fix-callout">
+            <h4 className="callout-heading">Bug location &amp; API endpoint</h4>
+            <p className="callout-text font-mono text-xs mb-3">
+              {httpMethod !== "SOURCE" ? `${httpMethod} ${routePath}` : routePath}
+              {resolveBugSourceLocationLabel(finding) && resolveBugSourceLocationLabel(finding) !== routePath
+                ? ` · Source: ${resolveBugSourceLocationLabel(finding)}`
+                : ""}
+              {finding.full_url ? ` (${finding.full_url})` : ""}
+            </p>
+
             <h4 className="callout-heading">What could happen</h4>
             <p className="callout-text">{whatBugCanDo}</p>
 
@@ -3550,15 +3573,7 @@ export default function Home() {
                     ))}
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={downloadReportPdf}
-                    className="chatgpt-pdf-btn"
-                    title="Download full security report as PDF"
-                  >
-                    <Download size={13} />
-                    <span>Download PDF</span>
-                  </button>
+
                 </div>
                 )}
 
@@ -3583,11 +3598,16 @@ export default function Home() {
                             .filter((f) => normalizeFindingCategory(f) === cat)
                             .map((f, i) => (
                               <option key={f.id || i} value={f.id}>
-                                {(
+                                {`${(
                                   f.beginner_explanation?.simple_title ||
                                   f.title ||
-                                  f.target_endpoint
-                                ).slice(0, 32)}
+                                  "Bug"
+                                ).slice(0, 26)} — ${
+                                  resolveBugSourceLocationLabel(f) ||
+                                  f.target_endpoint ||
+                                  f.endpoint ||
+                                  "/"
+                                }`}
                               </option>
                             ))}
                         </optgroup>
