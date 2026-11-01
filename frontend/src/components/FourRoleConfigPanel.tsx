@@ -3,15 +3,11 @@
 import React, { useState, useEffect } from "react";
 import {
   Users,
-  Shield,
   KeyRound,
   CheckCircle2,
   AlertCircle,
-  HelpCircle,
   Save,
   RefreshCw,
-  Lock,
-  Layers,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { FourRolesStatusResponse, RoleSessionStatus } from "@/types/assessment";
@@ -48,7 +44,9 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
   };
 
   useEffect(() => {
-    void fetchRoles();
+    const timer = window.setTimeout(() => void fetchRoles(), 0);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSave = async (e: React.FormEvent) => {

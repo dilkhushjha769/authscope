@@ -123,6 +123,13 @@ class ChainValidationResult(BaseModel):
 class StepExecutionResult(BaseModel):
     """Telemetry, evidence, and authorization evaluation for a single executed step."""
     step_id: str
+    path: str = ""
+    resource_type: Optional[str] = None
+    input_parameters: List[str] = Field(default_factory=list)
+    output_parameters: List[str] = Field(default_factory=list)
+    input_bindings: List[Dict[str, Any]] = Field(default_factory=list)
+    depends_on_step_ids: List[str] = Field(default_factory=list)
+    expected_allowed_roles: List[str] = Field(default_factory=list)
     endpoint_path: str
     resolved_url: str
     method: str
@@ -592,11 +599,11 @@ class AttackChainExecutor:
 
             # Literal IDs are accepted only when the operator has registered the
             # value as an explicitly approved fixture owned by a configured role.
-            if not input_bindings:
-                literal_ids = [
-                    segment for segment in urlsplit(resolved_path).path.split("/")
-                    if re.fullmatch(r"[0-9]{1,20}|[0-9a-fA-F-]{8,128}", segment)
-                ]
+            literal_ids = [
+                segment for segment in urlsplit(path_template).path.split("/")
+                if re.fullmatch(r"[0-9]{1,20}|[0-9a-fA-F-]{8,128}", segment)
+            ]
+            if literal_ids:
                 resource_type = str(step_data.get("resource_type") or "").lower()
                 for literal_id in literal_ids:
                     if not resource_type or not any(
@@ -1002,6 +1009,13 @@ class AttackChainExecutor:
 
         return StepExecutionResult(
             step_id=step_id,
+            path=str(step_data.get("path") or step_data.get("endpoint_path") or ""),
+            resource_type=step_data.get("resource_type"),
+            input_parameters=list(step_data.get("input_parameters") or []),
+            output_parameters=list(step_data.get("output_parameters") or []),
+            input_bindings=[b if isinstance(b, dict) else b.model_dump() for b in step_data.get("input_bindings", [])],
+            depends_on_step_ids=list(step_data.get("depends_on_step_ids") or []),
+            expected_allowed_roles=[str(getattr(role, "value", role)) for role in step_data.get("expected_allowed_roles", [])],
             endpoint_path=resolved_url.replace(self.base_url, ""),
             resolved_url=resolved_url,
             method=method,

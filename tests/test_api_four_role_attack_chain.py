@@ -180,3 +180,26 @@ def test_execute_attack_chain_api(api_client, monkeypatch):
     assert saved_finding.vulnerability_category == "MULTI_STEP_CHAIN"
     assert saved_finding.evidence is not None
     assert len(saved_finding.evidence.evidence_sha256) == 64
+
+
+def test_validate_attack_chain_api_does_not_send_requests(api_client):
+    repo = _get_repository()
+    scan_id = "scan_test_validate_api"
+    repo.save_scan_session(ScanSessionRecord(
+        id=scan_id, target_url="http://localhost:3000", status="COMPLETED",
+    ))
+    chain = {
+        "candidate_id": "invalid-method",
+        "scenario": "BOLA_IDOR",
+        "steps": [
+            {"step_id": "one", "path": "/api/items", "method": "GET"},
+            {"step_id": "two", "path": "/api/items/{id}", "method": "DELETE", "depends_on_step_ids": ["one"]},
+        ],
+    }
+    response = api_client.post(
+        f"/api/assessments/{scan_id}/attack-chains/validate", json={"chain": chain},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["is_valid"] is False
+    assert any("not permitted" in reason for reason in data["rejection_reasons"])

@@ -447,7 +447,17 @@ class AttackChainPlanner:
                         prior = path.index(edge.source_endpoint_id)
                         step_id = f"step-{prior + 1}"
                         depends.append(step_id)
-                        bindings.extend(InputBinding(parameter=param, source_step_id=step_id) for param, _ in edge.bindings)
+                        source_node = nodes[edge.source_endpoint_id]
+                        source_field = source_node.resource_identifier_name or next(
+                            (name for name in source_node.output_parameters
+                             if name.lower().replace("-", "_") in _PARAM_ID_WORDS
+                             or name.lower().endswith("_id") or name.lower().endswith("id")),
+                            "resource_id",
+                        )
+                        bindings.extend(
+                            InputBinding(parameter=param, source_step_id=step_id, source_field=source_field)
+                            for param, _ in edge.bindings
+                        )
             steps.append(AttackChainStep(step_id=f"step-{index + 1}", endpoint_id=node.endpoint_id, path=node.path,
                                          endpoint=node.path, method=node.method, http_method=node.method,
                                          category=node.category, resource_type=node.resource_type,

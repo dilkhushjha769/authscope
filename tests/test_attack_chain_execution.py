@@ -726,7 +726,8 @@ def test_17_remediation_integration():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"id": 1, "owner": "user_a"})
 
-    executor, _, _ = build_chain_test_environment(handler)
+    executor, sessions, _ = build_chain_test_environment(handler)
+    sessions.register_resource_ownership(Role.USER_A, "order", "1")
 
     chain = {
         "candidate_id": "chain_rem",
@@ -766,6 +767,7 @@ def test_18_automated_chain_retesting(isolated_repo: FindingRepository):
         return httpx.Response(404)
 
     executor, sm, scope = build_chain_test_environment(handler)
+    sm.register_resource_ownership(Role.USER_A, "order", "1")
     executor.repository = isolated_repo
     tester = AuthorizationTester(
         executor=executor.executor,
@@ -823,6 +825,7 @@ async def test_19_tool_registry_and_adapter_integration(isolated_repo: FindingRe
         return httpx.Response(200, json={"id": 1, "owner": "user_a"})
 
     executor, sm, scope = build_chain_test_environment(handler)
+    sm.register_resource_ownership(Role.USER_A, "order", "1")
     executor.repository = isolated_repo
 
     auth_tools = AuthorizationTools(
@@ -872,8 +875,9 @@ def test_20_dashboard_result_integration(isolated_repo: FindingRepository):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"id": 1, "owner": "user_a"})
 
-    executor, _, _ = build_chain_test_environment(handler)
+    executor, sessions, _ = build_chain_test_environment(handler)
     executor.repository = isolated_repo
+    sessions.register_resource_ownership(Role.USER_A, "order", "1")
 
     chain = {
         "candidate_id": "chain_dash_ui",

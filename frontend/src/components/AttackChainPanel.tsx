@@ -6,25 +6,18 @@ import {
   Play,
   CheckCircle2,
   AlertTriangle,
-  XCircle,
   ShieldAlert,
   ArrowRight,
   RefreshCw,
   Code2,
-  FileText,
-  Lock,
-  Network,
   ListOrdered,
   ChevronRight,
-  ExternalLink,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
   AttackChainCandidateData,
   AttackChainExecutionData,
   EndpointGraphData,
-  EndpointNodeInfo,
-  EndpointRelationshipInfo,
 } from "@/types/assessment";
 
 interface Props {
@@ -39,7 +32,6 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed }
   const [graphData, setGraphData] = useState<EndpointGraphData | null>(null);
   const [selectedCandidate, setSelectedCandidate] = useState<AttackChainCandidateData | null>(null);
   const [executionResult, setExecutionResult] = useState<AttackChainExecutionData | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
   const [planning, setPlanning] = useState<boolean>(false);
   const [executing, setExecuting] = useState<boolean>(false);
   const [validating, setValidating] = useState<boolean>(false);
@@ -51,7 +43,6 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed }
   const loadData = async () => {
     if (!assessmentId) return;
     try {
-      setLoading(true);
       setError(null);
       const [chainsRes, graphRes] = await Promise.all([
         api.getAttackChains(assessmentId).catch(() => ({ candidates: [] })),
@@ -64,13 +55,13 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed }
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load attack chain data.");
-    } finally {
-      setLoading(false);
     }
   };
 
   useEffect(() => {
-    void loadData();
+    const timer = window.setTimeout(() => void loadData(), 0);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assessmentId]);
 
   const handlePlanChains = async () => {
@@ -435,7 +426,6 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed }
                 </h5>
                 <div className="space-y-2.5">
                   {executionResult.step_results.map((st, idx) => {
-                    const isSuccess = st.status === "SUCCESS";
                     const isViolation = st.verdict === "CONFIRMED_UNAUTHORIZED_ACCESS";
                     return (
                       <div
