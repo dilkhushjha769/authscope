@@ -42,6 +42,8 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed }
   const [loading, setLoading] = useState<boolean>(false);
   const [planning, setPlanning] = useState<boolean>(false);
   const [executing, setExecuting] = useState<boolean>(false);
+  const [validating, setValidating] = useState<boolean>(false);
+  const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const [retesting, setRetesting] = useState<boolean>(false);
   const [retestResult, setRetestResult] = useState<{ status: string; notes: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -89,8 +91,21 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed }
 
   const handleExecuteChain = async (candidate: AttackChainCandidateData) => {
     try {
-      setExecuting(true);
+      setValidating(true);
       setError(null);
+      setValidationMessage(null);
+      const validation = await api.validateAttackChain(
+        assessmentId,
+        candidate as unknown as Record<string, unknown>
+      );
+      if (!validation.is_valid) {
+        const reason = validation.rejection_reasons.join(" ") || "The candidate did not pass validation.";
+        setValidationMessage(`Not executed: ${reason}`);
+        return;
+      }
+      setValidationMessage("Candidate passed deterministic validation. Starting the approved execution.");
+      setValidating(false);
+      setExecuting(true);
       setExecutionResult(null);
       setRetestResult(null);
       setActiveTab("execution");
@@ -106,6 +121,7 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Execution failed.");
     } finally {
+      setValidating(false);
       setExecuting(false);
     }
   };
@@ -259,13 +275,16 @@ export function AttackChainPanel({ assessmentId, targetUrl, onFindingConfirmed }
                   </div>
                   <button
                     onClick={() => handleExecuteChain(selectedCandidate)}
-                    disabled={executing}
+                    disabled={executing || validating}
                     className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-medium rounded-lg flex items-center gap-1.5 shadow-lg shadow-emerald-600/20 transition"
                   >
                     <Play className="w-3.5 h-3.5" />
-                    {executing ? "Executing Safe Chain..." : "Execute Chain"}
+                    {validating ? "Validating..." : executing ? "Executing Safe Chain..." : "Validate & Execute"}
                   </button>
                 </div>
+                {validationMessage && (
+                  <p className="text-xs text-zinc-300" role="status">{validationMessage}</p>
+                )}
 
                 {/* Risk Hypothesis */}
                 <div>

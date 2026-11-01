@@ -660,6 +660,16 @@ class AttackChainExecutor:
                 step_index=idx,
                 extracted_context=extracted_context,
             )
+            step_eval.resource_identifier_provenance = {
+                str(binding.get("parameter") if isinstance(binding, dict) else getattr(binding, "parameter", "")): {
+                    "source_step_id": str(binding.get("source_step_id") if isinstance(binding, dict) else getattr(binding, "source_step_id", "")),
+                    "source_field": str(binding.get("source_field", "response.resource_id") if isinstance(binding, dict) else getattr(binding, "source_field", "response.resource_id")),
+                    "response_sha256": identifier_provenance.get(
+                        f"{binding.get('source_step_id') if isinstance(binding, dict) else getattr(binding, 'source_step_id', '')}.{str(binding.get('source_field', 'response.resource_id') if isinstance(binding, dict) else getattr(binding, 'source_field', 'response.resource_id')).removeprefix('response.')}", {}
+                    ).get("response_sha256"),
+                }
+                for binding in input_bindings
+            }
             step_results.append(step_eval)
 
             if step_eval.verdict == AccessVerdict.CONFIRMED_UNAUTHORIZED_ACCESS:
@@ -838,7 +848,7 @@ class AttackChainExecutor:
         try:
             parsed = json.loads(body_text)
             self._walk_and_extract(parsed, extracted)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             pass
         return extracted
 

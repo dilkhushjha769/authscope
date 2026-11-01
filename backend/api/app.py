@@ -1229,6 +1229,10 @@ class ExecuteAttackChainRequest(BaseModel):
     save_finding: bool = True
 
 
+class ValidateAttackChainRequest(BaseModel):
+    chain: Dict[str, Any]
+
+
 
 def _get_repository() -> FindingRepository:
     """Returns the active FindingRepository (supports test injection and safe SQLite column migration)."""
@@ -3713,6 +3717,22 @@ def get_assessment_attack_chains(assessment_id: str) -> Dict[str, Any]:
         "candidates": candidates_dict,
         "summary": plan.summary,
     }
+
+
+@app.post("/api/assessments/{assessment_id}/attack-chains/validate")
+def validate_assessment_attack_chain(
+    assessment_id: str,
+    req: ValidateAttackChainRequest,
+) -> Dict[str, Any]:
+    """Runs deterministic structural, endpoint and scope validation without sending requests."""
+    repo = _get_repository()
+    session = repo.get_scan_session(assessment_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Assessment {assessment_id} not found.")
+    result = AttackChainValidator(
+        scope_guard=_get_active_scope_guard(), base_url=session.target_url,
+    ).validate_chain(req.chain)
+    return result.model_dump(mode="json")
 
 
 @app.post("/api/assessments/{assessment_id}/attack-chains/execute")

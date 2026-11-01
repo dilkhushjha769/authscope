@@ -54,6 +54,7 @@ class EventType(str, Enum):
     CONNECTION_COMPLETED = "connection_completed"
     ENDPOINT_DISCOVERED = "endpoint_discovered"
     ENDPOINT_DISCOVERY_COMPLETED = "endpoint_discovery_completed"
+    ATTACK_CHAIN_CANDIDATES_PLANNED = "attack_chain_candidates_planned"
     SESSION_VALIDATION_STARTED = "session_validation_started"
     SESSION_VALIDATION_COMPLETED = "session_validation_completed"
     AUTHORIZATION_TEST_STARTED = "authorization_test_started"
