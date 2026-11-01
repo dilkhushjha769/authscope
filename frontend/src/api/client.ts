@@ -21,9 +21,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "TimeoutError") {
-      throw new Error("The AuthScope API did not respond within 20 seconds. Check that the backend is running and retry.");
+      throw new Error("The Cognifence API did not respond within 20 seconds. Check that the backend is running and retry.");
     }
-    throw new Error("Could not reach the AuthScope API. Check that the backend is running.");
+    throw new Error("Could not reach the Cognifence API. Check that the backend is running.");
   }
   const body = (await response.json().catch(() => null)) as unknown;
   if (!response.ok) {

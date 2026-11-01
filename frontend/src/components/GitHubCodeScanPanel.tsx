@@ -115,7 +115,7 @@ function errorMessage(payload: unknown, fallback: string): string {
       "GitHub App setup is incomplete on the backend. Configure the App credentials, App slug, callback URL, and token encryption key.",
     GITHUB_NOT_CONNECTED: "Connect your GitHub account to continue.",
     GITHUB_AUTH_EXPIRED: "Your GitHub authorization expired. Reconnect GitHub and retry.",
-    GITHUB_SESSION_EXPIRED: "Your AuthScope GitHub session expired. Connect GitHub again.",
+    GITHUB_SESSION_EXPIRED: "Your Cognifence GitHub session expired. Connect GitHub again.",
     GITHUB_PERMISSION_DENIED:
       "This account or GitHub App cannot access that repository. Check the selected installation and its repository permissions.",
     GITHUB_APP_PERMISSION:
@@ -233,7 +233,7 @@ export function GitHubCodeScanPanel({
     if (callbackStatus) {
       const notices: Record<string, string> = {
         connected:
-          "GitHub account connected. Install the AuthScope GitHub App on the repositories you want to scan.",
+          "GitHub account connected. Install the Cognifence GitHub App on the repositories you want to scan.",
         installed:
           "GitHub App installation is ready. Select an installation and repository below.",
         not_configured:
@@ -246,7 +246,7 @@ export function GitHubCodeScanPanel({
         install_state_error:
           "The installation could not be verified. Start the install flow again.",
         install_failed:
-          "GitHub installation completed, but AuthScope could not verify repository access.",
+          "GitHub installation completed, but Cognifence could not verify repository access.",
         install_cancelled: "GitHub App installation was cancelled.",
         connect_failed:
           "GitHub sign-in failed. Check the App callback URL and backend configuration.",
@@ -718,7 +718,7 @@ export function GitHubCodeScanPanel({
             Connect GitHub
           </button>
           <p className="text-[11px] text-[#85837c]">
-            GitHub credentials stay on the backend. AuthScope never asks for a password or personal access token.
+            GitHub credentials stay on the backend. Cognifence never asks for a password or personal access token.
           </p>
         </div>
       )}
@@ -727,7 +727,7 @@ export function GitHubCodeScanPanel({
         <>
           {!status.installations.length ? (
             <div className="rounded-lg border border-[#c5aa54]/30 bg-[#c5aa54]/10 p-3 text-xs text-[#f4f2ec]">
-              <p className="font-medium">Install the AuthScope GitHub App</p>
+              <p className="font-medium">Install the Cognifence GitHub App</p>
               <p className="mt-1 text-[11px] text-[#aaa8a1]">
                 Authorization and installation are separate. Choose only the repositories the App may read.
               </p>
@@ -1167,7 +1167,7 @@ export function GitHubCodeScanPanel({
       )}
       <p className="flex items-start gap-1.5 text-[10px] leading-relaxed text-[#85837c]">
         <LockKeyhole className="mt-0.5 h-3 w-3 shrink-0" />
-        Repository contents are treated as untrusted. AuthScope never executes repository code. Only redacted finding excerpts are sent to Gemini.
+        Repository contents are treated as untrusted. Cognifence never executes repository code. Only redacted finding excerpts are sent to Gemini.
       </p>
     </section>
   );

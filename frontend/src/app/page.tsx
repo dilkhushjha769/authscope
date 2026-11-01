@@ -1470,7 +1470,7 @@ export default function Home() {
       const msg =
         rawMsg.toLowerCase().includes("failed to fetch") ||
         rawMsg.toLowerCase().includes("networkerror")
-          ? "Could not reach the AuthScope API on http://localhost:8000. Make sure the backend server is running."
+          ? "Could not reach the Cognifence API on http://localhost:8000. Make sure the backend server is running."
           : rawMsg;
       setError(msg);
       setStatus("ready");
@@ -1791,7 +1791,7 @@ export default function Home() {
 
   const downloadReportJson = () => {
     const payload = summaryData || {
-      id: assessmentId || "authscope-report",
+      id: assessmentId || "cognifence-report",
       target_url: targetUrl,
       status,
       risk_score: riskScore,
@@ -1806,7 +1806,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `authscope-report-${assessmentId || "scan"}.json`;
+    a.download = `cognifence-report-${assessmentId || "scan"}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -1965,10 +1965,10 @@ export default function Home() {
     const reportLines: PdfLine[] = [];
     const targetDisplay = summaryData?.target_url || targetUrl || "http://localhost:3000";
 
-    reportLines.push({ text: "AUTHSCOPE SECURITY ASSESSMENT REPORT", bold: true, size: 15 });
+    reportLines.push({ text: "COGNIFENCE SECURITY ASSESSMENT REPORT", bold: true, size: 15 });
     reportLines.push({ text: `Target / Repository: ${targetDisplay}`, bold: true, size: 10 });
     reportLines.push({
-      text: `Report ID: ${assessmentId || "authscope-scan"}   |   Generated: ${new Date().toISOString()}`,
+      text: `Report ID: ${assessmentId || "cognifence-scan"}   |   Generated: ${new Date().toISOString()}`,
       size: 9,
     });
     reportLines.push({
@@ -2116,7 +2116,7 @@ export default function Home() {
         y -= sz + 5;
       }
       cmds.push(
-        `/F1 8 Tf 1 0 0 1 42 28 Tm (AuthScope Security Report - Page ${pIdx + 1} of ${
+        `/F1 8 Tf 1 0 0 1 42 28 Tm (Cognifence Security Report - Page ${pIdx + 1} of ${
           pages.length
         }) Tj`
       );
@@ -2148,7 +2148,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `authscope-security-report-${assessmentId || "scan"}.pdf`;
+    a.download = `cognifence-security-report-${assessmentId || "scan"}.pdf`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -2621,8 +2621,8 @@ export default function Home() {
       {/* =================================================================== */}
       <aside className="sidebar" aria-label="Workspace navigation">
         <div className="brand">
-          <span className="brand-mark">A</span>
-          <span>AuthScope</span>
+          <span className="brand-mark">C</span>
+          <span>Cognifence</span>
         </div>
 
         <button

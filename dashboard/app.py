@@ -1,4 +1,4 @@
-"""AuthScope — Live AI Security Agent Interface (Streamlit Application).
+"""Cognifence — Live AI Security Agent Interface (Streamlit Application).
 
 Connects directly to the Python security engine (ScopeGuard, RequestExecutor,
 EndpointDiscovery, AuthorizationTester, EvidenceValidator, FindingRepository)
@@ -42,7 +42,7 @@ from dashboard.components.scan_panel import (
 
 
 st.set_page_config(
-    page_title="AuthScope | AI Security Assessment Agent",
+    page_title="Cognifence | AI Security Assessment Agent",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -163,7 +163,7 @@ def _render_top_assessment_header(
 
 
 def main() -> None:
-    """Main entry point for the AuthScope Live AI Security Agent Interface."""
+    """Main entry point for the Cognifence Live AI Security Agent Interface."""
     _init_state()
 
     repo = FindingRepository()
@@ -185,7 +185,7 @@ def main() -> None:
         st.markdown(
             """
             <div style="padding:4px 0 12px 0; border-bottom:1px solid #263248; margin-bottom:12px;">
-                <div style="color:#F9FAFB; font-weight:700; font-size:1.25rem; letter-spacing:-0.01em;">🛡️ AuthScope</div>
+                <div style="color:#F9FAFB; font-weight:700; font-size:1.25rem; letter-spacing:-0.01em;">🛡️ Cognifence</div>
                 <div style="color:#94A3B8; font-size:0.78rem; margin-top:2px;">Evidence-Driven AI Security Agent</div>
             </div>
             """,
@@ -380,7 +380,7 @@ def main() -> None:
     st.markdown(
         """
         <div style="border-top:1px solid #263248; padding-top:14px; margin-bottom:8px;">
-            <span style="color:#F9FAFB; font-weight:600; font-size:1.0rem;">💬 Ask AuthScope About This Assessment</span>
+            <span style="color:#F9FAFB; font-weight:600; font-size:1.0rem;">💬 Ask Cognifence About This Assessment</span>
             <span style="background-color:#1E293B; color:#8B5CF6; border:1px solid #8B5CF655; font-size:0.72rem; font-weight:600; padding:2px 8px; border-radius:4px; margin-left:10px; font-family:monospace;">
                 Deterministic AssessmentQueryAdapter
             </span>
