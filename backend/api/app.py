@@ -2397,6 +2397,17 @@ def _safe_return_origin(url: Optional[str]) -> Optional[str]:
     return None
 
 
+
+def _resolve_callback_url(request: Optional[Request] = None) -> str:
+    """Dynamically resolves the callback URL, auto-detecting cloud host if default is localhost."""
+    url = settings.github_callback_url
+    if ("localhost" in url or "127.0.0.1" in url) and request:
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme or "https"
+        if host and "localhost" not in host and "127.0.0.1" not in host:
+            return f"{proto}://{host}/api/github/callback"
+    return url
+
 def _github_redirect(status_value: str, request: Optional[Request] = None, return_to: Optional[str] = None) -> RedirectResponse:
     target_base = _safe_return_origin(return_to)
     if not target_base and request:
@@ -2423,7 +2434,7 @@ async def github_connect(request: Request, return_to: Optional[str] = None) -> R
     )
     params = {
         "client_id": settings.github_client_id,
-        "redirect_uri": settings.github_callback_url,
+        "redirect_uri": _resolve_callback_url(request),
         "state": state_value,
         "scope": "offline_access",
     }
@@ -2523,7 +2534,7 @@ async def github_callback(
         result.delete_cookie("authscope_return_to", path="/api/github")
         return result
     try:
-        token_data = await service.exchange_code(code)
+        token_data = await service.exchange_code(code, redirect_uri=_resolve_callback_url(request))
         access_token = str(token_data["access_token"])
         profile = await service._profile(access_token)
         user_id = str(profile["id"])

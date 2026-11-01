@@ -223,7 +223,7 @@ class GitHubAppService:
         except ValueError as exc:
             raise GitHubIntegrationError("GITHUB_API_ERROR", "GitHub returned an invalid response.", 502) from exc
 
-    async def exchange_code(self, code: str) -> Dict[str, Any]:
+    async def exchange_code(self, code: str, redirect_uri: Optional[str] = None) -> Dict[str, Any]:
         self.ensure_configured()
         response = await self._request(
             "POST",
@@ -232,7 +232,7 @@ class GitHubAppService:
                 "client_id": settings.github_client_id,
                 "client_secret": settings.github_client_secret,
                 "code": code,
-                "redirect_uri": settings.github_callback_url,
+                "redirect_uri": redirect_uri or settings.github_callback_url,
             },
         )
         try:
