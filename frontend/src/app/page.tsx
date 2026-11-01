@@ -3357,19 +3357,19 @@ export default function Home() {
               <button
                 type="button"
                 onClick={() => setShowRolesModal(true)}
-                className="download-report-btn"
-                style={{ padding: "6px 12px", fontSize: "12px", background: "#262624" }}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#2d2d2a] hover:bg-[#373733] border border-[#41413d] hover:border-[#5fa37f] text-[#f4f2ec] inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Configure and review the four testing identities"
               >
-                <Users size={13} />
+                <Users size={13} className="text-[#86efac]" />
                 <span>Four-Role Status</span>
               </button>
               <button
                 type="button"
                 onClick={() => setShowAttackChainModal(true)}
-                className="download-report-btn"
-                style={{ padding: "6px 12px", fontSize: "12px", background: "#262624" }}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#2d2d2a] hover:bg-[#373733] border border-[#41413d] hover:border-[#5fa37f] text-[#f4f2ec] inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Open Autonomous Attack-Chain Engine"
               >
-                <GitFork size={13} />
+                <GitFork size={13} className="text-[#86efac]" />
                 <span>Attack-Chain Engine</span>
               </button>
               <div className="target-url-pill">
@@ -4062,25 +4062,6 @@ export default function Home() {
       {showAttackChainModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
           <div className="relative w-full max-w-5xl max-h-[92vh] overflow-y-auto rounded-xl bg-[var(--canvas)] border border-[var(--line)] shadow-2xl p-4 sm:p-5 text-left">
-            <div className="flex items-center justify-between mb-3 pb-2.5 border-b border-[var(--line-soft)]">
-              <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
-                <GitFork className="w-3.5 h-3.5 text-[#5fa37f]" />
-                <span>
-                  Target:{" "}
-                  <strong className="text-[var(--text)] font-mono">
-                    {summaryData?.target_url || targetUrl || "http://localhost:3000"}
-                  </strong>
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowAttackChainModal(false)}
-                className="px-3 py-1 rounded-md text-xs font-medium bg-[var(--sidebar)] border border-[var(--line)] text-[var(--text-soft)] hover:text-[var(--text)] hover:border-[var(--muted)] transition-colors flex items-center gap-1.5"
-              >
-                <X className="w-3.5 h-3.5" />
-                <span>Close</span>
-              </button>
-            </div>
             <AttackChainPanel
               assessmentId={assessmentId || activePastScanId || "preset-juice-shop"}
               targetUrl={summaryData?.target_url || targetUrl || "http://localhost:3000"}
@@ -4094,6 +4075,7 @@ export default function Home() {
                   });
                 }
               }}
+              onClose={() => setShowAttackChainModal(false)}
             />
           </div>
         </div>

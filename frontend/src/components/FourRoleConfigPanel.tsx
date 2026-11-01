@@ -200,12 +200,12 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
     <div className="text-[var(--text)] space-y-5">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[var(--line-subtle)] pb-4">
-        <div className="flex items-center gap-3">
-          <div className="p-2.5 rounded-lg bg-[var(--panel)] border border-[var(--line)] text-[#5fa37f]">
-            <Users className="w-5 h-5" />
+        <div className="flex items-center gap-2.5">
+          <div className="p-2 rounded-lg bg-[var(--panel)] border border-[var(--line)] text-[#86efac]">
+            <Users className="w-4 h-4" />
           </div>
           <div>
-            <h3 className="serif-heading text-lg text-[var(--text)]">
+            <h3 className="serif-heading text-base text-[var(--text)]">
               Four-Role Authorization Testing
             </h3>
             <p className="text-xs text-[var(--muted)]">
@@ -219,10 +219,10 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
             type="button"
             onClick={() => void handleQuickConfigureAll()}
             disabled={quickConfiguring || loading}
-            className="px-3 py-1.5 rounded-lg bg-[#5fa37f]/15 hover:bg-[#5fa37f]/25 border border-[#5fa37f]/40 text-[#5fa37f] text-xs font-medium flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50"
+            className="px-2.5 py-1 text-xs font-medium rounded-md bg-[#2d2d2a] hover:bg-[#373733] border border-[#41413d] hover:border-[#5fa37f] text-[#86efac] flex items-center gap-1.5 transition cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
             title="Automatically populate test credentials and owned resources for all 4 personas"
           >
-            <Sparkles className="w-3.5 h-3.5" />
+            <Sparkles className="w-3 h-3 text-[#86efac]" />
             <span>{quickConfiguring ? "Configuring..." : "Quick-Configure All 4 Roles"}</span>
           </button>
 
@@ -276,23 +276,23 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
 
           <div className="flex items-center gap-2 shrink-0">
             <span
-              className={`text-[11px] px-2.5 py-1 rounded-full font-medium border flex items-center gap-1 ${
+              className={`text-[11px] px-2.5 py-0.5 rounded-full font-medium border flex items-center gap-1 ${
                 data.multi_role_ready
-                  ? "bg-[#5fa37f]/15 text-[#5fa37f] border-[#5fa37f]/35"
+                  ? "bg-[#132c1e] text-[#86efac] border-[#2b6443]"
                   : "bg-[var(--panel)] text-[var(--faint)] border-[var(--line)]"
               }`}
             >
-              <ShieldCheck className="w-3 h-3" />
+              <ShieldCheck className="w-3 h-3 text-[#86efac]" />
               BOLA Ready
             </span>
             <span
-              className={`text-[11px] px-2.5 py-1 rounded-full font-medium border flex items-center gap-1 ${
+              className={`text-[11px] px-2.5 py-0.5 rounded-full font-medium border flex items-center gap-1 ${
                 data.four_role_ready
-                  ? "bg-[#5fa37f]/15 text-[#5fa37f] border-[#5fa37f]/35"
+                  ? "bg-[#132c1e] text-[#86efac] border-[#2b6443]"
                   : "bg-[var(--panel)] text-[var(--faint)] border-[var(--line)]"
               }`}
             >
-              <ShieldCheck className="w-3 h-3" />
+              <ShieldCheck className="w-3 h-3 text-[#86efac]" />
               BFLA Ready
             </span>
           </div>
@@ -347,10 +347,10 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
                   <span
                     className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-medium border ${
                       isAnon
-                        ? "bg-[var(--panel)] text-[var(--muted)] border-[var(--line)]"
+                        ? "bg-[#262624] text-[#d0cec8] border-[#41413d]"
                         : isAuth
-                        ? "bg-[#5fa37f]/15 text-[#5fa37f] border-[#5fa37f]/35"
-                        : "bg-[#c5aa54]/15 text-[#c5aa54] border-[#c5aa54]/35"
+                        ? "bg-[#132c1e] text-[#86efac] border-[#2b6443]"
+                        : "bg-[#2f2410] text-[#fde047] border-[#5d491f]"
                     }`}
                   >
                     {isAnon ? "BASELINE" : isAuth ? "AUTHENTICATED" : "NOT SET"}
@@ -489,10 +489,10 @@ export function FourRoleConfigPanel({ onClose, onRolesUpdated }: Props) {
             <button
               type="submit"
               disabled={saving}
-              className="px-4 py-2 bg-[#5fa37f] hover:bg-[#529471] disabled:opacity-50 text-[#102218] text-xs font-semibold rounded-lg flex items-center gap-1.5 transition cursor-pointer shrink-0"
+              className="px-3 py-1.5 bg-[#5fa37f] hover:bg-[#529471] disabled:opacity-50 text-[#102218] text-xs font-semibold rounded-md flex items-center gap-1.5 transition cursor-pointer shrink-0"
             >
               <Save className="w-3.5 h-3.5" />
-              <span>{saving ? "Saving..." : "Save Role Configuration"}</span>
+              <span>{saving ? "Saving..." : "Save Role"}</span>
             </button>
           </div>
         </form>
