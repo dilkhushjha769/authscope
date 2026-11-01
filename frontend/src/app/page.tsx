@@ -4,7 +4,6 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import {
   Check,
   ChevronDown,
-  Code2,
   ChevronRight,
   ChevronUp,
   Copy,
@@ -14,7 +13,6 @@ import {
   Lock,
   Plus,
   Shield,
-  Sparkles,
   Square,
   Sun,
   Moon,
@@ -24,11 +22,6 @@ import {
   AlertTriangle,
   KeyRound,
   RefreshCw,
-  FolderLock,
-  Layers,
-  Tag,
-  Users,
-  GitFork,
 } from "lucide-react";
 import { FourRoleConfigPanel } from "@/components/FourRoleConfigPanel";
 import { AttackChainPanel } from "@/components/AttackChainPanel";
@@ -634,7 +627,6 @@ export default function Home() {
   const [showGitHubModal, setShowGitHubModal] = useState<boolean>(false);
   const [showRolesModal, setShowRolesModal] = useState<boolean>(false);
   const [showAttackChainModal, setShowAttackChainModal] = useState<boolean>(false);
-  const [activeReportTab, setActiveReportTab] = useState<"bugs" | "attack_chains">("bugs");
 
   // Assessment lifecycle states
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
@@ -668,17 +660,10 @@ export default function Home() {
   const [hideWork, setHideWork] = useState<boolean>(false);
   const [severityFilter, setSeverityFilter] = useState<string>("ALL");
   const [categoryFilter, setCategoryFilter] = useState<string>("ALL");
-  const [groupByCategory, setGroupByCategory] = useState<boolean>(false);
   const [showHowAiFound, setShowHowAiFound] = useState<boolean>(false);
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(1);
 
-  // Per-bug Q&A (Gemini API #1) and Code/Fix Enrichment (Gemini API #2)
-  const [bugQuestions, setBugQuestions] = useState<Record<string, string>>({});
-  const [bugChatHistory, setBugChatHistory] = useState<
-    Record<string, { role: "user" | "assistant"; content: string; model?: string }[]>
-  >({});
-  const [bugChatLoading, setBugChatLoading] = useState<Record<string, boolean>>({});
-  const [bugChatError, setBugChatError] = useState<Record<string, string>>({});
+  // Code/Fix Enrichment (Gemini API #2)
   const [bugAiEnrichment, setBugAiEnrichment] = useState<Record<string, BugAIEnrichment>>({});
   const [bugAiLoading, setBugAiLoading] = useState<Record<string, boolean>>({});
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
@@ -1879,19 +1864,6 @@ export default function Home() {
     });
   }, [displayFindings, severityFilter, categoryFilter]);
 
-  const categorizedGroups = useMemo(() => {
-    const map: Record<string, FindingItem[]> = {};
-    for (const finding of filteredFindings) {
-      const cat = normalizeFindingCategory(finding);
-      if (!map[cat]) {
-        map[cat] = [];
-      }
-      map[cat].push(finding);
-    }
-    return Object.keys(map)
-      .map((cat) => ({ category: cat, findings: map[cat] }))
-      .sort((a, b) => b.findings.length - a.findings.length);
-  }, [filteredFindings]);
 
   const durationSeconds = useMemo(() => {
     if (summaryData?.started_at && summaryData?.completed_at) {
@@ -2342,123 +2314,6 @@ export default function Home() {
     return lines.join("\n");
   };
 
-  /**
-   * Gemini API #1: Interactive Question & Answer about a specific bug (also triggers API #2 fix enrichment).
-   */
-  const askGeminiQuestionAboutBug = async (finding: FindingItem, customQuestion?: string) => {
-    const fid = finding.id;
-    const questionText = (customQuestion ?? bugQuestions[fid] ?? "").trim();
-    if (!questionText || bugChatLoading[fid]) return;
-
-    const currentHistory = bugChatHistory[fid] || [];
-    setBugChatLoading((prev) => ({ ...prev, [fid]: true }));
-    setBugChatError((prev) => ({ ...prev, [fid]: "" }));
-
-    // Ensure Gemini API #2 remediation & code fix is also generated for this bug
-    if (!bugAiEnrichment[fid] && !bugAiLoading[fid]) {
-      void generateBugImpactAndFixWithGemini2(finding);
-    }
-
-    try {
-      const fullUrl = resolveFullUrlFound(finding);
-      const enriched = bugAiEnrichment[fid];
-      const codeFix =
-        enriched?.secure_code_fix ||
-        finding.beginner_explanation?.secure_code_example ||
-        finding.proposed_code_fix ||
-        "";
-      const res = await fetch(`${API_BASE_URL}/api/ai/finding-qa`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: finding.beginner_explanation?.simple_title || finding.title,
-          category:
-            finding.beginner_explanation?.technical_name ||
-            finding.vulnerability_category ||
-            finding.vulnerability_type,
-          severity: String(finding.severity || "MEDIUM"),
-          endpoint: fullUrl,
-          http_method: finding.http_method || finding.evidence?.request_method || "GET",
-          source_location: resolveBugSourceLocationLabel(finding),
-          description:
-            finding.beginner_explanation?.what_is_the_problem ||
-            finding.description ||
-            finding.actual_behavior,
-          what_could_happen:
-            enriched?.what_bug_can_do ||
-            finding.beginner_explanation?.what_attacker_can_do ||
-            finding.impact_explanation ||
-            "",
-          request_proof: formatRequestProof(finding),
-          response_proof: formatResponseProof(finding),
-          how_to_fix: extractFixBullets(finding, enriched),
-          secure_code_fix: codeFix,
-          all_findings_summary: buildAllFindingsSummaryText(displayFindings),
-          question: questionText,
-          history: currentHistory.slice(-6).map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-        }),
-      });
-
-      let answerText = "";
-      let modelLabel = "gemini-2.5-flash";
-      if (res.ok) {
-        const payload = await res.json();
-        answerText = String(payload.answer || "").trim();
-        modelLabel = payload.model || modelLabel;
-      }
-      if (!answerText) {
-        answerText = buildGuaranteedBugFixAnswer(questionText, finding, enriched);
-      }
-
-      setBugChatHistory((prev) => ({
-        ...prev,
-        [fid]: [
-          ...currentHistory,
-          { role: "user", content: questionText },
-          {
-            role: "assistant",
-            content: answerText,
-            model: modelLabel,
-          },
-        ],
-      }));
-      if (!customQuestion) {
-        setBugQuestions((prev) => ({ ...prev, [fid]: "" }));
-      }
-    } catch {
-      const fallbackAnswer = buildGuaranteedBugFixAnswer(
-        questionText,
-        finding,
-        bugAiEnrichment[fid]
-      );
-      setBugChatHistory((prev) => ({
-        ...prev,
-        [fid]: [
-          ...currentHistory,
-          { role: "user", content: questionText },
-          {
-            role: "assistant",
-            content: fallbackAnswer,
-            model: "gemini-remediation-engine",
-          },
-        ],
-      }));
-      if (!customQuestion) {
-        setBugQuestions((prev) => ({ ...prev, [fid]: "" }));
-      }
-    } finally {
-      setBugChatLoading((prev) => ({ ...prev, [fid]: false }));
-    }
-  };
-
-  /**
-   * Persistent Bottom ChatGPT / Claude-style Composer Handler:
-   * Answers ANY user query about the discovered bugs, where they are located, and how to fix them
-   * (using Gemini API #1 for Q&A and Gemini API #2 for remediation & code fixes).
-   */
   const submitBottomChatQuery = async (overrideQuestion?: string) => {
     const q = (overrideQuestion ?? globalQuery).trim();
     if (!q || globalChatLoading) return;
@@ -2711,7 +2566,10 @@ export default function Home() {
     if (status === "completed" && displayFindings.length > 0) {
       const top = displayFindings[0];
       if (top && !bugAiEnrichment[top.id] && !bugAiLoading[top.id]) {
-        void generateBugImpactAndFixWithGemini2(top);
+        const timer = setTimeout(() => {
+          void generateBugImpactAndFixWithGemini2(top);
+        }, 50);
+        return () => clearTimeout(timer);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2756,7 +2614,6 @@ export default function Home() {
       finding.vulnerability_name ||
       finding.vulnerability_category ||
       "Authorization issue";
-    const normalizedCategory = normalizeFindingCategory(finding);
     const plainProblem =
       finding.beginner_explanation?.what_is_the_problem ||
       finding.description ||
@@ -2766,7 +2623,6 @@ export default function Home() {
       finding.endpoint ||
       finding.affected_endpoint ||
       "/";
-    const fullUrlFound = resolveFullUrlFound(finding);
     const httpMethod =
       finding.http_method ||
       finding.evidence?.request_method ||
@@ -2796,114 +2652,63 @@ export default function Home() {
             <span className="problem-index-badge">{idx + 1}</span>
             <h2 className="problem-title">{plainTitle}</h2>
           </div>
-          <div className="problem-severity-score flex items-center gap-2">
+          <div className="problem-severity-score">
             <span className={`severity-dot ${sevClass}`} />
             <span className={`severity-name ${sevClass}`}>
               {sevTitle}
             </span>
-            <span className="text-[#aaa8a1] font-mono">
+            <span className="text-[#aaa8a1] font-mono ml-1">
               {cvssForSeverity(sevClass, idx)}
-            </span>
-            <span className="inline-flex items-center gap-1 ml-1 px-2.5 py-0.5 rounded-full text-[11px] font-medium bg-[#20201e] border border-[#41413d] text-[#aaa8a1]">
-              <Tag size={10} className="text-[#5fa37f]" />
-              {normalizedCategory}
             </span>
           </div>
         </div>
 
         <div className="problem-body">
-          {/* Clean Problem & Risk Explanation */}
-          <div className="my-3 p-3.5 rounded-xl bg-[#20201e] border border-[#41413d] text-xs space-y-2.5">
-            <div className="flex items-start gap-2">
-              <span className="text-[#aaa8a1] font-medium shrink-0">Issue:</span>
-              <span className="text-[#f4f2ec] leading-relaxed">
-                <strong className="text-[#f4f2ec]">{categoryLabel}:</strong> {plainProblem}
-              </span>
-            </div>
-            <div className="flex items-start gap-2">
-              <span className="text-[#d89255] font-medium shrink-0">Risk:</span>
-              <span className="text-[#d0cec8] leading-relaxed">{whatBugCanDo}</span>
-            </div>
+          <p className="problem-category-line">
+            <strong>{categoryLabel}:</strong> {plainProblem}
+          </p>
 
-            {/* Location Bar */}
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-2 border-t border-[#333330] font-mono text-[11px] text-[#aaa8a1]">
-              <span>
-                Endpoint: <strong className="text-[#86efac]">[{httpMethod}] {routePath}</strong>
-              </span>
-              {resolveBugSourceLocationLabel(finding) && (
-                <span>
-                  Source: <strong className="text-[#f4f2ec]">{resolveBugSourceLocationLabel(finding)}</strong>
-                </span>
-              )}
-              {fullUrlFound.includes("github.com/") && (
-                <a
-                  href={fullUrlFound}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-[#5fa37f] hover:underline"
-                >
-                  View on GitHub ↗
-                </a>
-              )}
+          <p className="problem-route">
+            {routePath}
+            {resolveBugSourceLocationLabel(finding) ? ` · ${resolveBugSourceLocationLabel(finding)}` : ""}
+          </p>
+
+          {/* Proof (Two-Column Request Sent / Response Received) */}
+          <h3 className="proof-heading">Proof</h3>
+          <p className="proof-sub">Private values have been hidden.</p>
+
+          <div className="proof-box">
+            <div className="proof-col">
+              <div className="proof-col-header">
+                {httpMethod === "SOURCE" ? "SOURCE FILE LOCATION" : "REQUEST SENT"}
+              </div>
+              <pre className="proof-col-pre">{formatRequestProof(finding)}</pre>
+            </div>
+            <div className="proof-col">
+              <div className="proof-col-header">
+                {httpMethod === "SOURCE" ? "VULNERABLE CODE EXCERPT" : "RESPONSE RECEIVED"}
+              </div>
+              <pre className="proof-col-pre">{formatResponseProof(finding)}</pre>
             </div>
           </div>
 
-          {/* Technical HTTP / Code Proof (Collapsible) */}
-          <details className="proof-details my-3 border border-[#41413d] rounded-lg bg-[#20201e]/60 overflow-hidden text-xs">
-            <summary className="px-3.5 py-2 text-xs font-medium text-[#aaa8a1] hover:text-[#f4f2ec] cursor-pointer flex items-center justify-between transition-colors select-none">
-              <span className="flex items-center gap-2">
-                <Code2 size={13} className="text-[#5fa37f]" />
-                <span>Technical Evidence Proof (Request &amp; Response)</span>
-              </span>
-              <span className="text-[11px] text-[#85837c]">Click to expand</span>
-            </summary>
-            <div className="p-3 border-t border-[#333330]">
-              <div className="proof-box mb-0">
-                <div className="proof-col">
-                  <div className="proof-col-header">
-                    {httpMethod === "SOURCE" ? "SOURCE FILE LOCATION" : "REQUEST SENT"}
-                  </div>
-                  <pre className="proof-col-pre">{formatRequestProof(finding)}</pre>
-                </div>
-                <div className="proof-col">
-                  <div className="proof-col-header">
-                    {httpMethod === "SOURCE" ? "VULNERABLE CODE" : "RESPONSE RECEIVED"}
-                  </div>
-                  <pre className="proof-col-pre">{formatResponseProof(finding)}</pre>
-                </div>
-              </div>
-            </div>
-          </details>
+          {/* Green Left-Border Impact & Fix Callout (Figma Image 2) */}
+          <div className="impact-fix-callout">
+            <h4 className="callout-heading">What could happen</h4>
+            <p className="callout-text">{whatBugCanDo}</p>
 
-          {/* How to Fix Section */}
-          <div className="my-3 p-3.5 rounded-xl bg-[#20201e] border border-[#41413d] text-xs space-y-3">
-            <div className="flex items-center justify-between">
-              <h4 className="font-semibold text-[#f4f2ec] flex items-center gap-1.5">
-                <CheckCircle2 size={14} className="text-[#86efac]" />
-                <span>How to Fix</span>
-              </h4>
-              <button
-                type="button"
-                disabled={bugAiLoading[fid]}
-                onClick={() => void generateBugImpactAndFixWithGemini2(finding)}
-                className="inline-flex items-center gap-1 text-[11px] text-[#86efac] hover:underline cursor-pointer disabled:opacity-50"
-              >
-                <Sparkles size={11} />
-                <span>{bugAiLoading[fid] ? "Refreshing..." : "AI Fix"}</span>
-              </button>
-            </div>
-
-            <ul className="space-y-1.5 text-xs text-[#d0cec8]">
+            <h4 className="callout-heading">How to fix it</h4>
+            <ul className="fix-checklist">
               {fixBullets.map((step, sIdx) => (
-                <li key={sIdx} className="flex items-start gap-2">
-                  <Check size={13} className="text-[#86efac] shrink-0 mt-0.5" />
+                <li key={sIdx}>
+                  <Check size={14} className="fix-check-icon" />
                   <span>{step}</span>
                 </li>
               ))}
             </ul>
 
             {secureCodeFix && (
-              <div className="secure-code-container mt-2">
+              <div className="secure-code-container" style={{ marginTop: "16px" }}>
                 <div className="secure-code-header">
                   <span>SECURE CODE FIX</span>
                   <button
@@ -2919,46 +2724,25 @@ export default function Home() {
               </div>
             )}
 
-            <div className="pt-2 border-t border-[#333330] flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+            {assessmentId && !assessmentId.startsWith("preset-") && (
+              <div className="pt-2 mt-2 border-t border-[#333330] flex items-center gap-2">
                 <button
                   type="button"
-                  disabled={bugChatLoading[fid]}
-                  onClick={() => {
-                    setSelectedBugIdForChat(finding.id);
-                    void askGeminiQuestionAboutBug(finding, "How do I fix this bug step by step?");
-                    void submitBottomChatQuery(`How do I fix ${plainTitle} step by step?`);
-                  }}
-                  className="px-2.5 py-1 rounded-md bg-[#2d2d2a] hover:bg-[#373733] border border-[#41413d] hover:border-[#5fa37f] text-[#f4f2ec] text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  disabled={verifyingFindingId === finding.id}
+                  onClick={() => void verifyFix(finding.id)}
+                  className="text-xs text-[#86efac] hover:underline font-medium disabled:opacity-50"
                 >
-                  <Sparkles size={12} className="text-[#86efac]" />
-                  <span>{bugChatLoading[fid] ? "Asking AI..." : "Ask AI how to fix this bug"}</span>
+                  {verifyingFindingId === finding.id
+                    ? "Re-testing fix..."
+                    : finding.retest_status
+                    ? `Verification: ${finding.retest_status}`
+                    : "Verify fix against live target"}
                 </button>
-                {bugChatError[fid] && (
-                  <span className="text-xs text-[#d2675f]">{bugChatError[fid]}</span>
+                {verificationErrors[finding.id] && (
+                  <span className="text-xs text-[#d2675f]">{verificationErrors[finding.id]}</span>
                 )}
               </div>
-
-              {assessmentId && !assessmentId.startsWith("preset-") && (
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={verifyingFindingId === finding.id}
-                    onClick={() => void verifyFix(finding.id)}
-                    className="text-xs text-[#86efac] hover:underline font-medium disabled:opacity-50"
-                  >
-                    {verifyingFindingId === finding.id
-                      ? "Re-testing fix..."
-                      : finding.retest_status
-                      ? `Verification: ${finding.retest_status}`
-                      : "Verify fix against live target"}
-                  </button>
-                  {verificationErrors[finding.id] && (
-                    <span className="text-xs text-[#d2675f]">{verificationErrors[finding.id]}</span>
-                  )}
-                </div>
-              )}
-            </div>
+            )}
           </div>
         </div>
       </section>
@@ -3044,25 +2828,7 @@ export default function Home() {
                     <span>Link GitHub project</span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setShowRolesModal(true)}
-                    className="link-github-btn"
-                    title="Configure 4 testing roles (Anonymous, User A, User B, Admin)"
-                  >
-                    <Users size={13} />
-                    <span>Four-Role Testing</span>
-                  </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setShowAttackChainModal(true)}
-                    className="link-github-btn"
-                    title="Autonomous Multi-Endpoint Attack-Chain Engine"
-                  >
-                    <GitFork size={13} />
-                    <span>Attack-Chain Engine</span>
-                  </button>
 
                   {targetUrl.trim() && (
                     <button
@@ -3216,56 +2982,10 @@ export default function Home() {
         {/* ================================================================= */}
         {status !== "ready" && !isRunningState && (
           <div className="scan-workspace" data-testid="final-assessment-summary">
-            {/* Top Navigation Tabs: Project Bugs | Attack Chains | Four Roles */}
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-6 pb-3 border-b border-[#333330]">
-              <div className="flex items-center bg-[#20201e] p-1 rounded-lg border border-[#41413d] text-xs">
-                <button
-                  type="button"
-                  onClick={() => setActiveReportTab("bugs")}
-                  className={`px-3 py-1.5 rounded-md font-medium transition cursor-pointer flex items-center gap-1.5 ${
-                    activeReportTab === "bugs"
-                      ? "bg-[#2d2d2a] text-[#f4f2ec] border border-[#5a5a55] shadow-xs"
-                      : "text-[#aaa8a1] hover:text-[#f4f2ec]"
-                  }`}
-                >
-                  <Shield size={13} className={activeReportTab === "bugs" ? "text-[#5fa37f]" : ""} />
-                  <span>Project Bugs</span>
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-[#20201e] border border-[#41413d] font-mono text-[#f4f2ec]">
-                    {displayFindings.length}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setActiveReportTab("attack_chains")}
-                  className={`px-3 py-1.5 rounded-md font-medium transition cursor-pointer flex items-center gap-1.5 ${
-                    activeReportTab === "attack_chains"
-                      ? "bg-[#2d2d2a] text-[#f4f2ec] border border-[#5a5a55] shadow-xs"
-                      : "text-[#aaa8a1] hover:text-[#f4f2ec]"
-                  }`}
-                >
-                  <GitFork size={13} className={activeReportTab === "attack_chains" ? "text-[#5fa37f]" : ""} />
-                  <span>Attack Chains</span>
-                </button>
-
-
-              </div>
-
-              <div className="flex items-center gap-2">
-                <div className="target-url-pill font-mono text-xs">
-                  {summaryData?.target_url || targetUrl || "http://localhost:3000"}
-                </div>
-                {status !== "failed" && activeReportTab === "bugs" && (
-                  <button
-                    type="button"
-                    onClick={downloadReportPdf}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[#5fa37f] hover:bg-[#529471] text-[#102218] inline-flex items-center gap-1.5 transition cursor-pointer shrink-0"
-                    title="Download full security report as PDF"
-                  >
-                    <Download size={13} />
-                    <span>Download PDF</span>
-                  </button>
-                )}
+            {/* Top Right Target URL Pill (Image 1) */}
+            <div className="target-url-pill-row">
+              <div className="target-url-pill">
+                {summaryData?.target_url || targetUrl || "http://localhost:3000"}
               </div>
             </div>
 
@@ -3307,7 +3027,7 @@ export default function Home() {
                   }. ${
                     displayFindings[0].beginner_explanation?.what_attacker_can_do ||
                     displayFindings[0].impact_explanation ||
-                    "It could let someone access protected accounts or data."
+                    "It could let someone enter an account without the right password."
                   }`
                 : "No confirmed authorization or security problems were triggered during this scan."}
             </p>
@@ -3348,6 +3068,7 @@ export default function Home() {
 
             {status !== "failed" && (
               <>
+                {/* Risk score strip (Image 1) */}
                 <div className="risk-score-strip">
                   <div className="risk-score-block">
                     <span className="risk-score-number">{riskScore}</span>
@@ -3382,160 +3103,36 @@ export default function Home() {
                   </div>
                 </div>
 
-
-
-                {/* Aesthetic Filter Controls: Severity & Categories (Image 1 Redesign) */}
-                <div className="mb-6 p-2.5 rounded-xl bg-[#20201e] border border-[#383835] flex flex-col gap-2.5">
-                  {/* Row 1: Segmented Severity Filter + Group by Category Toggle */}
-                  <div className="flex flex-wrap items-center justify-between gap-2.5">
-                    <div className="flex items-center bg-[#282826] p-0.5 rounded-lg border border-[#3e3e3a] text-xs">
-                      {[
-                        { key: "ALL", label: "All", count: displayFindings.length, dot: null },
-                        { key: "CRITICAL", label: "Critical", count: severityCounts.CRITICAL, dot: "bg-[#d2675f]" },
-                        { key: "HIGH", label: "High", count: severityCounts.HIGH, dot: "bg-[#d89255]" },
-                        { key: "MEDIUM", label: "Medium", count: severityCounts.MEDIUM, dot: "bg-[#c5aa54]" },
-                        { key: "LOW", label: "Low", count: severityCounts.LOW, dot: "bg-[#5fa37f]" },
-                      ].map((item) => {
-                        const isActive = severityFilter === item.key;
-                        return (
-                          <button
-                            key={item.key}
-                            type="button"
-                            onClick={() => setSeverityFilter(item.key)}
-                            className={`px-2.5 py-1 rounded-md text-xs font-medium transition cursor-pointer flex items-center gap-1.5 ${
-                              isActive
-                                ? "bg-[#333330] text-[#f4f2ec] border border-[#52524d] shadow-xs"
-                                : "text-[#aaa8a1] hover:text-[#f4f2ec] border border-transparent"
-                            }`}
-                          >
-                            {item.dot && <span className={`w-1.5 h-1.5 rounded-full ${item.dot}`} />}
-                            <span>{item.label}</span>
-                            <span className="text-[10px] font-mono opacity-60">({item.count})</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-
+                {/* Severity filter pills row (Image 1) */}
+                <div className="filter-pills-row">
+                  {[
+                    { key: "ALL", label: `All ${displayFindings.length}` },
+                    { key: "CRITICAL", label: `Critical ${severityCounts.CRITICAL}` },
+                    { key: "HIGH", label: `High ${severityCounts.HIGH}` },
+                    { key: "MEDIUM", label: `Medium ${severityCounts.MEDIUM}` },
+                    { key: "LOW", label: `Low ${severityCounts.LOW}` },
+                  ].map((pill) => (
                     <button
+                      key={pill.key}
                       type="button"
-                      onClick={() => setGroupByCategory((prev) => !prev)}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium transition cursor-pointer ${
-                        groupByCategory
-                          ? "border-[#5fa37f] bg-[#5fa37f]/15 text-[#86efac]"
-                          : "border-[#3e3e3a] bg-[#282826] text-[#aaa8a1] hover:text-[#f4f2ec]"
+                      onClick={() => setSeverityFilter(pill.key)}
+                      className={`filter-pill ${
+                        severityFilter === pill.key ? "active" : ""
                       }`}
-                      title="Group findings into categorized sections"
                     >
-                      <Layers size={13} />
-                      <span>{groupByCategory ? "Categorized View" : "Group by Category"}</span>
+                      {pill.label}
                     </button>
-                  </div>
-
-                  {/* Row 2: Aesthetic Horizontal Category Filter Chips */}
-                  {uniqueCategories.length > 0 && (
-                    <div className="flex items-center gap-1.5 pt-2 border-t border-[#2e2e2b] overflow-x-auto text-xs pb-0.5">
-                      <span className="text-[11px] font-medium text-[#85837c] shrink-0 flex items-center gap-1 mr-1">
-                        <Tag size={11} className="text-[#5fa37f]" />
-                        <span>Category:</span>
-                      </span>
-
-                      <button
-                        type="button"
-                        onClick={() => setCategoryFilter("ALL")}
-                        className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 cursor-pointer ${
-                          categoryFilter === "ALL"
-                            ? "bg-[#333330] text-[#86efac] border border-[#5fa37f]/50"
-                            : "bg-[#282826] text-[#aaa8a1] hover:text-[#f4f2ec] border border-[#3e3e3a]"
-                        }`}
-                      >
-                        All Categories ({displayFindings.length})
-                      </button>
-
-                      {uniqueCategories.map((cat) => {
-                        const isActive = categoryFilter === cat;
-                        return (
-                          <button
-                            key={cat}
-                            type="button"
-                            onClick={() => setCategoryFilter(isActive ? "ALL" : cat)}
-                            className={`px-2.5 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 cursor-pointer ${
-                              isActive
-                                ? "bg-[#333330] text-[#86efac] border border-[#5fa37f]/50"
-                                : "bg-[#282826] text-[#aaa8a1] hover:text-[#f4f2ec] border border-[#3e3e3a]"
-                            }`}
-                          >
-                            <span>{cat}</span>
-                            <span className="text-[10px] font-mono opacity-60 ml-1">({categoryCounts[cat]})</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
+                  ))}
                 </div>
 
-                {/* Numbered Problem List (Grouped or Sequential) */}
+                {/* Problem Articles List (Image 1 & 2) */}
                 <div>
-                  {filteredFindings.length === 0 ? (
-                    <div className="p-8 my-4 text-center rounded-xl border border-[#41413d] bg-[#2d2d2a]/50 text-[#aaa8a1] text-xs">
-                      No findings match the selected severity ({severityFilter}) and category ({categoryFilter}) filters.
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSeverityFilter("ALL");
-                          setCategoryFilter("ALL");
-                        }}
-                        className="ml-2 text-[#5fa37f] hover:underline font-medium"
-                      >
-                        Reset filters
-                      </button>
-                    </div>
-                  ) : groupByCategory ? (
-                    categorizedGroups.map((group) => (
-                      <div key={group.category} className="category-group-block mb-10">
-                        <div className="category-group-header flex items-center justify-between pb-2.5 mb-2 border-b border-[#333330]">
-                          <div className="flex items-center gap-2">
-                            <div className="p-1.5 rounded-md bg-[#2d2d2a] border border-[#41413d] text-[#5fa37f]">
-                              <FolderLock size={15} />
-                            </div>
-                            <h3 className="text-sm font-semibold text-[#f4f2ec]">
-                              {group.category}
-                            </h3>
-                            <span className="text-xs px-2 py-0.5 rounded-full bg-[#20201e] border border-[#41413d] text-[#aaa8a1]">
-                              {group.findings.length} bug{group.findings.length === 1 ? "" : "s"}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2.5 text-xs text-[#aaa8a1]">
-                            {group.findings.filter((f) => String(f.severity).toUpperCase() === "CRITICAL").length > 0 && (
-                              <span className="inline-flex items-center gap-1 text-[#d2675f] font-medium">
-                                <span className="w-1.5 h-1.5 rounded-full bg-[#d2675f]" />
-                                {group.findings.filter((f) => String(f.severity).toUpperCase() === "CRITICAL").length} Critical
-                              </span>
-                            )}
-                            {group.findings.filter((f) => String(f.severity).toUpperCase() === "HIGH").length > 0 && (
-                              <span className="inline-flex items-center gap-1 text-[#d89255] font-medium">
-                                <span className="w-1.5 h-1.5 rounded-full bg-[#d89255]" />
-                                {group.findings.filter((f) => String(f.severity).toUpperCase() === "HIGH").length} High
-                              </span>
-                            )}
-                            {group.findings.filter((f) => String(f.severity).toUpperCase() === "MEDIUM").length > 0 && (
-                              <span className="inline-flex items-center gap-1 text-[#c5aa54]">
-                                <span className="w-1.5 h-1.5 rounded-full bg-[#c5aa54]" />
-                                {group.findings.filter((f) => String(f.severity).toUpperCase() === "MEDIUM").length} Medium
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div>
-                          {group.findings.map((finding, idx) => renderProblemCard(finding, idx))}
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    filteredFindings.map((finding, idx) => renderProblemCard(finding, idx))
+                  {filteredFindings.map((finding, idx) =>
+                    renderProblemCard(finding, idx)
                   )}
                 </div>
 
-                {/* How these problems can join together (Image 5) */}
+                {/* How these problems can join together (Image 3) */}
                 {displayFindings.length > 1 && (
                   <section className="join-together-section">
                     <h2 className="join-together-title">
@@ -3595,7 +3192,7 @@ export default function Home() {
                   </section>
                 )}
 
-                {/* How the AI found these (Image 5) */}
+                {/* How the AI found these (Image 3) */}
                 <div className="ai-how-found-row">
                   <button
                     type="button"
@@ -3635,56 +3232,35 @@ export default function Home() {
                   )}
                 </div>
 
-
-
-                {/* Bottom Report Action Buttons (Image 5) */}
+                {/* Bottom Report Action Buttons (Image 3) */}
                 <div className="report-bottom-actions">
                   <button
                     type="button"
                     onClick={downloadReportPdf}
                     className="download-report-btn"
                   >
-                    <Download size={14} />
-                    <span>Download PDF report</span>
+                    Download report
                   </button>
                   <button
                     type="button"
                     onClick={downloadReportJson}
                     className="scan-another-btn"
+                    title="Export raw JSON findings data"
                   >
-                    <Download size={14} />
-                    <span>Download JSON</span>
+                    Export JSON
                   </button>
                   <button
                     type="button"
                     onClick={resetAssessment}
                     className="scan-another-btn"
                   >
-                    <span>Scan another site</span>
+                    Scan another site
                   </button>
                 </div>
               </>
             )}
 
-            {/* TAB 2: ATTACK CHAINS */}
-            {status !== "failed" && activeReportTab === "attack_chains" && (
-              <div className="p-4 sm:p-5 rounded-xl bg-[var(--panel)] border border-[var(--line)]">
-                <AttackChainPanel
-                  assessmentId={assessmentId || activePastScanId || "preset-juice-shop"}
-                  targetUrl={summaryData?.target_url || targetUrl || "http://localhost:3000"}
-                  onFindingConfirmed={() => {
-                    if (assessmentId) {
-                      void selectPastScan({
-                        id: assessmentId,
-                        label: targetUrl || "Current Scan",
-                        target_url: targetUrl || "http://localhost:3000",
-                        status: "COMPLETED",
-                      });
-                    }
-                  }}
-                />
-              </div>
-            )}
+
 
 
           </div>
@@ -3694,7 +3270,7 @@ export default function Home() {
         {/* PERSISTENT CHATGPT / CLAUDE-STYLE AI THREAD & BOTTOM COMPOSER     */}
         {/* Never hides the text field; docked at the bottom during/after scan */}
         {/* ================================================================= */}
-        {status !== "ready" && !isRunningState && (
+        {status === "completed" && displayFindings.length > 0 && (
           <>
             {globalChatHistory.length > 0 && (
               <div className="chatgpt-thread-container">
