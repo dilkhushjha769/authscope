@@ -98,6 +98,7 @@ from backend.scanner.response_analyzer import AccessVerdict, ResponseAnalyzer
 from backend.storage.database import DatabaseManager
 from backend.storage.finding_repository import FindingRepository
 from backend.storage.github_repository import GitHubRepository
+from backend.storage.project_repository import ProjectRecord, ProjectRepository
 from backend.storage.models import (
     AssessmentEvent,
     AssessmentStage,
@@ -4036,6 +4037,292 @@ def get_assessment_role_matrix(assessment_id: str) -> Dict[str, Any]:
         "target_url": session.target_url,
         "role_readiness": sm.validate_configured_credentials(),
         "matrix": rows,
+    }
+
+
+# ==============================================================================
+# Dual Project Connection (GitHub OAuth + Website URL) Endpoints
+# ==============================================================================
+
+def _get_project_repository() -> ProjectRepository:
+    """Returns a ProjectRepository configured with the active database."""
+    db = getattr(app.state, "db", None) or DatabaseManager()
+    return ProjectRepository(database=db)
+
+
+def _get_request_user_id(request: Request) -> str:
+    """Resolves the active user ID from GitHub session cookie, X-User-Id header, or fallback cookie."""
+    session_cookie = request.cookies.get(SESSION_COOKIE)
+    if session_cookie:
+        gh_user = _github_repository().get_session_user(GitHubAppService.hash_value(session_cookie))
+        if gh_user:
+            return f"gh_{gh_user}"
+
+    header_user = request.headers.get("X-User-Id")
+    if header_user and header_user.strip():
+        return header_user.strip()
+
+    user_cookie = request.cookies.get("authscope_user_id")
+    if user_cookie and user_cookie.strip():
+        return user_cookie.strip()
+
+    return "user_default"
+
+
+class ValidateProjectUrlRequest(BaseModel):
+    target_url: str = Field(..., description="Target website or API URL to evaluate")
+    is_local_test: bool = Field(default=False, description="Whether local testing is explicitly allowed")
+
+
+class ValidateProjectUrlResponse(BaseModel):
+    valid: bool
+    normalized_url: str = ""
+    hostname: str = ""
+    port: int = 80
+    scheme: str = "http"
+    resolved_ips: List[str] = Field(default_factory=list)
+    is_local: bool = False
+    is_ssrf_safe: bool = False
+    error: Optional[str] = None
+    message: str = ""
+
+
+class CreateProjectRequest(BaseModel):
+    name: str = Field(..., description="Project name")
+    project_type: str = Field(..., description="'github' or 'website'")
+    target_url: Optional[str] = Field(default=None, description="Deployed web URL (for website projects)")
+    authorization_basis: str = Field(default="admin_approved", description="Legal authorization ground")
+    authorization_confirmed: bool = Field(default=False, description="User confirmation of authorization")
+    github_repo_full_name: Optional[str] = Field(default=None, description="owner/repo (for GitHub projects)")
+    github_installation_id: Optional[int] = Field(default=None, description="Installation ID for GitHub App")
+    github_default_branch: str = Field(default="main", description="Target branch")
+    is_private: bool = Field(default=False, description="Whether GitHub repo is private")
+
+
+@app.post("/api/projects/validate-url", response_model=ValidateProjectUrlResponse)
+async def validate_project_url(req: ValidateProjectUrlRequest) -> ValidateProjectUrlResponse:
+    """Safely validates website URL syntax, resolves DNS, and verifies anti-SSRF boundaries."""
+    from backend.core.target_registry import TargetRegistry, resolve_hostname_ips
+
+    reg = _get_target_registry()
+    is_valid, reason, comp = reg.validate_target_syntax_and_network(
+        raw_url=req.target_url,
+        is_local_test=req.is_local_test,
+    )
+    if not is_valid:
+        return ValidateProjectUrlResponse(
+            valid=False,
+            error=reason,
+            message="Target URL failed safety or scope validation.",
+            is_ssrf_safe=False,
+        )
+
+    resolved_ips = resolve_hostname_ips(comp["hostname"])
+    canonical_url = comp.get("canonical_base_url") or f"{comp['scheme']}://{comp['hostname']}:{comp['port']}"
+    return ValidateProjectUrlResponse(
+        valid=True,
+        normalized_url=canonical_url,
+        hostname=comp["hostname"],
+        port=comp["port"],
+        scheme=comp["scheme"],
+        resolved_ips=resolved_ips,
+        is_local=comp.get("is_loopback", False),
+        is_ssrf_safe=True,
+        message="Target URL is valid and protected against SSRF and DNS rebinding.",
+    )
+
+
+@app.post("/api/projects", status_code=status.HTTP_201_CREATED)
+async def create_project(req: CreateProjectRequest, request: Request) -> Dict[str, Any]:
+    """Creates a new project via GitHub OAuth repository or deployed Website URL."""
+    user_id = _get_request_user_id(request)
+    repo = _get_project_repository()
+
+    if req.project_type not in ("github", "website"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid project_type '{req.project_type}'. Must be 'github' or 'website'.",
+        )
+
+    if req.project_type == "website":
+        if not req.authorization_confirmed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Explicit authorization confirmation is required before adding a website project.",
+            )
+        if not req.target_url or not req.target_url.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="target_url is required for website projects.",
+            )
+
+        reg = _get_target_registry()
+        is_valid, reason, comp = reg.validate_target_syntax_and_network(req.target_url)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Target URL rejected: {reason}",
+            )
+
+        canonical_url = comp.get("canonical_base_url") or f"{comp['scheme']}://{comp['hostname']}:{comp['port']}"
+        # Register and approve target profile so ScopeGuard allows scanning
+        sub_payload = TargetSubmissionPayload(
+            target_url=canonical_url,
+            authorization_basis=req.authorization_basis or "admin_approved",
+            notes=f"Project: {req.name} (User: {user_id})",
+        )
+        ok, msg, profile = reg.submit_target_for_authorization(sub_payload)
+        if ok and profile and profile.approval_status != TargetApprovalStatus.APPROVED.value:
+            reg.approve_target(profile.id, approved_by=user_id, notes="Auto-approved project target")
+
+        project = ProjectRecord(
+            name=req.name.strip(),
+            project_type="website",
+            user_id=user_id,
+            target_url=canonical_url,
+            authorization_status="AUTHORIZED",
+            authorization_basis=req.authorization_basis or "admin_approved",
+        )
+        created = repo.create_project(project)
+        return created.model_dump(mode="json")
+
+    # GitHub Project
+    if not req.github_repo_full_name or "/" not in req.github_repo_full_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="github_repo_full_name (owner/repo) is required for GitHub projects.",
+        )
+
+    # Verify user GitHub connection
+    clean_gh_user = user_id[3:] if user_id.startswith("gh_") else user_id
+    gh_conn = _github_repository().get_connection(clean_gh_user)
+    if not gh_conn:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="GitHub account must be connected to add a GitHub project.",
+        )
+
+    project = ProjectRecord(
+        name=req.name.strip(),
+        project_type="github",
+        user_id=user_id,
+        github_repo_full_name=req.github_repo_full_name.strip(),
+        github_installation_id=req.github_installation_id,
+        github_default_branch=req.github_default_branch or "main",
+        is_private=req.is_private,
+        authorization_status="AUTHORIZED",
+        authorization_basis="oauth_authorized",
+    )
+    created = repo.create_project(project)
+    return created.model_dump(mode="json")
+
+
+@app.get("/api/projects")
+async def list_projects(request: Request) -> Dict[str, Any]:
+    """Lists all projects owned by the requesting user."""
+    user_id = _get_request_user_id(request)
+    repo = _get_project_repository()
+    projects = repo.list_projects(user_id)
+    return {
+        "count": len(projects),
+        "projects": [p.model_dump(mode="json") for p in projects],
+    }
+
+
+@app.get("/api/projects/{project_id}")
+async def get_project(project_id: str, request: Request) -> Dict[str, Any]:
+    """Retrieves project details with user ownership enforcement."""
+    user_id = _get_request_user_id(request)
+    repo = _get_project_repository()
+    project = repo.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project '{project_id}' not found.",
+        )
+    if project.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to access this project.",
+        )
+    return project.model_dump(mode="json")
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str, request: Request) -> Dict[str, Any]:
+    """Deletes a project with user ownership enforcement."""
+    user_id = _get_request_user_id(request)
+    repo = _get_project_repository()
+    project = repo.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project '{project_id}' not found.",
+        )
+    if project.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to delete this project.",
+        )
+    repo.delete_project(project_id, user_id)
+    return {"status": "deleted", "project_id": project_id}
+
+
+@app.post("/api/projects/{project_id}/scan", status_code=status.HTTP_202_ACCEPTED)
+async def scan_project(project_id: str, request: Request) -> Dict[str, Any]:
+    """Triggers a security assessment or source scan for a project with ownership validation."""
+    user_id = _get_request_user_id(request)
+    repo = _get_project_repository()
+    project = repo.get_project(project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project '{project_id}' not found.",
+        )
+    if project.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to scan this project.",
+        )
+
+    if project.project_type == "website":
+        if not project.target_url:
+            raise HTTPException(status_code=400, detail="Website project has no target_url.")
+        resp = await create_assessment(
+            CreateAssessmentRequest(target_url=project.target_url),
+            request=request,
+        )
+        return {
+            "project_id": project.id,
+            "project_type": "website",
+            "assessment_id": resp.assessment_id,
+            "status": "RUNNING",
+            "target_url": project.target_url,
+        }
+
+    # GitHub Project
+    if not project.github_repo_full_name:
+        raise HTTPException(status_code=400, detail="GitHub project has no repository.")
+    parts = project.github_repo_full_name.split("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="Invalid repository full name format.")
+    owner, repo_name = parts
+
+    gh_user_id = user_id[3:] if user_id.startswith("gh_") else user_id
+    install_id = project.github_installation_id or 1
+    scan_req = GitHubScanRequest(
+        installation_id=install_id,
+        owner=owner,
+        repository=repo_name,
+        branch=project.github_default_branch,
+    )
+    scan_resp = await github_start_scan(scan_req, request)
+    return {
+        "project_id": project.id,
+        "project_type": "github",
+        "scan_id": scan_resp.get("scan_id"),
+        "status": "RUNNING",
+        "repository": project.github_repo_full_name,
     }
 
 

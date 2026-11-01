@@ -29,6 +29,7 @@ import {
   Users,
   GitFork,
 } from "lucide-react";
+import { AddProjectModal } from "@/components/AddProjectModal";
 import { FourRoleConfigPanel } from "@/components/FourRoleConfigPanel";
 import { AttackChainPanel } from "@/components/AttackChainPanel";
 import {
@@ -633,6 +634,16 @@ export default function Home() {
   const [showGitHubModal, setShowGitHubModal] = useState<boolean>(false);
   const [showRolesModal, setShowRolesModal] = useState<boolean>(false);
   const [showAttackChainModal, setShowAttackChainModal] = useState<boolean>(false);
+  const [showAddProjectModal, setShowAddProjectModal] = useState<boolean>(false);
+
+  const handleProjectCreated = (project: any, websiteUrl?: string) => {
+    if (project.project_type === "website" && websiteUrl) {
+      setTargetUrl(websiteUrl);
+      void startAssessment(websiteUrl);
+    } else if (project.project_type === "github") {
+      setShowGitHubModal(true);
+    }
+  };
 
   // Assessment lifecycle states
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
@@ -3104,6 +3115,16 @@ export default function Home() {
 
         <button
           type="button"
+          onClick={() => setShowAddProjectModal(true)}
+          className="new-scan-btn mb-2 bg-[#5fa37f]/15 border border-[#5fa37f]/30 hover:bg-[#5fa37f]/25 text-[#7ad49f]"
+          title="Connect GitHub or Add Website URL"
+        >
+          <Plus size={14} />
+          <span>Add Project</span>
+        </button>
+
+        <button
+          type="button"
           onClick={resetAssessment}
           className="new-scan-btn"
         >
@@ -3161,6 +3182,16 @@ export default function Home() {
                 className="start-form"
               >
                 <div className="github-pill-row">
+                  <button
+                    type="button"
+                    onClick={() => setShowAddProjectModal(true)}
+                    className="link-github-btn bg-[#23382b] border-[#3d694b] text-[#7ad49f]"
+                    title="Connect GitHub repository or Add Website URL"
+                  >
+                    <Plus size={13} />
+                    <span>Add Project</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => setShowGitHubModal(true)}
@@ -4080,6 +4111,15 @@ export default function Home() {
           </div>
         </div>
       )}
+
+      {/* =================================================================== */}
+      {/* DUAL PROJECT CONNECTION MODAL (GitHub OAuth + Website URL)           */}
+      {/* =================================================================== */}
+      <AddProjectModal
+        isOpen={showAddProjectModal}
+        onClose={() => setShowAddProjectModal(false)}
+        onProjectCreated={handleProjectCreated}
+      />
 
       {/* =================================================================== */}
       {/* TARGET AUTHORIZATION & SCOPE REVIEW MODAL                           */}

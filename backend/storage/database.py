@@ -203,6 +203,22 @@ CREATE TABLE IF NOT EXISTS github_scan_events (
     timestamp TEXT NOT NULL,
     metadata_json TEXT NOT NULL DEFAULT '{}'
 );
+
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    project_type TEXT NOT NULL CHECK(project_type IN ('github', 'website')),
+    user_id TEXT NOT NULL,
+    target_url TEXT,
+    github_repo_full_name TEXT,
+    github_installation_id INTEGER,
+    github_default_branch TEXT DEFAULT 'main',
+    is_private BOOLEAN DEFAULT 0,
+    authorization_status TEXT NOT NULL DEFAULT 'AUTHORIZED',
+    authorization_basis TEXT NOT NULL DEFAULT 'admin_approved',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 INDEXES_SQL = """
@@ -218,6 +234,8 @@ CREATE INDEX IF NOT EXISTS idx_github_sessions_user ON github_sessions(github_us
 CREATE INDEX IF NOT EXISTS idx_github_scans_user ON github_scans(github_user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_github_scan_events_scan ON github_scan_events(scan_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_github_one_active_scan_per_user ON github_scans(github_user_id) WHERE status = 'RUNNING';
+CREATE INDEX IF NOT EXISTS idx_projects_user_id ON projects(user_id);
+CREATE INDEX IF NOT EXISTS idx_projects_type ON projects(project_type);
 """
 
 SCHEMA_SQL = TABLES_SQL + "\n" + INDEXES_SQL

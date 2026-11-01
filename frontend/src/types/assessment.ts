@@ -496,3 +496,54 @@ export interface RoleMatrixItem {
   finding_id?: string | null;
   severity?: string | null;
 }
+
+
+// =============================================================================
+// Dual Project Connection (GitHub OAuth + Website URL) Types
+// =============================================================================
+
+export interface ProjectRecord {
+  id: string;
+  name: string;
+  project_type: "github" | "website";
+  user_id: string;
+  target_url?: string | null;
+  github_repo_full_name?: string | null;
+  github_installation_id?: number | null;
+  github_default_branch: string;
+  is_private: boolean;
+  authorization_status: string;
+  authorization_basis: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ValidateProjectUrlPayload {
+  target_url: string;
+  is_local_test?: boolean;
+}
+
+export interface ValidateProjectUrlResponse {
+  valid: boolean;
+  normalized_url?: string;
+  hostname?: string;
+  port?: number;
+  scheme?: string;
+  resolved_ips?: string[];
+  is_local?: boolean;
+  is_ssrf_safe?: boolean;
+  error?: string | null;
+  message?: string;
+}
+
+export interface CreateProjectPayload {
+  name: string;
+  project_type: "github" | "website";
+  target_url?: string;
+  authorization_basis?: string;
+  authorization_confirmed?: boolean;
+  github_repo_full_name?: string;
+  github_installation_id?: number;
+  github_default_branch?: string;
+  is_private?: boolean;
+}
