@@ -531,10 +531,12 @@ export function GitHubCodeScanPanel({
   };
 
   const connect = () => {
-    window.location.href = api("/api/github/connect");
+    const returnUrl = encodeURIComponent(window.location.origin);
+    window.location.href = api(`/api/github/connect?return_to=${returnUrl}`);
   };
   const install = () => {
-    window.location.href = api("/api/github/install");
+    const returnUrl = encodeURIComponent(window.location.origin);
+    window.location.href = api(`/api/github/install?return_to=${returnUrl}`);
   };
 
   const disconnect = async () => {

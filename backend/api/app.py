@@ -1538,11 +1538,15 @@ cors_origins_list = (
     else [origin.strip() for origin in str(settings.cors_origins).split(",") if origin.strip()]
 )
 
+if settings.github_frontend_url and settings.github_frontend_url.rstrip("/") not in cors_origins_list:
+    cors_origins_list.append(settings.github_frontend_url.rstrip("/"))
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins_list,
+    allow_origin_regex=r"^https:\/\/([a-zA-Z0-9-]+\.)*vercel\.app$|^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
@@ -2335,7 +2339,13 @@ def _github_user_id(request: Request) -> str:
 
 
 def _require_frontend_origin(request: Request) -> None:
-    origin = (request.headers.get("origin") or "").rstrip("/")
+    origin = (request.headers.get("origin") or request.headers.get("referer") or "").rstrip("/")
+    if not origin:
+        return
+    from urllib.parse import urlparse
+    parsed = urlparse(origin)
+    origin_base = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else origin
+
     allowed = {
         settings.github_frontend_url.rstrip("/"),
         "http://localhost:3000",
@@ -2347,9 +2357,17 @@ def _require_frontend_origin(request: Request) -> None:
         allowed.update(o.rstrip("/") for o in settings.cors_origins)
     elif isinstance(settings.cors_origins, str):
         allowed.update(o.strip().rstrip("/") for o in settings.cors_origins.split(",") if o.strip())
-    if origin and origin not in allowed:
-        raise HTTPException(status_code=403, detail={"code": "CSRF_REJECTED", "message": "Request origin was not accepted."})
+    if origin_base in allowed or origin in allowed:
+        return
+    if parsed.netloc.endswith(".vercel.app") or "vercel.app" in parsed.netloc:
+        return
+    raise HTTPException(status_code=403, detail={"code": "CSRF_REJECTED", "message": "Request origin was not accepted."})
 
+
+
+def _github_cookie_samesite() -> str:
+    # Cross-site cookie (Vercel frontend -> Render backend) requires SameSite=None and Secure=True
+    return "none" if _github_cookie_secure() else "lax"
 
 def _github_cookie_secure() -> bool:
     return settings.github_session_cookie_secure or settings.authscope_env.lower() not in {"development", "dev", "local"}
@@ -2359,25 +2377,37 @@ def _raise_github_error(exc: GitHubIntegrationError) -> None:
     raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
-def _github_redirect(status_value: str, request: Optional[Request] = None) -> RedirectResponse:
-    target_base = settings.github_frontend_url.rstrip("/")
-    if request:
-        ref = (request.headers.get("referer") or request.headers.get("origin") or "").rstrip("/")
-        if ref.startswith("http://localhost:3000") or ref.startswith("http://127.0.0.1:3000"):
-            target_base = "http://localhost:3000"
-        elif ref.startswith("http://localhost:3001") or ref.startswith("http://127.0.0.1:3001"):
-            target_base = "http://localhost:3001"
+def _github_redirect(status_value: str, request: Optional[Request] = None, return_to: Optional[str] = None) -> RedirectResponse:
+    target_base = (return_to or "").rstrip("/")
+    if not target_base and request:
+        cookie_return = request.cookies.get("authscope_return_to")
+        if cookie_return:
+            target_base = cookie_return.rstrip("/")
+        else:
+            ref = (request.headers.get("referer") or request.headers.get("origin") or "").rstrip("/")
+            if ref.startswith("http://localhost:3000") or ref.startswith("http://127.0.0.1:3000"):
+                target_base = "http://localhost:3000"
+            elif ref.startswith("http://localhost:3001") or ref.startswith("http://127.0.0.1:3001"):
+                target_base = "http://localhost:3001"
+            elif ".vercel.app" in ref:
+                from urllib.parse import urlparse
+                p = urlparse(ref)
+                if p.scheme and p.netloc:
+                    target_base = f"{p.scheme}://{p.netloc}"
+    if not target_base:
+        target_base = settings.github_frontend_url.rstrip("/")
     return RedirectResponse(f"{target_base}/?github_status={quote(status_value)}", status_code=303)
 
 
 @app.get("/api/github/connect")
-async def github_connect() -> RedirectResponse:
+async def github_connect(request: Request, return_to: Optional[str] = None) -> RedirectResponse:
     """Starts the GitHub App user authorization flow with one-time, browser-bound state."""
     service = _github_service()
+    ref = return_to or request.headers.get("referer") or request.headers.get("origin") or ""
     try:
         service.ensure_configured()
     except GitHubIntegrationError:
-        return _github_redirect("not_configured")
+        return _github_redirect("not_configured", request, return_to=ref)
     state_value = new_random_value()
     _github_repository().save_oauth_state(
         service.hash_value(state_value), "oauth", (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
@@ -2391,8 +2421,17 @@ async def github_connect() -> RedirectResponse:
     response = RedirectResponse(f"https://github.com/login/oauth/authorize?{urlencode(params)}", status_code=302)
     response.set_cookie(
         STATE_COOKIE, state_value, max_age=600, httponly=True, secure=_github_cookie_secure(),
-        samesite="lax", path="/api/github",
+        samesite=_github_cookie_samesite(), path="/api/github",
     )
+    if ref and ("vercel.app" in ref or "localhost" in ref or "127.0.0.1" in ref):
+        from urllib.parse import urlparse
+        p = urlparse(ref)
+        if p.scheme and p.netloc:
+            clean_origin = f"{p.scheme}://{p.netloc}"
+            response.set_cookie(
+                "authscope_return_to", clean_origin, max_age=600, httponly=True, secure=_github_cookie_secure(),
+                samesite=_github_cookie_samesite(), path="/api/github",
+            )
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -2414,7 +2453,7 @@ async def github_install(request: Request) -> RedirectResponse:
     response = RedirectResponse(url, status_code=302)
     response.set_cookie(
         STATE_COOKIE, state_value, max_age=600, httponly=True, secure=_github_cookie_secure(),
-        samesite="lax", path="/api/github",
+        samesite=_github_cookie_samesite(), path="/api/github",
     )
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -2453,19 +2492,23 @@ async def github_callback(
         else:
             result = _github_redirect("install_cancelled")
         result.delete_cookie(STATE_COOKIE, path="/api/github")
+        result.delete_cookie("authscope_return_to", path="/api/github")
         return result
     if error:
         repository.consume_oauth_state(state_hash, "oauth")
         result = _github_redirect("denied")
         result.delete_cookie(STATE_COOKIE, path="/api/github")
+        result.delete_cookie("authscope_return_to", path="/api/github")
         return result
     if not code:
         result = _github_redirect("callback_error")
         result.delete_cookie(STATE_COOKIE, path="/api/github")
+        result.delete_cookie("authscope_return_to", path="/api/github")
         return result
     if not repository.consume_oauth_state(state_hash, "oauth"):
         result = _github_redirect("state_error")
         result.delete_cookie(STATE_COOKIE, path="/api/github")
+        result.delete_cookie("authscope_return_to", path="/api/github")
         return result
     try:
         token_data = await service.exchange_code(code)
@@ -2489,11 +2532,12 @@ async def github_callback(
         result = _github_redirect("connected")
         result.set_cookie(
             SESSION_COOKIE, session_value, max_age=7 * 24 * 60 * 60, httponly=True,
-            secure=_github_cookie_secure(), samesite="lax", path="/api/github",
+            secure=_github_cookie_secure(), samesite=_github_cookie_samesite(), path="/api/github",
         )
     except GitHubIntegrationError:
         result = _github_redirect("connect_failed")
     result.delete_cookie(STATE_COOKIE, path="/api/github")
+    result.delete_cookie("authscope_return_to", path="/api/github")
     result.headers["Cache-Control"] = "no-store"
     return result
 
