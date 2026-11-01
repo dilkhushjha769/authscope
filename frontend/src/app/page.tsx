@@ -2920,7 +2920,7 @@ export default function Home() {
                 }}
                 className="start-form"
               >
-                <div className="start-action-pills-row">
+                <div className="start-action-pills-row flex flex-wrap items-center gap-2 mb-3">
                   <input
                     ref={startScreenFileInputRef}
                     type="file"
@@ -2931,37 +2931,37 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => startScreenFileInputRef.current?.click()}
-                    className="start-action-pill"
+                    className="start-action-pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                     title="Upload local project (.ZIP) or source code"
                   >
-                    <Upload size={13} className="text-[#5fa37f]" />
+                    <Upload size={13} className="text-[#5fa37f] shrink-0" />
                     <span>Upload file</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => setShowGitHubModal(true)}
-                    className="start-action-pill"
+                    className="start-action-pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <GitBranch size={13} className="text-[#5fa37f]" />
+                    <GitBranch size={13} className="text-[#5fa37f] shrink-0" />
                     <span>Link GitHub project</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => setShowRolesModal(true)}
-                    className="start-action-pill"
+                    className="start-action-pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <Users size={13} className="text-[#5fa37f]" />
+                    <Users size={13} className="text-[#5fa37f] shrink-0" />
                     <span>Four-Role Testing</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => setShowAttackChainModal(true)}
-                    className="start-action-pill"
+                    className="start-action-pill inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <Share2 size={13} className="text-[#5fa37f]" />
+                    <Share2 size={13} className="text-[#5fa37f] shrink-0" />
                     <span>Attack-Chain Engine &gt;</span>
                   </button>
 
@@ -3329,13 +3329,13 @@ export default function Home() {
 
                 {/* Attack-Chain Engine Summary Card (Figma Image 9) */}
                 <div
-                  className="attack-chain-summary-trigger"
+                  className="attack-chain-summary-trigger flex items-center justify-between p-3.5 mt-5 border border-[var(--line)] rounded-xl bg-[var(--panel)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   onClick={() => setShowAttackChainModal(true)}
                   role="button"
                   tabIndex={0}
                 >
                   <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-lg bg-[var(--surface-hover)] text-[#5fa37f]">
+                    <div className="p-2 rounded-lg bg-[var(--surface-hover)] text-[#5fa37f] shrink-0">
                       <GitBranch size={16} />
                     </div>
                     <div>
@@ -3343,7 +3343,7 @@ export default function Home() {
                       <div className="text-xs text-[var(--muted)]">See how separate problems could be joined together.</div>
                     </div>
                   </div>
-                  <ChevronRight size={16} className="text-[var(--muted)]" />
+                  <ChevronRight size={16} className="text-[var(--muted)] shrink-0" />
                 </div>
 
                 {/* Two outline buttons side-by-side (Figma Image 9) */}
@@ -3351,17 +3351,17 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => setShowAttackChainModal(true)}
-                    className="outline-action-btn"
+                    className="outline-action-btn inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <GitBranch size={15} className="text-[#5fa37f]" />
+                    <GitBranch size={15} className="text-[#5fa37f] shrink-0" />
                     <span>Attack-Chain Engine</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowRolesModal(true)}
-                    className="outline-action-btn"
+                    className="outline-action-btn inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs font-medium text-[var(--text)] hover:border-[var(--accent)] hover:bg-[var(--surface-hover)] transition cursor-pointer"
                   >
-                    <Users size={15} className="text-[#5fa37f]" />
+                    <Users size={15} className="text-[#5fa37f] shrink-0" />
                     <span>Four-Role Authorization Testing</span>
                   </button>
                 </div>
